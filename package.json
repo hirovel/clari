@@ -1,0 +1,19 @@
+{
+  "name": "agent-kernel",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "lint": "biome check .",
+    "check": "tsc --noEmit && biome check . && vitest run",
+    "chat": "tsx cli/chat.ts",
+    "replay": "tsx cli/replay.ts"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.0.0",
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^3.0.0"
+  }
+}

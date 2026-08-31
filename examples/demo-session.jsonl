@@ -1,0 +1,6 @@
+{"type":"session/start","at":"2026-08-30T10:00:00Z","model":"deepseek-chat","system":"你是一个简洁的助手。"}
+{"type":"user/message","at":"2026-08-30T10:00:05Z","text":"读一下 a.txt"}
+{"type":"assistant/message","at":"2026-08-30T10:00:07Z","text":"我看看。","toolCalls":[{"id":"c1","name":"read","args":{"path":"a.txt"}}],"stopReason":"tool","usage":{"inputTokens":42,"outputTokens":18}}
+{"type":"tool/result","at":"2026-08-30T10:00:07Z","callId":"c1","name":"read","content":"hello world","isError":false}
+{"type":"session/interrupt","at":"2026-08-30T10:00:09Z"}
+{"type":"assistant/message","at":"2026-08-30T10:00:09Z","text":"文件内容是","toolCalls":[],"stopReason":"aborted"}

@@ -1,0 +1,73 @@
+import { describe, expect, it } from "vitest";
+import { feedChunk, finishAcc, newAcc } from "../src/provider.js";
+
+// SSE 累积是纯函数,不碰网络即可测:这是把流解析从 fetch 里拆出来的全部理由。
+describe("stream accumulation", () => {
+  it("文本增量拼接 + finish_reason=stop → end", () => {
+    const acc = newAcc();
+    expect(feedChunk(acc, { choices: [{ delta: { content: "你" } }] })).toBe("你");
+    expect(feedChunk(acc, { choices: [{ delta: { content: "好" } }] })).toBe("好");
+    feedChunk(acc, { choices: [{ delta: {}, finish_reason: "stop" }] });
+    feedChunk(acc, { choices: [], usage: { prompt_tokens: 10, completion_tokens: 2 } });
+
+    const turn = finishAcc(acc, false);
+    expect(turn).toEqual({
+      text: "你好",
+      toolCalls: [],
+      stopReason: "end",
+      usage: { inputTokens: 10, outputTokens: 2 },
+    });
+  });
+
+  it("tool_calls 按 index 分片累积,参数 JSON 跨 chunk 拼合", () => {
+    const acc = newAcc();
+    feedChunk(acc, {
+      choices: [
+        {
+          delta: {
+            tool_calls: [{ index: 0, id: "c1", function: { name: "read", arguments: '{"pa' } }],
+          },
+        },
+      ],
+    });
+    feedChunk(acc, {
+      choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: 'th":"a.txt"}' } }] } }],
+    });
+    feedChunk(acc, { choices: [{ delta: {}, finish_reason: "tool_calls" }] });
+
+    const turn = finishAcc(acc, false);
+    expect(turn.stopReason).toBe("tool");
+    expect(turn.toolCalls).toEqual([{ id: "c1", name: "read", args: { path: "a.txt" } }]);
+  });
+
+  it("参数 JSON 残缺不抛错,包成 __unparsed 交给工具层回喂(Q9)", () => {
+    const acc = newAcc();
+    feedChunk(acc, {
+      choices: [
+        {
+          delta: {
+            tool_calls: [{ index: 0, id: "c1", function: { name: "read", arguments: '{"broken' } }],
+          },
+        },
+      ],
+    });
+    const turn = finishAcc(acc, false);
+    expect(turn.toolCalls[0]?.args).toEqual({ __unparsed: '{"broken' });
+  });
+
+  it("aborted:保留半截文本,丢弃未完成的 toolCalls(Q11)", () => {
+    const acc = newAcc();
+    feedChunk(acc, { choices: [{ delta: { content: "我正在" } }] });
+    feedChunk(acc, {
+      choices: [
+        {
+          delta: {
+            tool_calls: [{ index: 0, id: "c1", function: { name: "bash", arguments: "{" } }],
+          },
+        },
+      ],
+    });
+    const turn = finishAcc(acc, true);
+    expect(turn).toMatchObject({ text: "我正在", toolCalls: [], stopReason: "aborted" });
+  });
+});
