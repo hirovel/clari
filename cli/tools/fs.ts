@@ -4,27 +4,31 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { defineTool } from "../../src/tools.js";
-import { keepHead, type TruncationPolicy } from "./truncate.js";
+import { capLineLength, keepHead, type TruncationPolicy } from "./truncate.js";
 
-export function createReadTool(opts: { truncate?: TruncationPolicy } = {}) {
+export function createReadTool(opts: { truncate?: TruncationPolicy; maxLineChars?: number } = {}) {
+  // 保头+分页是全行业共识(Q29 调查:pi/Claude Code/opencode/Cline 现行版一致,保尾无一家)。
   const truncate = opts.truncate ?? keepHead();
+  const capLine = capLineLength(opts.maxLineChars ?? 2000);
   return defineTool({
     name: "read",
     description:
-      "读取文本文件。返回带行号的内容。超限时按截断策略保留一部分并注明,可用 offset/limit 分段读取。",
+      "读取文本文件。返回带行号的内容。超限时按截断策略保留一部分并注明续读 offset;" +
+      "超长行截断到固定字符数。",
     parameters: Type.Object({
       path: Type.String({ description: "文件路径,相对或绝对" }),
       offset: Type.Optional(Type.Number({ description: "起始行号,从 1 开始" })),
       limit: Type.Optional(Type.Number({ description: "最多返回的行数" })),
     }),
     async execute(args) {
-      const lines = readFileSync(resolve(args.path), "utf8").split("\n");
+      const lines = capLine(readFileSync(resolve(args.path), "utf8")).split("\n");
       const start = Math.max(1, args.offset ?? 1);
       const slice = lines.slice(start - 1, args.limit ? start - 1 + args.limit : undefined);
       const numbered = slice.map((l, i) => `${start + i}\t${l}`).join("\n");
       const t = truncate(numbered);
       if (!t.truncated) return t.text;
-      return `${t.text}\n[${t.note ?? "已截断"};文件共 ${lines.length} 行,用 offset/limit 分段读取其余部分]`;
+      const shown = t.text.split("\n").length;
+      return `${t.text}\n[${t.note ?? "已截断"};文件共 ${lines.length} 行,用 offset=${start + shown} 继续]`;
     },
   });
 }

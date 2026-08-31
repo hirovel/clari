@@ -77,6 +77,18 @@ export function keepBothEnds(
   };
 }
 
+/**
+ * 单行长度上限(Q29):压扁超长行(压缩产物/单行 JSON),防止一行吃穿字节预算。
+ * 与头尾策略正交,在策略之前应用。
+ */
+export function capLineLength(maxChars: number): (text: string) => string {
+  return (text) =>
+    text
+      .split("\n")
+      .map((l) => (l.length > maxChars ? `${l.slice(0, maxChars)}…[行截断至 ${maxChars} 字符]` : l))
+      .join("\n");
+}
+
 function fits(output: string, lineCount: number, maxLines: number, maxBytes: number): boolean {
   return lineCount <= maxLines && bytes(output) <= maxBytes;
 }

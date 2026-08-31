@@ -1,5 +1,9 @@
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { keepBothEnds, keepHead, keepTail } from "../cli/tools/truncate.js";
+import { createReadTool } from "../cli/tools/fs.js";
+import { capLineLength, keepBothEnds, keepHead, keepTail } from "../cli/tools/truncate.js";
 
 const lines = (n: number) => Array.from({ length: n }, (_, i) => `line-${i + 1}`).join("\n");
 
@@ -38,5 +42,35 @@ describe("truncation policies", () => {
     const t = keepTail({ maxLines: 100, maxBytes: 300 })(fat);
     expect(t.truncated).toBe(true);
     expect(Buffer.byteLength(t.text, "utf8")).toBeLessThanOrEqual(300);
+  });
+
+  it("capLineLength:超长行截到上限并加标记,短行不动(Q29)", () => {
+    const cap = capLineLength(10);
+    expect(cap("short\n" + "y".repeat(30))).toBe(`short\n${"y".repeat(10)}…[行截断至 10 字符]`);
+  });
+});
+
+describe("readTool 截断行为(Q29)", () => {
+  const ctx = { signal: new AbortController().signal };
+
+  function tempFile(content: string): string {
+    const path = join(mkdtempSync(join(tmpdir(), "kernel-read-")), "f.txt");
+    writeFileSync(path, content, "utf8");
+    return path;
+  }
+
+  it("超长行被压扁(压缩产物不再吃穿字节预算)", async () => {
+    const path = tempFile(`a\n${"z".repeat(5000)}\nb`);
+    const read = createReadTool({ maxLineChars: 100 });
+    const out = await read.execute({ path }, ctx);
+    expect(out).toContain("…[行截断至 100 字符]");
+    expect(out.split("\n")[1]?.length).toBeLessThan(200);
+  });
+
+  it("行数截断时给出具体的续读 offset", async () => {
+    const path = tempFile(Array.from({ length: 10 }, (_, i) => `L${i + 1}`).join("\n"));
+    const read = createReadTool({ truncate: keepHead({ maxLines: 3 }) });
+    const out = await read.execute({ path }, ctx);
+    expect(out).toContain("用 offset=4 继续");
   });
 });
