@@ -1,32 +1,36 @@
 // 文件三工具:read / write / edit。内核对它们一无所知(Q2),从 CLI 层注入。
+// read 的截断策略可换(Q28):默认保头,自定义策略经 createReadTool 注入。
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { defineTool } from "../../src/tools.js";
+import { keepHead, type TruncationPolicy } from "./truncate.js";
 
-const MAX_READ_BYTES = 50 * 1024;
+export function createReadTool(opts: { truncate?: TruncationPolicy } = {}) {
+  const truncate = opts.truncate ?? keepHead();
+  return defineTool({
+    name: "read",
+    description:
+      "读取文本文件。返回带行号的内容。超限时按截断策略保留一部分并注明,可用 offset/limit 分段读取。",
+    parameters: Type.Object({
+      path: Type.String({ description: "文件路径,相对或绝对" }),
+      offset: Type.Optional(Type.Number({ description: "起始行号,从 1 开始" })),
+      limit: Type.Optional(Type.Number({ description: "最多返回的行数" })),
+    }),
+    async execute(args) {
+      const lines = readFileSync(resolve(args.path), "utf8").split("\n");
+      const start = Math.max(1, args.offset ?? 1);
+      const slice = lines.slice(start - 1, args.limit ? start - 1 + args.limit : undefined);
+      const numbered = slice.map((l, i) => `${start + i}\t${l}`).join("\n");
+      const t = truncate(numbered);
+      if (!t.truncated) return t.text;
+      return `${t.text}\n[${t.note ?? "已截断"};文件共 ${lines.length} 行,用 offset/limit 分段读取其余部分]`;
+    },
+  });
+}
 
-export const readTool = defineTool({
-  name: "read",
-  description:
-    "读取文本文件。返回带行号的内容。超过 50KB 只返回开头并注明,可用 offset/limit 分段读取。",
-  parameters: Type.Object({
-    path: Type.String({ description: "文件路径,相对或绝对" }),
-    offset: Type.Optional(Type.Number({ description: "起始行号,从 1 开始" })),
-    limit: Type.Optional(Type.Number({ description: "最多返回的行数" })),
-  }),
-  async execute(args) {
-    const lines = readFileSync(resolve(args.path), "utf8").split("\n");
-    const start = Math.max(1, args.offset ?? 1);
-    const slice = lines.slice(start - 1, args.limit ? start - 1 + args.limit : undefined);
-    let out = slice.map((l, i) => `${start + i}\t${l}`).join("\n");
-    if (Buffer.byteLength(out, "utf8") > MAX_READ_BYTES) {
-      out = truncateToBytes(out, MAX_READ_BYTES);
-      out += `\n[已截断:文件共 ${lines.length} 行,用 offset/limit 分段读取其余部分]`;
-    }
-    return out;
-  },
-});
+/** 默认实例:保头截断 —— 文件开头是结构所在。 */
+export const readTool = createReadTool();
 
 export const writeTool = defineTool({
   name: "write",
@@ -63,11 +67,3 @@ export const editTool = defineTool({
     return `已替换 ${args.path} 中的一处文本。`;
   },
 });
-
-function truncateToBytes(s: string, maxBytes: number): string {
-  let out = s;
-  while (Buffer.byteLength(out, "utf8") > maxBytes) {
-    out = out.slice(0, Math.floor(out.length * 0.9));
-  }
-  return out;
-}

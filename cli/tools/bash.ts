@@ -1,36 +1,50 @@
-// bash 工具(Q25,照抄 pi 方案):Windows 找 Git Bash,打断杀进程树,输出保尾截断。
+// bash 工具(Q25,照抄 pi 方案):Windows 找 Git Bash,打断杀进程树。
+// 截断策略可换(Q28):默认保尾,自定义策略经 createBashTool 注入。
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { defineTool } from "../../src/tools.js";
+import { keepTail, type TruncationPolicy } from "./truncate.js";
 
-const MAX_LINES = 2000;
-const MAX_BYTES = 50 * 1024;
+export function createBashTool(opts: { truncate?: TruncationPolicy } = {}) {
+  const truncate = opts.truncate ?? keepTail();
+  return defineTool({
+    name: "bash",
+    description:
+      "在当前工作目录执行 bash 命令,返回 stdout 与 stderr 合并输出。" +
+      "输出超限时按截断策略保留一部分,全量写入临时文件并附路径。",
+    parameters: Type.Object({
+      command: Type.String({ description: "要执行的 bash 命令" }),
+    }),
+    async execute(args, ctx) {
+      const shell = findBash();
+      if (!shell) {
+        throw new Error(
+          "找不到 bash。可选方案:1. 安装 Git for Windows;2. 设环境变量 KERNEL_SHELL 指向 bash 可执行文件。",
+        );
+      }
+      const { output, exitCode, aborted } = await run(shell, args.command, ctx.signal);
+      const shown = applyTruncation(output, truncate);
+      if (aborted) throw new Error(`命令已被打断。已产出的输出:\n${shown}`);
+      if (exitCode !== 0) throw new Error(`${shown}\n命令退出码 ${exitCode}`);
+      return shown || "(无输出)";
+    },
+  });
+}
 
-export const bashTool = defineTool({
-  name: "bash",
-  description:
-    "在当前工作目录执行 bash 命令,返回 stdout 与 stderr 合并输出。" +
-    `输出超过 ${MAX_LINES} 行或 ${MAX_BYTES / 1024}KB 时只保留尾部,全量写入临时文件并附路径。`,
-  parameters: Type.Object({
-    command: Type.String({ description: "要执行的 bash 命令" }),
-  }),
-  async execute(args, ctx) {
-    const shell = findBash();
-    if (!shell) {
-      throw new Error(
-        "找不到 bash。可选方案:1. 安装 Git for Windows;2. 设环境变量 KERNEL_SHELL 指向 bash 可执行文件。",
-      );
-    }
-    const { output, exitCode, aborted } = await run(shell, args.command, ctx.signal);
-    const shown = truncateTail(output);
-    if (aborted) throw new Error(`命令已被打断。已产出的输出:\n${shown}`);
-    if (exitCode !== 0) throw new Error(`${shown}\n命令退出码 ${exitCode}`);
-    return shown || "(无输出)";
-  },
-});
+/** 默认实例:保尾截断 —— 命令输出的错误与结论通常在末尾。 */
+export const bashTool = createBashTool();
+
+function applyTruncation(output: string, truncate: TruncationPolicy): string {
+  const t = truncate(output);
+  if (!t.truncated) return t.text.trimEnd();
+  // 全量落盘是透明度要求,与策略无关:被截掉的部分永远找得回来。
+  const fullPath = join(mkdtempSync(join(tmpdir(), "kernel-bash-")), "output.txt");
+  writeFileSync(fullPath, output, "utf8");
+  return `${t.text.trimEnd()}\n[${t.note ?? "输出已截断"}。完整输出:${fullPath}]`;
+}
 
 function findBash(): string | null {
   if (process.env.KERNEL_SHELL) return process.env.KERNEL_SHELL;
@@ -87,23 +101,4 @@ function run(
       resolvePromise({ output, exitCode: code ?? -1, aborted });
     });
   });
-}
-
-function truncateTail(output: string): string {
-  const lines = output.split("\n");
-  const withinLines = lines.length <= MAX_LINES;
-  const withinBytes = Buffer.byteLength(output, "utf8") <= MAX_BYTES;
-  if (withinLines && withinBytes) return output.trimEnd();
-
-  const fullPath = join(mkdtempSync(join(tmpdir(), "kernel-bash-")), "output.txt");
-  writeFileSync(fullPath, output, "utf8");
-
-  let tail = lines.slice(-MAX_LINES);
-  let text = tail.join("\n");
-  while (Buffer.byteLength(text, "utf8") > MAX_BYTES && tail.length > 1) {
-    tail = tail.slice(Math.ceil(tail.length / 10));
-    text = tail.join("\n");
-  }
-  const from = lines.length - tail.length + 1;
-  return `${text.trimEnd()}\n[显示第 ${from}-${lines.length} 行,共 ${lines.length} 行。完整输出:${fullPath}]`;
 }
