@@ -88,7 +88,14 @@ export function finishAcc(acc: StreamAcc, aborted: boolean): AssistantTurn {
     // 参数 JSON 解析失败不在这里报错:原样透传,让工具层校验并回喂模型(Q9)。
     args: safeParse(tc.argsJson),
   }));
-  const stopReason: StopReason = aborted ? "aborted" : toolCalls.length > 0 ? "tool" : "end";
+  // length(Q26):调用保留在 turn 里 —— 循环需要逐个补错误应答,但绝不执行。
+  const stopReason: StopReason = aborted
+    ? "aborted"
+    : acc.finishReason === "length"
+      ? "length"
+      : toolCalls.length > 0
+        ? "tool"
+        : "end";
   return {
     text: acc.text,
     toolCalls: aborted ? [] : toolCalls,

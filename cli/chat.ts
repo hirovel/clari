@@ -1,10 +1,13 @@
-// D1 冒烟:裸对话(无工具)端到端 —— 用户输入→事件日志→投影→provider 流式→事件日志。
+// coding agent 壳:内核 + 四工具(Q2 的第一个组装示例)。
 // 用法:设好 DEEPSEEK_API_KEY 后 pnpm chat
-import { createInterface } from "node:readline/promises";
-import { now } from "../src/events.js";
+// 运行中继续输入 = 插话(注入时点由 steering 槽决定,Q20);输入 /stop = 即时打断(Q11)。
+import { createInterface } from "node:readline";
+import { Agent } from "../src/agent.js";
+import type { AgentEvent } from "../src/events.js";
 import { EventLog } from "../src/log.js";
-import { deriveMessages } from "../src/messages.js";
 import { openaiCompat } from "../src/provider.js";
+import { bashTool } from "./tools/bash.js";
+import { editTool, readTool, writeTool } from "./tools/fs.js";
 
 const apiKey = process.env.DEEPSEEK_API_KEY;
 if (!apiKey) {
@@ -21,34 +24,61 @@ const provider = openaiCompat({
 const sessionFile = `sessions/${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`;
 const log = new EventLog(sessionFile);
 
-// 透明度的第一版:UI 就是事件流本身的订阅者,别无信道。
-log.subscribe((e) => {
-  if (e.type === "assistant/message" && e.usage) {
-    process.stdout.write(`\n  [${e.usage.inputTokens}→${e.usage.outputTokens} tok]\n`);
-  }
-});
+// UI 是事件流的订阅者(Q6),不在数据流主路径上。
+log.subscribe(render);
 
 log.append({
   type: "session/start",
-  at: now(),
+  at: new Date().toISOString(),
   model: provider.model,
-  system: "你是一个简洁的助手。",
+  system:
+    "你是一个在用户机器上工作的编程助手。工作目录即当前目录。" +
+    "优先用 read/edit 做精确修改,用 bash 执行命令与搜索。回答简洁。",
 });
-console.log(`会话日志: ${sessionFile}(Ctrl+C 退出)\n`);
 
-const rl = createInterface({ input: process.stdin, output: process.stdout });
-while (true) {
-  const text = (await rl.question("> ")).trim();
-  if (!text) continue;
-  log.append({ type: "user/message", at: now(), text });
+console.log(`会话日志: ${sessionFile}`);
+console.log("运行中输入 = 插话;/stop = 打断;Ctrl+C = 退出\n");
 
-  try {
-    const turn = await provider.complete(deriveMessages(log.events), [], {
-      onDelta: (d) => process.stdout.write(d),
-    });
-    log.append({ type: "assistant/message", at: now(), ...turn });
-  } catch (err) {
-    // provider 抛出的只有真实意外(网络断/HTTP 错)。打印后继续,REPL 不因一次请求失败而死。
-    console.error(`\n请求失败: ${(err as Error).message}`);
+const agent = new Agent({
+  log,
+  provider,
+  tools: [readTool, writeTool, editTool, bashTool],
+  onDelta: (d) => process.stdout.write(d),
+});
+
+const rl = createInterface({ input: process.stdin, output: process.stdout, prompt: "> " });
+rl.prompt();
+rl.on("line", (line) => {
+  const text = line.trim();
+  if (!text) {
+    rl.prompt();
+    return;
+  }
+  if (text === "/stop") {
+    agent.interrupt();
+    return;
+  }
+  if (agent.running) {
+    void agent.prompt(text);
+    console.log("  [已排队,将按 steering 策略注入]");
+    return;
+  }
+  void agent
+    .prompt(text)
+    .catch((err: Error) => console.error(`\n请求失败: ${err.message}`))
+    .finally(() => rl.prompt());
+});
+
+function render(e: AgentEvent): void {
+  if (e.type === "assistant/message") {
+    if (e.text) process.stdout.write("\n");
+    for (const tc of e.toolCalls) console.log(`  → ${tc.name} ${JSON.stringify(tc.args)}`);
+    if (e.usage) console.log(`  [${e.usage.inputTokens}→${e.usage.outputTokens} tok]`);
+    if (e.stopReason === "aborted") console.log("  [已打断]");
+  }
+  if (e.type === "tool/result") {
+    const mark = e.isError ? "✗" : "✓";
+    const oneline = e.content.length > 300 ? `${e.content.slice(0, 300)}…` : e.content;
+    console.log(`  ${mark} ${e.name}: ${oneline.replaceAll("\n", "\n    ")}`);
   }
 }

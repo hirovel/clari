@@ -16,7 +16,8 @@ export type Usage = {
 export type StopReason =
   | "end" // 模型自然结束,不再调工具 —— 循环的终点(Q8 untilIdle)
   | "tool" // 模型请求了工具调用,循环继续
-  | "aborted"; // 用户打断(Q11):已流出的半截文本仍然入日志,不丢真相
+  | "aborted" // 用户打断(Q11):已流出的半截文本仍然入日志,不丢真相
+  | "length"; // 输出被 token 上限截断(Q26):工具调用一律不执行,回喂重发指令
 
 export type AgentEvent =
   | {
