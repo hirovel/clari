@@ -9,6 +9,7 @@ export type AgentOptions = {
   provider: Provider;
   tools: Tool[];
   slots?: TurnDeps["slots"];
+  compaction?: TurnDeps["compaction"];
   onDelta?: (textDelta: string) => void;
 };
 
@@ -48,6 +49,7 @@ export class Agent {
       signal: this.ac.signal,
       drainQueue: () => this.queue.splice(0),
       ...(this.opts.slots && { slots: this.opts.slots }),
+      ...(this.opts.compaction && { compaction: this.opts.compaction }),
       ...(this.opts.onDelta && { onDelta: this.opts.onDelta }),
     });
     try {

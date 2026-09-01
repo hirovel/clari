@@ -45,7 +45,25 @@ export type AgentEvent =
       /** 错误也是结果(Q9):校验失败/执行异常/被打断,一律以 result 回喂,不抛出循环。 */
       isError: boolean;
     }
-  | { type: "session/interrupt"; at: string };
+  | { type: "session/interrupt"; at: string }
+  | {
+      /**
+       * 压缩(Q31):追加事件,永不改写历史。投影读取它决定跳过什么、注入什么。
+       * summary+coversFrom/coversUpTo = 摘要覆盖一段事件;cleared = 这些下标的工具结果换成占位文本。
+       * 两组字段可以同时出现(pipeline 策略的产物)。
+       */
+      type: "compaction";
+      at: string;
+      summary?: string;
+      /** 覆盖起点(含)。默认 1;首条用户消息豁免时为其下标+1。 */
+      coversFrom?: number;
+      /** 覆盖终点(不含)。events[coversFrom, coversUpTo) 被摘要取代。 */
+      coversUpTo?: number;
+      /** 被清除的 tool/result 事件下标。 */
+      cleared?: number[];
+      /** 压缩前的估算 token,审计用。 */
+      tokensBefore?: number;
+    };
 
 export function now(): string {
   return new Date().toISOString();

@@ -1,7 +1,8 @@
+import { type CompactionStrategy, estimateAfter, type PreservationPolicy } from "./compaction.js";
 import { now, type ToolCall } from "./events.js";
 import type { EventLog } from "./log.js";
 import { deriveMessages } from "./messages.js";
-import type { Provider, ToolDef } from "./provider.js";
+import type { AssistantTurn, Provider, ToolDef } from "./provider.js";
 import { type Tool, validateArgs } from "./tools.js";
 
 // ---------- 策略槽(Q27:全部是开放接口,内置实现无特权,自定义实现从外部注入) ----------
@@ -49,7 +50,53 @@ export type TurnDeps = {
   drainQueue?: () => string[];
   signal?: AbortSignal;
   onDelta?: (textDelta: string) => void;
+  /** 压缩配置(Q33):给了就启用自动触发与溢出恢复。 */
+  compaction?: CompactionConfig;
 };
+
+export type CompactionConfig = {
+  strategy: CompactionStrategy;
+  window: number;
+  /**
+   * 阈值 = window − reserveTokens(绝对余量制)。
+   * 余量的用途:装下一次模型输出 + 摘要调用的开销,不随窗口变大而变大。
+   */
+  reserveTokens?: number;
+  preservation?: PreservationPolicy;
+  auto?: boolean;
+  /** 识别 provider 的上下文溢出错误。默认按常见错误文案匹配。 */
+  isOverflow?: (err: Error) => boolean;
+};
+
+const DEFAULT_RESERVE = 32000;
+
+function defaultIsOverflow(err: Error): boolean {
+  return /context|token|length|exceed/i.test(err.message) && /max|limit|exceed/i.test(err.message);
+}
+
+/** 达到阈值时运行策略并落盘压缩事件。返回是否取得实际进展。 */
+async function compactIfNeeded(
+  deps: TurnDeps,
+  cfg: CompactionConfig,
+  force: boolean,
+): Promise<boolean> {
+  const threshold = cfg.window - (cfg.reserveTokens ?? DEFAULT_RESERVE);
+  const before = estimateAfter(deps.log.events);
+  if (!force && before <= threshold) return false;
+  const payload = await cfg.strategy({
+    events: deps.log.events,
+    window: cfg.window,
+    targetTokens: threshold,
+    provider: deps.provider,
+    ...(cfg.preservation && { preservation: cfg.preservation }),
+    ...(deps.signal && { signal: deps.signal }),
+  });
+  if (!payload) return false;
+  // 进展门:压缩必须真的变小,否则不落盘也不许重试。
+  if (estimateAfter(deps.log.events, payload) >= before) return false;
+  deps.log.append({ type: "compaction", at: now(), ...payload });
+  return true;
+}
 
 const LENGTH_NOTICE = "未执行:响应被输出 token 上限截断,参数可能不完整。请重新发起这次工具调用。";
 
@@ -70,11 +117,29 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   }));
   let steps = 0;
 
+  let overflowRecovered = false;
   while (true) {
-    const turn = await provider.complete(deriveMessages(log.events), defs, {
-      ...(onDelta && { onDelta }),
-      ...(signal && { signal }),
-    });
+    // 自动压缩检查(Q33):每次模型请求前,占用超阈值即压。
+    if (deps.compaction && deps.compaction.auto !== false) {
+      await compactIfNeeded(deps, deps.compaction, false);
+    }
+
+    let turn: AssistantTurn;
+    try {
+      turn = await provider.complete(deriveMessages(log.events), defs, {
+        ...(onDelta && { onDelta }),
+        ...(signal && { signal }),
+      });
+    } catch (err) {
+      // 溢出恢复(Q33):压缩取得进展才许重试,且只重试一次。
+      const cfg = deps.compaction;
+      const overflow = cfg && (cfg.isOverflow ?? defaultIsOverflow)(err as Error);
+      if (!overflow || overflowRecovered) throw err;
+      overflowRecovered = true;
+      const progressed = await compactIfNeeded(deps, cfg, true);
+      if (!progressed) throw err;
+      continue;
+    }
     log.append({ type: "assistant/message", at: now(), ...turn });
     steps += 1;
 
