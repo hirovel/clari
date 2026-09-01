@@ -3,6 +3,7 @@
 //
 // 它不打网络、不改文件,只做 EventLog.load() → deriveMessages()。
 // 存在的意义:让"模型到底看见了什么"这个问题永远有一个可执行的答案。
+import { contextBreakdown } from "../src/context.js";
 import { EventLog } from "../src/log.js";
 import { deriveMessages } from "../src/messages.js";
 
@@ -36,7 +37,15 @@ for (const m of messages) {
 }
 
 console.log(`\n${"─".repeat(64)}`);
-console.log("以上就是下一次请求发给模型的全部内容。日志之外,别无来源。\n");
+const b = contextBreakdown(log.events, Number(process.env.KERNEL_CONTEXT_WINDOW ?? 131072));
+console.log(`构成(估算 ${b.estimatedTokens} tok,占窗口 ${Math.round(b.usedShare * 100)}%):`);
+for (const p of b.parts) {
+  console.log(
+    `  ${Math.round(p.share * 100)}%`.padStart(5) +
+      `  ${p.tokens} tok · ${p.count} 条 · ${p.label}`,
+  );
+}
+console.log("\n以上就是下一次请求发给模型的全部内容。日志之外,别无来源。\n");
 
 function indent(s: string): string {
   return s

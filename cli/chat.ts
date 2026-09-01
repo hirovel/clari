@@ -3,6 +3,7 @@
 // 运行中继续输入 = 插话(注入时点由 steering 槽决定,Q20);输入 /stop = 即时打断(Q11)。
 import { createInterface } from "node:readline";
 import { Agent } from "../src/agent.js";
+import { contextBreakdown } from "../src/context.js";
 import type { AgentEvent } from "../src/events.js";
 import { EventLog } from "../src/log.js";
 import { openaiCompat } from "../src/provider.js";
@@ -36,8 +37,10 @@ log.append({
     "优先用 read/edit 做精确修改,用 bash 执行命令与搜索。回答简洁。",
 });
 
+const contextWindow = Number(process.env.KERNEL_CONTEXT_WINDOW ?? 131072);
+
 console.log(`会话日志: ${sessionFile}`);
-console.log("运行中输入 = 插话;/stop = 打断;Ctrl+C = 退出\n");
+console.log("运行中输入 = 插话;/stop = 打断;/context = 上下文构成;Ctrl+C = 退出\n");
 
 const agent = new Agent({
   log,
@@ -58,6 +61,11 @@ rl.on("line", (line) => {
     agent.interrupt();
     return;
   }
+  if (text === "/context") {
+    printContext();
+    rl.prompt();
+    return;
+  }
   if (agent.running) {
     void agent.prompt(text);
     console.log("  [已排队,将按 steering 策略注入]");
@@ -69,11 +77,36 @@ rl.on("line", (line) => {
     .finally(() => rl.prompt());
 });
 
+// 上下文构成投影(Q34):展示的就是将要发送的,与消息投影同源,没有第二套口径。
+function printContext(): void {
+  const b = contextBreakdown(log.events, contextWindow);
+  console.log(
+    `\n上下文构成(估算 ${b.estimatedTokens} tok / 窗口 ${b.window},占 ${pct(b.usedShare)})`,
+  );
+  if (b.measuredTokens !== undefined) {
+    console.log(`上次请求实测输入:${b.measuredTokens} tok`);
+  }
+  for (const p of b.parts) {
+    const bar = "█".repeat(Math.max(1, Math.round(p.share * 24))).padEnd(24);
+    console.log(
+      `  ${bar} ${pct(p.share).padStart(4)}  ${p.tokens} tok · ${p.count} 条 · ${p.label}`,
+    );
+  }
+  console.log("");
+}
+
+function pct(share: number): string {
+  return `${Math.round(share * 100)}%`;
+}
+
 function render(e: AgentEvent): void {
   if (e.type === "assistant/message") {
     if (e.text) process.stdout.write("\n");
     for (const tc of e.toolCalls) console.log(`  → ${tc.name} ${JSON.stringify(tc.args)}`);
-    if (e.usage) console.log(`  [${e.usage.inputTokens}→${e.usage.outputTokens} tok]`);
+    if (e.usage) {
+      const used = pct(e.usage.inputTokens / contextWindow);
+      console.log(`  [${e.usage.inputTokens}→${e.usage.outputTokens} tok · 上下文已用 ${used}]`);
+    }
     if (e.stopReason === "aborted") console.log("  [已打断]");
   }
   if (e.type === "tool/result") {
