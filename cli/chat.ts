@@ -77,8 +77,8 @@ function render(e: AgentEvent): void {
     if (e.stopReason === "aborted") console.log("  [已打断]");
   }
   if (e.type === "tool/result") {
+    // 默认完整显示,不折叠(Q34):折叠只能是用户主动开启的选项,不是行业式的默认隐藏。
     const mark = e.isError ? "✗" : "✓";
-    const oneline = e.content.length > 300 ? `${e.content.slice(0, 300)}…` : e.content;
-    console.log(`  ${mark} ${e.name}: ${oneline.replaceAll("\n", "\n    ")}`);
+    console.log(`  ${mark} ${e.name}: ${e.content.replaceAll("\n", "\n    ")}`);
   }
 }
