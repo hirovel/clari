@@ -9,8 +9,13 @@ export type ToolCall = {
 };
 
 export type Usage = {
+  /** 本次请求的全部输入 token(含命中缓存的部分)。 */
   inputTokens: number;
   outputTokens: number;
+  /** 输入中命中缓存的部分。各家字段名不同,适配器归一到这里。 */
+  cacheReadTokens?: number;
+  /** 输出中属于推理(thinking)的部分。 */
+  reasoningTokens?: number;
 };
 
 export type StopReason =
@@ -35,6 +40,11 @@ export type AgentEvent =
       toolCalls: ToolCall[];
       stopReason: StopReason;
       usage?: Usage;
+      /**
+       * 推理内容(thinking 模型)。模型可见:带工具的多轮里,DeepSeek 要求原样回传,缺失即 400;
+       * 对人也可见 —— 透明度第一,思考过程不隐藏。
+       */
+      reasoning?: string;
     }
   | {
       type: "tool/result";
@@ -46,6 +56,8 @@ export type AgentEvent =
       isError: boolean;
     }
   | { type: "session/interrupt"; at: string }
+  /** 会话中切换模型。只给人看(不投影):此后的 assistant 消息由新模型生成。 */
+  | { type: "session/model"; at: string; model: string }
   | {
       /**
        * 压缩(Q31):追加事件,永不改写历史。投影读取它决定跳过什么、注入什么。

@@ -7,7 +7,7 @@ import type { AgentEvent, ToolCall } from "./events.js";
 export type Message =
   | { role: "system"; content: string }
   | { role: "user"; content: string }
-  | { role: "assistant"; content: string; toolCalls: ToolCall[] }
+  | { role: "assistant"; content: string; toolCalls: ToolCall[]; reasoning?: string }
   | { role: "tool"; callId: string; name: string; content: string; isError: boolean };
 
 export const CLEARED_PLACEHOLDER = "[此工具结果已被清除以节省上下文;原文完整保留在会话日志中]";
@@ -61,7 +61,12 @@ export function deriveMessages(events: readonly AgentEvent[]): Message[] {
         messages.push({ role: "user", content: e.text });
         break;
       case "assistant/message":
-        messages.push({ role: "assistant", content: e.text, toolCalls: e.toolCalls });
+        messages.push({
+          role: "assistant",
+          content: e.text,
+          toolCalls: e.toolCalls,
+          ...(e.reasoning && { reasoning: e.reasoning }),
+        });
         break;
       case "tool/result":
         messages.push({
@@ -73,6 +78,7 @@ export function deriveMessages(events: readonly AgentEvent[]): Message[] {
         });
         break;
       case "session/interrupt":
+      case "session/model":
       case "compaction":
         break;
     }

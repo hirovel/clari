@@ -19,9 +19,11 @@ const messages = deriveMessages(log.events);
 console.log(`\n事件 ${log.events.length} 条  →  模型可见消息 ${messages.length} 条`);
 
 // 只入日志、不进投影的事件 —— "只给人看"的那一类,单独点名。
-const humanOnly = log.events.filter((e) => e.type === "session/interrupt");
+const humanOnly = log.events.filter(
+  (e) => e.type === "session/interrupt" || e.type === "session/model",
+);
 if (humanOnly.length > 0) {
-  console.log(`其中 ${humanOnly.length} 条只给人看(不投影): session/interrupt`);
+  console.log(`其中 ${humanOnly.length} 条只给人看(不投影): session/interrupt、session/model`);
 }
 console.log("─".repeat(64));
 

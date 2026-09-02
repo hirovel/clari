@@ -18,6 +18,8 @@ export type ProviderConfig = {
   models: string[];
   contextWindow?: number;
   maxTokens?: number;
+  /** thinking 模型的推理字段名(DeepSeek 为 reasoning_content),带工具多轮时必须原样回传。 */
+  reasoningField?: string;
 };
 
 export type KernelConfig = {
@@ -37,6 +39,7 @@ export const CONFIG_TEMPLATE: KernelConfig = {
       apiKeyEnv: "DEEPSEEK_API_KEY",
       models: ["deepseek-chat", "deepseek-reasoner"],
       contextWindow: 131072,
+      reasoningField: "reasoning_content",
     },
     anthropic: {
       protocol: "anthropic",
@@ -70,6 +73,43 @@ export function loadConfig(path = DEFAULT_CONFIG_PATH): { config: KernelConfig; 
     throw new Error(`配置文件解析失败 ${path}: ${(err as Error).message}`);
   }
   return { config: validate(parsed, path), created: false };
+}
+
+export function saveConfig(config: KernelConfig, path = DEFAULT_CONFIG_PATH): void {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+}
+
+/** 把 key 写进配置文件对应供应商的 apiKey 字段(TUI 内设置用)。返回更新后的配置。 */
+export function setApiKey(
+  config: KernelConfig,
+  providerName: string,
+  apiKey: string,
+  path = DEFAULT_CONFIG_PATH,
+): KernelConfig {
+  const p = config.providers[providerName];
+  if (!p) {
+    throw new Error(
+      `未知供应商 "${providerName}",可选:${Object.keys(config.providers).join(", ")}`,
+    );
+  }
+  const next: KernelConfig = {
+    ...config,
+    providers: { ...config.providers, [providerName]: { ...p, apiKey: apiKey.trim() } },
+  };
+  saveConfig(next, path);
+  return next;
+}
+
+/** 修改缺省模型并落盘。 */
+export function setDefaultModel(
+  config: KernelConfig,
+  model: string,
+  path = DEFAULT_CONFIG_PATH,
+): KernelConfig {
+  const next = { ...config, default: model };
+  saveConfig(next, path);
+  return next;
 }
 
 function validate(raw: unknown, path: string): KernelConfig {
@@ -152,5 +192,10 @@ export function createProvider(r: Resolved, apiKey: string): Provider {
       ...(r.provider.maxTokens && { maxTokens: r.provider.maxTokens }),
     });
   }
-  return openaiCompat({ baseUrl: r.provider.baseUrl, apiKey, model: r.model });
+  return openaiCompat({
+    baseUrl: r.provider.baseUrl,
+    apiKey,
+    model: r.model,
+    ...(r.provider.reasoningField && { reasoningField: r.provider.reasoningField }),
+  });
 }

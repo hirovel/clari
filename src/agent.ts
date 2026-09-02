@@ -11,6 +11,7 @@ export type AgentOptions = {
   slots?: TurnDeps["slots"];
   compaction?: TurnDeps["compaction"];
   onDelta?: (textDelta: string) => void;
+  onReasoning?: (reasoningDelta: string) => void;
 };
 
 /**
@@ -31,6 +32,16 @@ export class Agent {
   /** 等待注入的留言条数(UI 状态栏用)。 */
   get queued(): number {
     return this.queue.length;
+  }
+
+  get provider(): Provider {
+    return this.opts.provider;
+  }
+
+  /** 会话中切换模型:下一次请求起生效;记一条只给人看的事件,审计时知道哪段由谁生成。 */
+  setProvider(provider: Provider): void {
+    this.opts.provider = provider;
+    this.opts.log.append({ type: "session/model", at: now(), model: provider.model });
   }
 
   /** 空闲时:入日志并开跑。运行中:进留言队列,注入时点由 steering 槽决定(Q20)。 */
@@ -56,6 +67,7 @@ export class Agent {
       ...(this.opts.slots && { slots: this.opts.slots }),
       ...(this.opts.compaction && { compaction: this.opts.compaction }),
       ...(this.opts.onDelta && { onDelta: this.opts.onDelta }),
+      ...(this.opts.onReasoning && { onReasoning: this.opts.onReasoning }),
     });
     try {
       return await this.active;

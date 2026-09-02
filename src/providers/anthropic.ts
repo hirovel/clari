@@ -4,10 +4,21 @@
 import type { StopReason, ToolCall, Usage } from "../events.js";
 import type { Message } from "../messages.js";
 import type { AssistantTurn, Provider, ToolDef } from "../provider.js";
+import { ProviderError, parseRetryAfter } from "./errors.js";
+import { type RetryOptions, withRetry } from "./retry.js";
 
 /** 流式事件的最小类型,只声明用到的字段。 */
 export type AnthropicEvent =
-  | { type: "message_start"; message: { usage?: { input_tokens?: number } } }
+  | {
+      type: "message_start";
+      message: {
+        usage?: {
+          input_tokens?: number;
+          cache_creation_input_tokens?: number;
+          cache_read_input_tokens?: number;
+        };
+      };
+    }
   | {
       type: "content_block_start";
       index: number;
@@ -39,6 +50,7 @@ export type AnthropicAcc = {
   blocks: Map<number, { id: string; name: string; argsJson: string }>;
   stopReason?: string;
   inputTokens?: number;
+  cacheReadTokens?: number;
   outputTokens?: number;
   error?: string;
 };
@@ -51,8 +63,19 @@ export function newAnthropicAcc(): AnthropicAcc {
 export function feedAnthropicEvent(acc: AnthropicAcc, ev: AnthropicEvent): string {
   switch (ev.type) {
     case "message_start": {
-      const input = ev.message.usage?.input_tokens;
-      if (input !== undefined) acc.inputTokens = input;
+      // Anthropic 的 input_tokens 不含缓存部分;占用窗口的是三者之和。
+      const u = ev.message.usage;
+      if (
+        u &&
+        (u.input_tokens ?? u.cache_read_input_tokens ?? u.cache_creation_input_tokens) !== undefined
+      ) {
+        acc.inputTokens =
+          (u.input_tokens ?? 0) +
+          (u.cache_creation_input_tokens ?? 0) +
+          (u.cache_read_input_tokens ?? 0);
+        if (u.cache_read_input_tokens !== undefined)
+          acc.cacheReadTokens = u.cache_read_input_tokens;
+      }
       return "";
     }
     case "content_block_start":
@@ -99,7 +122,11 @@ export function finishAnthropicAcc(acc: AnthropicAcc, aborted: boolean): Assista
         : "end";
   const usage: Usage | undefined =
     acc.inputTokens !== undefined || acc.outputTokens !== undefined
-      ? { inputTokens: acc.inputTokens ?? 0, outputTokens: acc.outputTokens ?? 0 }
+      ? {
+          inputTokens: acc.inputTokens ?? 0,
+          outputTokens: acc.outputTokens ?? 0,
+          ...(acc.cacheReadTokens !== undefined && { cacheReadTokens: acc.cacheReadTokens }),
+        }
       : undefined;
   return {
     text: acc.text,
@@ -176,6 +203,7 @@ export function anthropic(opts: {
   apiKey: string;
   model: string;
   maxTokens?: number;
+  retry?: RetryOptions;
 }): Provider {
   const baseUrl = (opts.baseUrl ?? "https://api.anthropic.com").replace(/\/$/, "");
   return {
@@ -197,41 +225,63 @@ export function anthropic(opts: {
         stream: true,
       };
 
-      const acc = newAnthropicAcc();
-      try {
-        const res = await fetch(`${baseUrl}/v1/messages`, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "x-api-key": opts.apiKey,
-            "anthropic-version": "2023-06-01",
-          },
-          body: JSON.stringify(body),
-          signal: signal ?? null,
-        });
-        if (!res.ok || !res.body) {
-          throw new Error(`provider ${res.status}: ${await res.text()}`);
-        }
-        const decoder = new TextDecoder();
-        let buffer = "";
-        for await (const bytes of res.body) {
-          buffer += decoder.decode(bytes as Uint8Array, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() ?? "";
-          for (const line of lines) {
-            if (!line.startsWith("data:")) continue;
-            const data = line.slice(5).trim();
-            if (!data) continue;
-            const delta = feedAnthropicEvent(acc, JSON.parse(data) as AnthropicEvent);
-            if (delta && onDelta) onDelta(delta);
+      return withRetry(
+        async () => {
+          const acc = newAnthropicAcc();
+          try {
+            const res = await fetch(`${baseUrl}/v1/messages`, {
+              method: "POST",
+              headers: {
+                "content-type": "application/json",
+                "x-api-key": opts.apiKey,
+                "anthropic-version": "2023-06-01",
+              },
+              body: JSON.stringify(body),
+              signal: signal ?? null,
+            });
+            if (!res.ok || !res.body) {
+              const text = await res.text();
+              const retryAfterMs = parseRetryAfter(res.headers);
+              throw new ProviderError(`provider ${res.status}: ${text}`, {
+                status: res.status,
+                body: text,
+                ...(retryAfterMs !== undefined && { retryAfterMs }),
+              });
+            }
+            const decoder = new TextDecoder();
+            let buffer = "";
+            for await (const bytes of res.body) {
+              buffer += decoder.decode(bytes as Uint8Array, { stream: true });
+              const lines = buffer.split("\n");
+              buffer = lines.pop() ?? "";
+              for (const line of lines) {
+                if (!line.startsWith("data:")) continue;
+                const data = line.slice(5).trim();
+                if (!data) continue;
+                const delta = feedAnthropicEvent(acc, JSON.parse(data) as AnthropicEvent);
+                if (delta && onDelta) onDelta(delta);
+              }
+            }
+            if (acc.error) {
+              // HTTP 200 之后流内报错(如 overloaded_error):尚未吐字时可重试。
+              throw new ProviderError(`provider stream error: ${acc.error}`, {
+                retryable: !acc.text && /overloaded|api_error|rate_limit/i.test(acc.error),
+                body: acc.error,
+              });
+            }
+            if (!acc.stopReason) {
+              throw new ProviderError("stream ended without message_delta", {
+                retryable: !acc.text,
+              });
+            }
+            return finishAnthropicAcc(acc, false);
+          } catch (err) {
+            if (signal?.aborted) return finishAnthropicAcc(acc, true);
+            throw err;
           }
-        }
-        if (acc.error) throw new Error(`provider stream error: ${acc.error}`);
-        return finishAnthropicAcc(acc, false);
-      } catch (err) {
-        if (signal?.aborted) return finishAnthropicAcc(acc, true);
-        throw err;
-      }
+        },
+        { ...opts.retry, ...(signal && { signal }) },
+      );
     },
   };
 }

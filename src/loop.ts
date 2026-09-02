@@ -3,6 +3,7 @@ import { now, type ToolCall } from "./events.js";
 import type { EventLog } from "./log.js";
 import { deriveMessages } from "./messages.js";
 import type { AssistantTurn, Provider, ToolDef } from "./provider.js";
+import { isContextOverflow } from "./providers/errors.js";
 import { type Tool, validateArgs } from "./tools.js";
 
 // ---------- 策略槽(Q27:全部是开放接口,内置实现无特权,自定义实现从外部注入) ----------
@@ -50,6 +51,7 @@ export type TurnDeps = {
   drainQueue?: () => string[];
   signal?: AbortSignal;
   onDelta?: (textDelta: string) => void;
+  onReasoning?: (reasoningDelta: string) => void;
   /** 压缩配置(Q33):给了就启用自动触发与溢出恢复。 */
   compaction?: CompactionConfig;
 };
@@ -70,9 +72,7 @@ export type CompactionConfig = {
 
 const DEFAULT_RESERVE = 32000;
 
-function defaultIsOverflow(err: Error): boolean {
-  return /context|token|length|exceed/i.test(err.message) && /max|limit|exceed/i.test(err.message);
-}
+const defaultIsOverflow = (err: Error): boolean => isContextOverflow(err);
 
 /** 达到阈值时运行策略并落盘压缩事件。返回是否取得实际进展。 */
 async function compactIfNeeded(
@@ -105,7 +105,7 @@ const LENGTH_NOTICE = "未执行:响应被输出 token 上限截断,参数可能
  * 被打断、或终止策略叫停。所有状态变化都以事件落盘,函数本身不持有状态。
  */
 export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
-  const { log, provider, tools, signal, onDelta } = deps;
+  const { log, provider, tools, signal, onDelta, onReasoning } = deps;
   const termination = deps.slots?.termination ?? untilIdle;
   const steering = deps.slots?.steering ?? steer;
   const approve = deps.slots?.approve ?? allowAll;
@@ -128,6 +128,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
     try {
       turn = await provider.complete(deriveMessages(log.events), defs, {
         ...(onDelta && { onDelta }),
+        ...(onReasoning && { onReasoning }),
         ...(signal && { signal }),
       });
     } catch (err) {
