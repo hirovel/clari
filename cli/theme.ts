@@ -2,7 +2,10 @@
 // 其余靠明暗层次,不用框线。
 import type { EditorTheme, MarkdownTheme, SelectListTheme } from "@earendil-works/pi-tui";
 
-const enabled = !process.env.NO_COLOR && process.stdout.isTTY !== false;
+// FORCE_COLOR 强制开(离线预览/测试用);NO_COLOR 强制关;否则跟随是否为 TTY。
+const enabled = process.env.FORCE_COLOR
+  ? true
+  : !process.env.NO_COLOR && process.stdout.isTTY !== false;
 
 function rgb(r: number, g: number, b: number): (s: string) => string {
   return (s) => (enabled ? `\x1b[38;2;${r};${g};${b}m${s}\x1b[39m` : s);
@@ -40,7 +43,7 @@ export const editorTheme: EditorTheme = {
 };
 
 export const markdownTheme: MarkdownTheme = {
-  heading: (t) => c.bold(c.ink(t)),
+  heading: (t) => c.bold(c.jin(t)),
   link: (t) => c.underline(c.jin(t)),
   linkUrl: (t) => c.faint(t),
   code: (t) => c.jin(t),

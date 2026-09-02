@@ -116,6 +116,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     compaction,
     onDelta: (d) => {
       if (!streaming) {
+        transcript.addChild(new Spacer(1));
         streaming = new Markdown("", 1, 0, markdownTheme, { color: c.ink });
         transcript.addChild(streaming);
       }
@@ -195,8 +196,10 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
           streaming = undefined;
           streamBuffer = "";
         } else if (e.text) {
+          transcript.addChild(new Spacer(1));
           transcript.addChild(new Markdown(e.text, 1, 0, markdownTheme, { color: c.ink }));
         }
+        if (e.toolCalls.length > 0) transcript.addChild(new Spacer(1));
         for (const tc of e.toolCalls) {
           transcript.addChild(
             new Text(
@@ -440,8 +443,18 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
   };
 }
 
+/** 工具参数的人读形态:命令与路径直接展示,其余压成紧凑 JSON。 */
 function formatArgs(args: unknown): string {
-  const s = JSON.stringify(args) ?? "";
+  const a = (args ?? {}) as Record<string, unknown>;
+  let s: string;
+  if (typeof a.command === "string") s = a.command;
+  else if (typeof a.path === "string") {
+    const range =
+      typeof a.offset === "number" || typeof a.limit === "number"
+        ? `  第 ${a.offset ?? 1} 行起${typeof a.limit === "number" ? `,${a.limit} 行` : ""}`
+        : "";
+    s = `${a.path}${range}`;
+  } else s = JSON.stringify(args) ?? "";
   return s.length > 160 ? `${s.slice(0, 160)}…` : s;
 }
 

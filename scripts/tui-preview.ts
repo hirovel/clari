@@ -53,8 +53,13 @@ const provider: Provider = {
   async complete(_m, _t, opts) {
     const t = turns[i++];
     if (!t) throw new Error("脚本越界");
+    if (i === 1 && opts?.onReasoning) {
+      opts.onReasoning("用户问的是测试失败原因,先跑一遍测试拿到确切的失败用例,再定位到相关代码。");
+    }
     if (t.text && opts?.onDelta) opts.onDelta(t.text);
-    return t;
+    return i === 1
+      ? { ...t, reasoning: "用户问的是测试失败原因,先跑一遍测试拿到确切的失败用例,再定位到相关代码。" }
+      : t;
   },
 };
 
