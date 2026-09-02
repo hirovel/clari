@@ -1,5 +1,5 @@
 import { estimateTokens } from "./context.js";
-import type { AgentEvent } from "./events.js";
+import type { AgentEvent, Usage } from "./events.js";
 import { compactionState, deriveMessages, type Message } from "./messages.js";
 import type { Provider } from "./provider.js";
 
@@ -40,13 +40,27 @@ export function keepRatio(ratio = 0.3): PreservationPolicy {
   };
 }
 
-/** 切点合法化:保留区必须始于 user/assistant 消息,不能始于工具结果(否则拆散调用对)。 */
+/**
+ * 切点合法化:保留区里第一条模型可见的事件必须是 user/assistant 消息,不能是工具结果(否则拆散调用对)。
+ * 只给人的事件(request/retry/decision 等)不投影,落在切点上无妨;保留区为空(切到末尾)也合法。
+ */
 export function legalizeCut(events: readonly AgentEvent[], cut: number): number {
   let c = Math.min(cut, events.length);
-  while (c > 1 && events[c]?.type !== "user/message" && events[c]?.type !== "assistant/message") {
+  while (c > 1) {
+    const first = events.slice(c).find((e) => isProjected(e));
+    if (!first || first.type === "user/message" || first.type === "assistant/message") return c;
     c--;
   }
   return c;
+}
+
+function isProjected(e: AgentEvent): boolean {
+  return (
+    e.type === "session/start" ||
+    e.type === "user/message" ||
+    e.type === "assistant/message" ||
+    e.type === "tool/result"
+  );
 }
 
 function eventTokens(e: AgentEvent): number {
@@ -75,6 +89,9 @@ export type CompactionPayload = {
   coversUpTo?: number;
   cleared?: number[];
   tokensBefore?: number;
+  /** 摘要请求的用量与耗时;策略有 LLM 调用时填。 */
+  usage?: Usage;
+  latencyMs?: number;
 };
 
 export type CompactionInput = {
@@ -197,6 +214,7 @@ export function llmSummarize(
             { role: "user", content: `${serialize(prefix)}\n\n---\n${instruction}` },
           ];
 
+    const startedAt = Date.now();
     const turn = await provider.complete(messages, [], {
       ...(input.signal && { signal: input.signal }),
     });
@@ -212,6 +230,8 @@ export function llmSummarize(
       coversFrom: from,
       coversUpTo: cut,
       tokensBefore: estimateAfter(events),
+      ...(turn.usage && { usage: turn.usage }),
+      latencyMs: Date.now() - startedAt,
     };
   };
 }

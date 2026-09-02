@@ -77,8 +77,8 @@ export type AgentEvent =
       estimatedTokens: number;
       /** 自动压缩阈值;未配置压缩时缺省。 */
       threshold?: number;
-      /** turn = 正常步;overflow-retry = 溢出压缩后的那一次重发。 */
-      reason: "turn" | "overflow-retry";
+      /** turn = 正常步;overflow-retry = 溢出压缩后的那一次重发;compaction = 压缩策略发出的摘要请求。 */
+      reason: "turn" | "overflow-retry" | "compaction";
     }
   /** 同一请求内的一次重试(退避等待之前记录)。只给人看。 */
   | {
@@ -121,6 +121,9 @@ export type AgentEvent =
       cleared?: number[];
       /** 压缩前的估算 token,审计用。 */
       tokensBefore?: number;
+      /** 摘要请求的用量与耗时(有 LLM 调用的策略才有)。只给人看。 */
+      usage?: Usage;
+      latencyMs?: number;
     };
 
 export function now(): string {

@@ -19,7 +19,7 @@ import { Agent } from "../src/agent.js";
 import { contextBreakdown } from "../src/context.js";
 import { type AgentEvent, now } from "../src/events.js";
 import type { EventLog } from "../src/log.js";
-import type { CompactionConfig } from "../src/loop.js";
+import { type CompactionConfig, recordingProvider } from "../src/loop.js";
 import type { Provider, ToolDef } from "../src/provider.js";
 import type { Tool } from "../src/tools.js";
 import { fmtMs, fmtTok, RequestInspector } from "./inspector.js";
@@ -114,9 +114,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
   tui.addChild(header);
   tui.addChild(
     new Text(
-      c.faint(
-        "运行中输入即插话 · Esc 打断 · Ctrl+R 请求检视 · Ctrl+O 折叠结果 · Ctrl+T 思考 · /help",
-      ),
+      c.faint("Esc 打断 · Ctrl+R 检视 · Ctrl+O 折叠 · Ctrl+T 思考 · 运行中输入即插话 · /help"),
       1,
       0,
     ),
@@ -154,19 +152,21 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       ? `${c.faint("思考")}\n${c.faint(c.italic(indent(s.trim())))}`
       : c.faint("思考(已隐藏,Ctrl+T 显示)");
 
+  const onRaw = (line: string): void => {
+    if (deps.trace) {
+      const bucket = rawAt.get(lastRequestIndex) ?? [];
+      bucket.push(line);
+      rawAt.set(lastRequestIndex, bucket);
+    }
+    deps.onRaw?.(lastRequestIndex, line);
+  };
+
   const agent = new Agent({
     log,
     provider: deps.provider,
     tools,
     compaction,
-    onRaw: (line) => {
-      if (deps.trace) {
-        const bucket = rawAt.get(lastRequestIndex) ?? [];
-        bucket.push(line);
-        rawAt.set(lastRequestIndex, bucket);
-      }
-      deps.onRaw?.(lastRequestIndex, line);
-    },
+    onRaw,
     onDelta: (d) => {
       if (!streaming) {
         transcript.addChild(new Spacer(1));
@@ -199,11 +199,17 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
   function updateStatus(): void {
     const state = agent.running ? c.zhu("● 运行中") : c.green("○ 空闲");
     const t = threshold();
-    const tokens = lastUsage
-      ? `${lastUsage.inputTokens}→${lastUsage.outputTokens} tok · 距自动压缩 ${pct(Math.max(0, (t - lastUsage.inputTokens) / t))}`
-      : "尚无请求";
-    const queued = agent.queued > 0 ? ` · 留言 ${agent.queued}` : "";
-    status.setText(`${state}  ${c.faint(tokens + queued)}`);
+    let tokens = c.faint("尚无请求");
+    if (lastUsage) {
+      // 上下文占用条:以自动压缩阈值为满格;过七成转朱色提醒。
+      const used = Math.min(1, lastUsage.inputTokens / t);
+      const cells = used > 0 ? Math.max(1, Math.round(used * 10)) : 0;
+      const bar = "▰".repeat(cells) + "▱".repeat(10 - cells);
+      const tone = used >= 0.7 ? c.zhu : c.jin;
+      tokens = `${tone(bar)} ${c.faint(`距自动压缩 ${pct(Math.max(0, 1 - used))} · ${lastUsage.inputTokens}→${lastUsage.outputTokens} tok`)}`;
+    }
+    const queued = agent.queued > 0 ? c.faint(` · 留言 ${agent.queued}`) : "";
+    status.setText(`${state}  ${tokens}${queued}`);
     tui.requestRender();
   }
 
@@ -222,7 +228,8 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     else if (foldResults && all.length > FOLD_HEAD + 1) {
       body = `${indent(all.slice(0, FOLD_HEAD).join("\n"))}\n${c.soft(`  … 还有 ${all.length - FOLD_HEAD} 行(Ctrl+O 展开)`)}`;
     } else body = indent(trimmed);
-    return `${mark} ${c.soft(r.name)}\n${r.isError ? c.soft(body) : c.faint(body)}`;
+    const meta = all.length > 1 ? c.faint(`  ${all.length} 行`) : "";
+    return `${mark} ${c.soft(r.name)}${meta}\n${r.isError ? c.soft(body) : c.faint(body)}`;
   }
 
   function toggleFold(): void {
@@ -324,6 +331,10 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
           transcript.addChild(new Spacer(1));
           transcript.addChild(new Markdown(e.text, 1, 0, markdownTheme, { color: c.ink }));
         }
+        if (e.usage) lastUsage = e.usage;
+        // 每步一行请求小结(Q48):紧跟响应正文,放在工具调用之前,让"调用 → 结果"连在一起。
+        const summary = requestSummary(e);
+        if (summary) note(summary);
         if (e.toolCalls.length > 0) transcript.addChild(new Spacer(1));
         for (const tc of e.toolCalls) {
           transcript.addChild(
@@ -334,10 +345,6 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
             ),
           );
         }
-        if (e.usage) lastUsage = e.usage;
-        // 每步一行请求小结(Q48):始终显示,一行不爆;细节进检视器。
-        const summary = requestSummary(e);
-        if (summary) note(summary);
         if (e.stopReason === "aborted") note(c.faint("— 已打断 —"));
         if (e.stopReason === "length") note(c.jin("◇ 输出被截断,已要求模型重发"));
         break;
@@ -374,7 +381,10 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
         if (e.summary !== undefined)
           parts.push(`摘要覆盖事件 ${e.coversFrom ?? 1}-${e.coversUpTo}`);
         if (e.cleared?.length) parts.push(`清除 ${e.cleared.length} 条工具结果`);
-        note(`${c.jin(`◇ 已压缩:${parts.join(",")}`)}${c.faint("  /context 查看新构成")}`);
+        const cost = e.usage
+          ? `  摘要请求 #${requestCount} · ${fmtTok(e.usage.inputTokens)}→${fmtTok(e.usage.outputTokens)} tok · ${fmtMs(e.latencyMs)}`
+          : "";
+        note(`${c.jin(`◇ 已压缩:${parts.join(",")}`)}${c.faint(`${cost}  /context 查看新构成`)}`);
         break;
       }
       case "session/model":
@@ -522,7 +532,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
         events: log.events,
         window: contextWindow,
         targetTokens: threshold(),
-        provider: agent.provider,
+        provider: recordingProvider(log, agent.provider, { threshold: threshold(), onRaw }),
         ...(instructions && { instructions }),
       });
       if (!payload) note(c.faint("压缩未执行:无事可做或未取得足够进展"));

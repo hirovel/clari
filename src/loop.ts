@@ -76,6 +76,61 @@ const DEFAULT_RESERVE = 32000;
 
 const defaultIsOverflow = (err: Error): boolean => isContextOverflow(err);
 
+/**
+ * 给策略用的 provider 包装:策略每发一次模型请求,日志里就多一条 reason 为 compaction 的 request
+ * (以及其间的 retry / request/error)。摘要请求把整段上下文发给了模型,和正常步一样必须可见(Q48)。
+ * 响应不是 assistant/message —— 它不进投影;随后的 compaction 事件就是它的结果。
+ */
+export function recordingProvider(
+  log: EventLog,
+  provider: Provider,
+  opts: { threshold?: number; onRaw?: (line: string) => void } = {},
+): Provider {
+  return {
+    model: provider.model,
+    ...(provider.wire && { wire: provider.wire.bind(provider) }),
+    async complete(messages, tools, callOpts = {}) {
+      log.append({
+        type: "request",
+        at: now(),
+        model: provider.model,
+        messages: messages.length,
+        tools: tools.map((t) => t.name),
+        estimatedTokens: estimateAfter(log.events),
+        ...(opts.threshold !== undefined && { threshold: opts.threshold }),
+        reason: "compaction",
+      });
+      try {
+        return await provider.complete(messages, tools, {
+          ...callOpts,
+          ...(opts.onRaw && { onRaw: opts.onRaw }),
+          onRetry: ({ attempt, delayMs, error }) => {
+            callOpts.onRetry?.({ attempt, delayMs, error });
+            const status = statusOf(error);
+            log.append({
+              type: "retry",
+              at: now(),
+              attempt,
+              delayMs,
+              error: error.message,
+              ...(status !== undefined && { status }),
+            });
+          },
+        });
+      } catch (err) {
+        const status = statusOf(err);
+        log.append({
+          type: "request/error",
+          at: now(),
+          error: (err as Error).message,
+          ...(status !== undefined && { status }),
+        });
+        throw err;
+      }
+    },
+  };
+}
+
 /** 达到阈值时运行策略并落盘压缩事件。返回是否取得实际进展。 */
 async function compactIfNeeded(
   deps: TurnDeps,
@@ -89,7 +144,10 @@ async function compactIfNeeded(
     events: deps.log.events,
     window: cfg.window,
     targetTokens: threshold,
-    provider: deps.provider,
+    provider: recordingProvider(deps.log, deps.provider, {
+      threshold,
+      ...(deps.onRaw && { onRaw: deps.onRaw }),
+    }),
     ...(cfg.preservation && { preservation: cfg.preservation }),
     ...(deps.signal && { signal: deps.signal }),
   });

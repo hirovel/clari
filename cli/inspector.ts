@@ -20,6 +20,7 @@ type RequestEvent = Extract<AgentEvent, { type: "request" }>;
 type AssistantEvent = Extract<AgentEvent, { type: "assistant/message" }>;
 type RetryEvent = Extract<AgentEvent, { type: "retry" }>;
 type RequestErrorEvent = Extract<AgentEvent, { type: "request/error" }>;
+type CompactionEvent = Extract<AgentEvent, { type: "compaction" }>;
 
 export type RequestRecord = {
   /** 从 1 起的序号。 */
@@ -29,6 +30,8 @@ export type RequestRecord = {
   request: RequestEvent;
   response?: AssistantEvent;
   error?: RequestErrorEvent;
+  /** 摘要请求(reason=compaction)的结果:随后落盘的压缩事件。 */
+  compaction?: CompactionEvent;
   retries: RetryEvent[];
   /** 上一请求收尾之后、本请求发出之前发生的事:压缩、插话注入、终止、打断、切换模型。 */
   before: AgentEvent[];
@@ -58,6 +61,12 @@ export function collectRequests(events: readonly AgentEvent[]): RequestRecord[] 
         if (current && !current.response && !current.error) current.response = e;
         break;
       case "compaction":
+        // 既是摘要请求的结果,也是下一请求之前发生的决定。
+        if (current?.request.reason === "compaction" && !current.compaction && !current.error) {
+          current.compaction = e;
+        }
+        pending.push(e);
+        break;
       case "decision":
       case "session/interrupt":
       case "session/model":
@@ -153,13 +162,21 @@ export function listRow(rec: RequestRecord, selected: boolean): string {
       ? `→ ${fmtTok(u.inputTokens)}${u.cacheReadTokens !== undefined ? `(缓存 ${fmtTok(u.cacheReadTokens)})` : ""}  +${fmtTok(u.outputTokens)}`
       : "→ 无用量";
     tail = `${measured}  ${fmtMs(rec.response.latencyMs)}  ${rec.response.stopReason}`;
+  } else if (rec.compaction) {
+    const u = rec.compaction.usage;
+    tail = `→ ${u ? `${fmtTok(u.inputTokens)}  +${fmtTok(u.outputTokens)}` : "无用量"}  ${fmtMs(rec.compaction.latencyMs)}  摘要 ${rec.compaction.summary?.length ?? 0} 字`;
   } else if (rec.error) {
     tail = c.zhu(`✗ ${rec.error.status ?? ""} ${firstLine(rec.error.error)}`.trim());
   } else {
-    tail = "… 进行中";
+    tail = rec.request.reason === "compaction" ? "… 无结果" : "… 进行中";
   }
   const retry = rec.retries.length > 0 ? `  重试 ${rec.retries.length}` : "";
-  const reason = rec.request.reason === "overflow-retry" ? "  溢出重发" : "";
+  const reason =
+    rec.request.reason === "overflow-retry"
+      ? "  溢出重发"
+      : rec.request.reason === "compaction"
+        ? "  压缩"
+        : "";
   const body = `${head} ${clock(rec.request.at)}  ${model}  ${sent}  ${tail}${retry}${reason}`;
   return `${mark} ${selected ? c.bold(c.ink(body)) : c.soft(body)}`;
 }
@@ -172,13 +189,18 @@ function firstLine(s: string): string {
 
 export function summaryLines(rec: RequestRecord, messages: Message[]): string[] {
   const r = rec.request;
-  const u = rec.response?.usage;
+  const u = rec.response?.usage ?? rec.compaction?.usage;
   const total = messages.reduce((n, m) => n + messageTokens(m), 0);
   const row = (k: string, v: string) => `${c.soft(k.padEnd(12))} ${c.ink(v)}`;
+  const REASONS = {
+    turn: "正常步",
+    "overflow-retry": "溢出压缩后的重发",
+    compaction: "压缩策略的摘要请求(整段上下文发给模型换一份摘要)",
+  } as const;
   const lines = [
     row("时间", `${r.at}`),
     row("模型", r.model),
-    row("原因", r.reason === "turn" ? "正常步" : "溢出压缩后的重发"),
+    row("原因", REASONS[r.reason]),
     row("发送", `${r.messages} 条消息 · ${r.tools.length} 个工具 · 估算 ${r.estimatedTokens} tok`),
   ];
   if (r.threshold !== undefined) {
@@ -249,6 +271,7 @@ export function decisionLines(rec: RequestRecord): string[] {
           parts.push(`摘要覆盖事件 ${e.coversFrom ?? 1}-${e.coversUpTo}`);
         if (e.cleared?.length) parts.push(`清除 ${e.cleared.length} 条工具结果`);
         if (e.tokensBefore !== undefined) parts.push(`压缩前 ${e.tokensBefore} tok`);
+        if (e.usage) parts.push(`摘要请求 ${e.usage.inputTokens}→${e.usage.outputTokens} tok`);
         lines.push(`${c.jin("◇")} 压缩:${parts.join(",")}`);
         break;
       }
@@ -364,8 +387,24 @@ export function receivedLines(rec: RequestRecord, raw: string[] | undefined): st
   const lines: string[] = [];
   if (rec.error && !rec.response) {
     lines.push(`${c.zhu("✗")} ${rec.error.status ?? ""} ${rec.error.error}`);
+  } else if (rec.compaction) {
+    const k = rec.compaction;
+    lines.push(
+      `${c.soft("耗时")} ${c.ink(fmtMs(k.latencyMs))}   ${c.soft("覆盖事件")} ${c.ink(`${k.coversFrom ?? 1}-${k.coversUpTo}`)}`,
+    );
+    if (k.usage) lines.push(`${c.soft("用量")} ${c.ink(JSON.stringify(k.usage))}`);
+    lines.push("");
+    lines.push(c.jin("摘要(将作为一条 user 消息进入后续请求)"));
+    lines.push(...indent(k.summary ?? "(无)").map((l) => c.ink(l)));
+    lines.push("");
   } else if (!rec.response) {
-    lines.push(c.faint("尚未收到响应。"));
+    lines.push(
+      c.faint(
+        rec.request.reason === "compaction"
+          ? "摘要请求没有产生压缩(策略判定无进展或被安全阀拦下)。"
+          : "尚未收到响应。",
+      ),
+    );
   } else {
     const r = rec.response;
     lines.push(
@@ -512,7 +551,10 @@ export class RequestInspector implements Component {
 
     if (this.mode === "list") {
       const title = `${c.bold(c.jin("请求检视"))}  ${c.soft(`${recs.length} 次请求`)}`;
-      const head = [pad(title), pad(rule)];
+      const columns = c.faint(
+        "  序号  时间      模型  发送(条数 · 估算 tok)  → 实测(缓存)  +输出  耗时  停止原因",
+      );
+      const head = [pad(title), pad(columns), pad(rule)];
       const foot = [pad(rule), pad(c.faint("↑↓ 选择 · Enter 详情 · Esc 关闭"))];
       const viewport = rows - head.length - foot.length;
       this.lastViewport = viewport;
