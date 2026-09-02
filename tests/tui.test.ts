@@ -256,6 +256,78 @@ describe("TUI 壳", () => {
     app.stop();
   });
 
+  it("/effort 设置强度:状态栏显示、request 事件带级别、不支持的级别提示回退、auto 恢复", async () => {
+    const seen: (string | undefined)[] = [];
+    const provider: Provider = {
+      model: "fake-model",
+      async complete(_m, _t, opts) {
+        seen.push(opts?.effort);
+        return { text: "ok", toolCalls: [], stopReason: "end" };
+      },
+    };
+    const term = new VirtualTerminal(100, 40);
+    const log = new EventLog();
+    const app = createTuiApp({
+      terminal: term,
+      log,
+      provider,
+      tools: [],
+      compaction: { strategy: async () => null, window: 100000, reserveTokens: 32000 },
+      reserveTokens: 32000,
+      info: { model: "fake-model", providerName: "fake", sessionFile: "s" },
+      systemPrompt: "sys",
+      onExit: () => {},
+      effortLevels: ["low", "high"],
+    });
+    await app.command("/effort");
+    expect(text(app)).toContain("未设置");
+    await app.command("/effort xhigh");
+    let doc = text(app);
+    expect(doc).toContain("强度已设为 xhigh");
+    expect(doc).toContain("发送时向下回退");
+    expect(doc).toContain("强度 xhigh");
+    await app.submit("x");
+    expect(seen).toEqual(["xhigh"]);
+    const req = log.events.find((e) => e.type === "request");
+    expect(req).toMatchObject({ type: "request", effort: "xhigh" });
+    await app.command("/effort auto");
+    doc = text(app);
+    expect(doc).toContain("强度已恢复为不传");
+    await app.submit("y");
+    expect(seen).toEqual(["xhigh", undefined]);
+    await app.command("/effort ultra");
+    expect(text(app)).toContain('未知级别 "ultra"');
+    app.stop();
+  });
+
+  it("/models 对照服务器列表与配置:标出下线与新增", async () => {
+    const provider: Provider = {
+      model: "fake-model",
+      async complete() {
+        throw new Error("x");
+      },
+      listModels: async () => ["fake-model", "fresh-model"],
+    };
+    const settings: TuiSettings = {
+      listModels: () => ["fake/fake-model", "fake/retired-model", "other/big-model"],
+      switchModel: () => {
+        throw new Error("n/a");
+      },
+      setKey: () => {},
+      setDefault: () => {},
+    };
+    const { app } = boot(provider, settings);
+    await app.command("/models");
+    const doc = text(app);
+    expect(doc).toContain("服务器 2 个模型 · 配置 2 个");
+    expect(doc).toContain("✓ fake-model");
+    expect(doc).toContain("✗ retired-model");
+    expect(doc).toContain("可能已下线");
+    expect(doc).toContain("· fresh-model");
+    expect(doc).not.toContain("big-model");
+    app.stop();
+  });
+
   it("请求失败不崩:错误以朱标行呈现,状态回到空闲", async () => {
     const provider: Provider = {
       model: "fake-model",

@@ -7,7 +7,14 @@ import type { AgentEvent, ToolCall } from "./events.js";
 export type Message =
   | { role: "system"; content: string }
   | { role: "user"; content: string }
-  | { role: "assistant"; content: string; toolCalls: ToolCall[]; reasoning?: string }
+  | {
+      role: "assistant";
+      content: string;
+      toolCalls: ToolCall[];
+      reasoning?: string;
+      /** 适配器私有回传物(Q53),原样透传。 */
+      opaque?: unknown;
+    }
   | { role: "tool"; callId: string; name: string; content: string; isError: boolean };
 
 export const CLEARED_PLACEHOLDER = "[此工具结果已被清除以节省上下文;原文完整保留在会话日志中]";
@@ -66,6 +73,7 @@ export function deriveMessages(events: readonly AgentEvent[]): Message[] {
           content: e.text,
           toolCalls: e.toolCalls,
           ...(e.reasoning && { reasoning: e.reasoning }),
+          ...(e.opaque !== undefined && { opaque: e.opaque }),
         });
         break;
       case "tool/result":

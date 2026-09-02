@@ -1,10 +1,21 @@
 import { describe, expect, it } from "vitest";
-import { CONFIG_TEMPLATE, resolveApiKey, resolveModel } from "../src/config.js";
+import {
+  CONFIG_TEMPLATE,
+  modelNames,
+  type ProviderConfig,
+  resolveApiKey,
+  resolveModel,
+} from "../src/config.js";
+import type { AgentEvent } from "../src/events.js";
+import { deriveMessages, type Message } from "../src/messages.js";
+import { clampEffort, openaiCompat, openaiEffortParams, parseEffort } from "../src/provider.js";
 import {
   type AnthropicEvent,
+  anthropicEffortParams,
   feedAnthropicEvent,
   finishAnthropicAcc,
   newAnthropicAcc,
+  thinkingText,
   toAnthropicWire,
 } from "../src/providers/anthropic.js";
 
@@ -92,7 +103,7 @@ describe("toAnthropicWire", () => {
 
 describe("config 解析", () => {
   it("按 models 列表匹配、按前缀猜、供应商/模型显式写法", () => {
-    expect(resolveModel(CONFIG_TEMPLATE, "deepseek-chat").providerName).toBe("deepseek");
+    expect(resolveModel(CONFIG_TEMPLATE, "deepseek-v4-pro").providerName).toBe("deepseek");
     expect(resolveModel(CONFIG_TEMPLATE, "claude-opus-5").providerName).toBe("anthropic");
     expect(resolveModel(CONFIG_TEMPLATE, "claude-unlisted-9").providerName).toBe("anthropic");
     const explicit = resolveModel(CONFIG_TEMPLATE, "openai/gpt-x");
@@ -101,11 +112,11 @@ describe("config 解析", () => {
       model: "gpt-x",
       contextWindow: 400000,
     });
-    expect(resolveModel(CONFIG_TEMPLATE).model).toBe("deepseek-chat");
+    expect(resolveModel(CONFIG_TEMPLATE).model).toBe("deepseek-v4-pro");
   });
 
   it("匹配失败时列出全部已配置模型", () => {
-    expect(() => resolveModel(CONFIG_TEMPLATE, "mystery")).toThrow("deepseek/deepseek-chat");
+    expect(() => resolveModel(CONFIG_TEMPLATE, "mystery")).toThrow("deepseek/deepseek-v4-pro");
   });
 
   it("key:配置字段优先,其次环境变量,都缺则指路", () => {
@@ -114,5 +125,177 @@ describe("config 解析", () => {
     expect(resolveApiKey("deepseek", { ...p, apiKey: " k1 " }, {})).toBe("k1");
     expect(resolveApiKey("deepseek", p, { DEEPSEEK_API_KEY: "k2" })).toBe("k2");
     expect(() => resolveApiKey("deepseek", p, {})).toThrow("DEEPSEEK_API_KEY");
+  });
+});
+
+describe("按模型的能力数据(Q57)与强度映射(Q52)", () => {
+  it("模型对象:窗口与强度集合取模型级,缺省回落到供应商级", () => {
+    const r = resolveModel(CONFIG_TEMPLATE, "claude-haiku-4-5-20251001");
+    expect(r.contextWindow).toBe(200000);
+    expect(r.maxTokens).toBe(8192);
+    expect(r.thinkingMode).toBe("budget");
+    expect(r.effortLevels).toEqual(["off", "low", "medium", "high"]);
+    const d = resolveModel(CONFIG_TEMPLATE, "deepseek-v4-flash");
+    expect(d.contextWindow).toBe(131072);
+    expect(d.provider.dialect).toBe("deepseek");
+    expect(modelNames(CONFIG_TEMPLATE.providers.openai as ProviderConfig)).toEqual([
+      "gpt-5.5",
+      "gpt-5.6",
+    ]);
+  });
+
+  it("clampEffort:不支持的级别向下回退,没有更低的取最低", () => {
+    expect(clampEffort("xhigh", ["off", "low", "high", "max"])).toBe("high");
+    expect(clampEffort("medium", ["high", "max"])).toBe("high");
+    expect(clampEffort("high", undefined)).toBe("high");
+    expect(parseEffort("minimal")).toBe("low");
+    expect(parseEffort("ultra")).toBeUndefined();
+  });
+
+  it("openai 方言:reasoning_effort 直传,off→none;deepseek 方言:thinking 开关 + 三档", () => {
+    expect(openaiEffortParams(undefined, "openai")).toEqual({});
+    expect(openaiEffortParams("xhigh", "openai")).toEqual({ reasoning_effort: "xhigh" });
+    expect(openaiEffortParams("off", "openai")).toEqual({ reasoning_effort: "none" });
+    expect(openaiEffortParams("off", "deepseek")).toEqual({ thinking: { type: "disabled" } });
+    expect(openaiEffortParams("medium", "deepseek")).toEqual({
+      thinking: { type: "enabled" },
+      reasoning_effort: "high",
+    });
+    expect(openaiEffortParams("max", "deepseek")).toEqual({
+      thinking: { type: "enabled" },
+      reasoning_effort: "max",
+    });
+  });
+
+  it("anthropic:adaptive 发 output_config.effort;budget 按级别给 budget_tokens 且小于 max_tokens", () => {
+    expect(anthropicEffortParams(undefined, "adaptive", 8192)).toEqual({});
+    expect(anthropicEffortParams("xhigh", "adaptive", 8192)).toEqual({
+      thinking: { type: "adaptive" },
+      output_config: { effort: "xhigh" },
+    });
+    expect(anthropicEffortParams("off", "adaptive", 8192)).toEqual({
+      thinking: { type: "disabled" },
+    });
+    expect(anthropicEffortParams("high", "budget", 8192)).toEqual({
+      thinking: { type: "enabled", budget_tokens: 8191 },
+    });
+    expect(anthropicEffortParams("low", "budget", 8192)).toEqual({
+      thinking: { type: "enabled", budget_tokens: 2048 },
+    });
+  });
+
+  it("wire 层:强度参数与 extraBody 进入正文,extraBody 最后合并可覆盖一切", () => {
+    const p = openaiCompat({
+      baseUrl: "http://x",
+      apiKey: "k",
+      model: "m",
+      dialect: "deepseek",
+      effortLevels: ["off", "low", "high", "max"],
+      extraBody: { temperature: 0.2 },
+    });
+    const body = p.wire?.([{ role: "user", content: "hi" }], [], { effort: "xhigh" }) as Record<
+      string,
+      unknown
+    >;
+    expect(body.reasoning_effort).toBe("high"); // xhigh 向下回退到 high
+    expect(body.temperature).toBe(0.2);
+    const bare = p.wire?.([{ role: "user", content: "hi" }], []) as Record<string, unknown>;
+    expect("reasoning_effort" in bare).toBe(false);
+  });
+});
+
+describe("Anthropic thinking 块(Q53)", () => {
+  it("流式累积 thinking 与签名;finish 产出可读 reasoning 与 opaque 回传物;打断丢弃块", () => {
+    const acc = newAnthropicAcc();
+    const events: AnthropicEvent[] = [
+      { type: "content_block_start", index: 0, content_block: { type: "thinking" } },
+      {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "thinking_delta", thinking: "先想" },
+      },
+      {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "thinking_delta", thinking: "一下" },
+      },
+      {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "signature_delta", signature: "sig1" },
+      },
+      { type: "content_block_stop", index: 0 },
+      {
+        type: "content_block_start",
+        index: 1,
+        content_block: { type: "redacted_thinking", data: "opaque-bytes" },
+      },
+      { type: "content_block_start", index: 2, content_block: { type: "text" } },
+      { type: "content_block_delta", index: 2, delta: { type: "text_delta", text: "答" } },
+      { type: "message_delta", delta: { stop_reason: "end_turn" } },
+    ];
+    for (const e of events) feedAnthropicEvent(acc, e);
+    expect(thinkingText(acc)).toBe("先想一下");
+    const turn = finishAnthropicAcc(acc, false, "claude-sonnet-5");
+    expect(turn.reasoning).toBe("先想一下");
+    expect(turn.opaque).toEqual({
+      kind: "anthropic-thinking",
+      model: "claude-sonnet-5",
+      blocks: [
+        { type: "thinking", thinking: "先想一下", signature: "sig1" },
+        { type: "redacted_thinking", data: "opaque-bytes" },
+      ],
+    });
+    const aborted = finishAnthropicAcc(acc, true, "claude-sonnet-5");
+    expect(aborted.reasoning).toBe("先想一下");
+    expect("opaque" in aborted).toBe(false);
+  });
+
+  it("wire:同模型的 thinking 块原样放在 assistant 内容之首;换模型后丢弃", () => {
+    const opaque = {
+      kind: "anthropic-thinking",
+      model: "claude-sonnet-5",
+      blocks: [{ type: "thinking", thinking: "t", signature: "s" }],
+    };
+    const messages: Message[] = [
+      { role: "user", content: "U" },
+      { role: "assistant", content: "A", toolCalls: [{ id: "x", name: "read", args: {} }], opaque },
+      { role: "tool", callId: "x", name: "read", content: "R", isError: false },
+    ];
+    const same = toAnthropicWire(messages, { model: "claude-sonnet-5" });
+    expect(same.messages[1]?.content.map((b) => b.type)).toEqual(["thinking", "text", "tool_use"]);
+    expect(same.messages[1]?.content[0]).toEqual({
+      type: "thinking",
+      thinking: "t",
+      signature: "s",
+    });
+    const other = toAnthropicWire(messages, { model: "claude-opus-5" });
+    expect(other.messages[1]?.content.map((b) => b.type)).toEqual(["text", "tool_use"]);
+    // 非 Anthropic 的 opaque(如别家适配器留下的)一律忽略
+    const foreign = toAnthropicWire(
+      [{ role: "assistant", content: "A", toolCalls: [], opaque: { kind: "other" } }],
+      { model: "claude-sonnet-5" },
+    );
+    expect(foreign.messages[0]?.content).toEqual([{ type: "text", text: "A" }]);
+  });
+
+  it("opaque 经事件日志投影原样回到消息里", () => {
+    const events: AgentEvent[] = [
+      { type: "session/start", at: "t", model: "m", system: "s" },
+      {
+        type: "assistant/message",
+        at: "t",
+        text: "A",
+        toolCalls: [],
+        stopReason: "end",
+        opaque: { kind: "anthropic-thinking", model: "m", blocks: [] },
+      },
+    ];
+    const m = deriveMessages(events)[1];
+    expect(m?.role === "assistant" && m.opaque).toEqual({
+      kind: "anthropic-thinking",
+      model: "m",
+      blocks: [],
+    });
   });
 });

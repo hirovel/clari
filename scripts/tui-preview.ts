@@ -49,9 +49,9 @@ const turns: AssistantTurn[] = [
 
 let i = 0;
 const provider: Provider = {
-  model: "deepseek-chat",
+  model: "deepseek-v4-pro",
   wire: (messages, tools) => ({
-    model: "deepseek-chat",
+    model: "deepseek-v4-pro",
     messages,
     tools: tools.map((t) => ({ type: "function", function: t })),
     stream: true,
@@ -108,7 +108,7 @@ const app = createTuiApp({
   tools: [bash, read],
   compaction: { strategy: async () => null, window: 131072, reserveTokens: 32000 },
   reserveTokens: 32000,
-  info: { model: "deepseek-chat", providerName: "deepseek", sessionFile: "sessions/2026-09-01T09-12-33.jsonl" },
+  info: { model: "deepseek-v4-pro", providerName: "deepseek", sessionFile: "sessions/2026-09-01T09-12-33.jsonl" },
   systemPrompt: "sys",
   onExit: () => {},
 });

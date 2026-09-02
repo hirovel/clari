@@ -45,6 +45,11 @@ export type AgentEvent =
        * 对人也可见 —— 透明度第一,思考过程不隐藏。
        */
       reasoning?: string;
+      /**
+       * 适配器私有回传物(Q53):下一轮必须原样送回、内核不解释的东西(如 Anthropic 带签名的 thinking 块)。
+       * 模型可见(它会进入请求),所以必须入日志;写它和读它的是同一个适配器。
+       */
+      opaque?: unknown;
       /** 从发出请求到收齐响应的毫秒数。只给人看。 */
       latencyMs?: number;
     }
@@ -79,6 +84,8 @@ export type AgentEvent =
       threshold?: number;
       /** turn = 正常步;overflow-retry = 溢出压缩后的那一次重发;compaction = 压缩策略发出的摘要请求。 */
       reason: "turn" | "overflow-retry" | "compaction";
+      /** 请求的强度级别(Q52);未设置时缺省,请求里也没有强度参数。 */
+      effort?: string;
     }
   /** 同一请求内的一次重试(退避等待之前记录)。只给人看。 */
   | {

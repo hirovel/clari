@@ -23,7 +23,7 @@ if (!apiKey) {
 const provider = openaiCompat({
   baseUrl: process.env.KERNEL_BASE_URL ?? "https://api.deepseek.com",
   apiKey,
-  model: process.env.KERNEL_MODEL ?? "deepseek-chat",
+  model: process.env.KERNEL_MODEL ?? "deepseek-v4-pro",
 });
 
 const sessionFile = `sessions/${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`;

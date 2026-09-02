@@ -20,7 +20,13 @@ import { contextBreakdown } from "../src/context.js";
 import { type AgentEvent, now } from "../src/events.js";
 import type { EventLog } from "../src/log.js";
 import { type CompactionConfig, recordingProvider } from "../src/loop.js";
-import type { Provider, ToolDef } from "../src/provider.js";
+import {
+  EFFORT_LEVELS,
+  type EffortLevel,
+  type Provider,
+  parseEffort,
+  type ToolDef,
+} from "../src/provider.js";
 import type { Tool } from "../src/tools.js";
 import { fmtMs, fmtTok, RequestInspector } from "./inspector.js";
 import { c, editorTheme, markdownTheme } from "./theme.js";
@@ -30,6 +36,8 @@ export type ModelChoice = {
   model: string;
   providerName: string;
   contextWindow: number;
+  /** 该模型声明支持的强度级别;不声明 = 不校验。 */
+  effortLevels?: EffortLevel[];
 };
 
 export type TuiSettings = {
@@ -60,6 +68,9 @@ export type TuiAppDeps = {
   trace?: boolean;
   /** 原始流旁路输出(如写 trace 文件)。requestIndex 是 request 事件在日志中的下标。 */
   onRaw?: (requestIndex: number, line: string) => void;
+  /** 初始强度级别(Q52);缺省不传。 */
+  effort?: EffortLevel;
+  effortLevels?: EffortLevel[];
 };
 
 export type TuiApp = {
@@ -90,6 +101,8 @@ const COMMANDS = [
   { name: "context", description: "上下文构成:各部分 token 与占比" },
   { name: "compact", description: "手动压缩,可附指示:/compact 保留报错" },
   { name: "model", description: "切换模型:/model 供应商/模型;不带参数列出可选" },
+  { name: "models", description: "向供应商查询当前可用模型,对照配置标出下线与新增" },
+  { name: "effort", description: "强度级别:/effort off|low|medium|high|xhigh|max;auto 恢复不传" },
   { name: "key", description: "设置供应商 key:/key deepseek sk-…(写入配置文件)" },
   { name: "default", description: "把当前模型设为缺省" },
   { name: "stop", description: "打断正在运行的 turn" },
@@ -100,6 +113,7 @@ const COMMANDS = [
 export function createTuiApp(deps: TuiAppDeps): TuiApp {
   const { log, tools, compaction } = deps;
   let info = deps.info;
+  let effortLevels = deps.effortLevels;
   let contextWindow = compaction.window;
   const threshold = () => contextWindow - deps.reserveTokens;
 
@@ -167,6 +181,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     tools,
     compaction,
     onRaw,
+    ...(deps.effort && { effort: deps.effort }),
     onDelta: (d) => {
       if (!streaming) {
         transcript.addChild(new Spacer(1));
@@ -209,7 +224,8 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       tokens = `${tone(bar)} ${c.faint(`距自动压缩 ${pct(Math.max(0, 1 - used))} · ${lastUsage.inputTokens}→${lastUsage.outputTokens} tok`)}`;
     }
     const queued = agent.queued > 0 ? c.faint(` · 留言 ${agent.queued}`) : "";
-    status.setText(`${state}  ${tokens}${queued}`);
+    const effort = agent.effort ? c.faint(` · 强度 ${agent.effort}`) : "";
+    status.setText(`${state}  ${tokens}${effort}${queued}`);
     tui.requestRender();
   }
 
@@ -455,6 +471,12 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       case "model":
         switchModel(arg);
         break;
+      case "models":
+        await listRemoteModels();
+        break;
+      case "effort":
+        setEffort(arg);
+        break;
       case "key":
         setKey(arg);
         break;
@@ -495,12 +517,84 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       const choice = deps.settings.switchModel(arg);
       agent.setProvider(choice.provider);
       info = { ...info, model: choice.model, providerName: choice.providerName };
+      effortLevels = choice.effortLevels;
       contextWindow = choice.contextWindow;
       compaction.window = choice.contextWindow;
       updateHeader();
       updateStatus();
     } catch (err) {
       note(c.zhu(`✗ ${(err as Error).message}`));
+    }
+  }
+
+  /** 强度级别(Q52):缺省不传;设了就记进每条 request 事件,下一请求生效。 */
+  function setEffort(arg: string): void {
+    if (!arg) {
+      const rows = EFFORT_LEVELS.map((l) => {
+        const current = l === agent.effort;
+        const unsupported = effortLevels && !effortLevels.includes(l);
+        return `  ${current ? c.jin("▸") : " "} ${current ? c.jin(l) : c.soft(l)}${unsupported ? c.faint("  该模型未声明支持,发送时向下回退") : ""}`;
+      });
+      note(
+        `${c.soft("强度级别")} ${c.ink(agent.effort ?? "未设置(不传,用供应商默认)")}\n${rows.join("\n")}\n${c.faint("用法:/effort <级别>;/effort auto 恢复不传")}`,
+      );
+      return;
+    }
+    if (arg === "auto") {
+      agent.setEffort(undefined);
+      note(c.jin("◇ 强度已恢复为不传"));
+      updateStatus();
+      return;
+    }
+    const level = parseEffort(arg);
+    if (!level) {
+      note(c.zhu(`未知级别 "${arg}"`) + c.faint(`  可选:${EFFORT_LEVELS.join(" ")} auto`));
+      return;
+    }
+    agent.setEffort(level);
+    const clamped =
+      effortLevels && !effortLevels.includes(level)
+        ? c.faint(`  当前模型声明支持 ${effortLevels.join("/")},发送时向下回退`)
+        : "";
+    note(c.jin(`◇ 强度已设为 ${level},下一请求生效`) + clamped);
+    updateStatus();
+  }
+
+  /** 向供应商查当前模型列表(Q59):配置里有、服务器没有的标出来,发现下线不靠猜。 */
+  async function listRemoteModels(): Promise<void> {
+    const p = agent.provider;
+    if (!p.listModels) {
+      note(c.zhu("当前 provider 不支持查询模型列表"));
+      return;
+    }
+    showLoader("查询模型列表");
+    try {
+      const remote = await p.listModels();
+      const prefix = `${info.providerName}/`;
+      const configured = (deps.settings?.listModels() ?? [])
+        .filter((m) => m.startsWith(prefix))
+        .map((m) => m.slice(prefix.length));
+      const lines = [
+        `${c.soft("供应商")} ${c.ink(info.providerName)}  ${c.faint(`服务器 ${remote.length} 个模型 · 配置 ${configured.length} 个`)}`,
+      ];
+      for (const m of configured) {
+        lines.push(
+          remote.includes(m)
+            ? `  ${c.green("✓")} ${c.ink(m)}`
+            : `  ${c.zhu("✗")} ${c.ink(m)}  ${c.zhu("服务器无此模型,可能已下线")}`,
+        );
+      }
+      const extra = remote.filter((m) => !configured.includes(m));
+      if (extra.length > 0) {
+        lines.push(c.faint("  服务器有、配置里没有:"));
+        for (const m of extra) lines.push(c.faint(`    · ${m}`));
+      }
+      note(lines.join("\n"));
+    } catch (err) {
+      note(c.zhu(`✗ 查询失败:${(err as Error).message}`));
+    } finally {
+      hideLoader();
+      updateStatus();
     }
   }
 

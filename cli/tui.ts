@@ -1,5 +1,6 @@
 // TUI 入口:读配置、匹配供应商、组装工具与压缩,然后把界面交给 tui-app。
-// 用法:pnpm tui [-- --model <供应商/模型>] [--subagent] [--compaction llm|clear|pipeline] [--trace] [--fold]
+// 用法:pnpm tui [-- --model <供应商/模型>] [--effort <级别>] [--subagent] [--compaction llm|clear|pipeline] [--trace] [--fold]
+//   --effort 强度级别 off|low|medium|high|xhigh|max;缺省不传,用供应商默认
 //   --trace  逐行记录收到的原始流:检视器"接收"分区可看,并写入 <会话>.trace.jsonl
 //   --fold   工具结果初始折叠(Ctrl+O 随时切换;缺省完整显示)
 import { appendFileSync } from "node:fs";
@@ -17,6 +18,7 @@ import {
 } from "../src/config.js";
 import { EventLog } from "../src/log.js";
 import type { CompactionConfig } from "../src/loop.js";
+import { EFFORT_LEVELS, parseEffort } from "../src/provider.js";
 import { createTaskTool } from "../src/subagent.js";
 import type { Tool } from "../src/tools.js";
 import { bashTool } from "./tools/bash.js";
@@ -44,7 +46,14 @@ function choose(name?: string): ModelChoice {
     model: r.model,
     providerName: r.providerName,
     contextWindow: r.contextWindow,
+    ...(r.effortLevels && { effortLevels: r.effortLevels }),
   };
+}
+
+const effort = args.effort === undefined ? undefined : parseEffort(args.effort);
+if (args.effort !== undefined && !effort) {
+  console.error(`未知强度级别 "${args.effort}",可选:${EFFORT_LEVELS.join(" ")}`);
+  process.exit(1);
 }
 
 let first: ModelChoice;
@@ -105,6 +114,8 @@ createTuiApp({
   systemPrompt: SYSTEM_PROMPT,
   fold: args.fold,
   trace: args.trace,
+  ...(effort && { effort }),
+  ...(first.effortLevels && { effortLevels: first.effortLevels }),
   ...(args.trace && {
     onRaw: (requestIndex: number, line: string) =>
       appendFileSync(traceFile, `${JSON.stringify({ request: requestIndex, line })}\n`),
@@ -117,6 +128,7 @@ type Args = {
   compaction?: string;
   trace: boolean;
   fold: boolean;
+  effort?: string;
 };
 
 function parseArgs(argv: string[]): Args {
@@ -126,6 +138,9 @@ function parseArgs(argv: string[]): Args {
     const next = argv[i + 1];
     if (a === "--model" && next) {
       out.model = next;
+      i++;
+    } else if (a === "--effort" && next) {
+      out.effort = next;
       i++;
     } else if (a === "--compaction" && next) {
       out.compaction = next;

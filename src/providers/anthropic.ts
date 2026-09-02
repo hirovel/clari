@@ -1,9 +1,18 @@
 // Anthropic Messages API 适配器:第二个 provider,同时是对内部消息抽象(Q4)的验证。
 // 与 OpenAI 兼容适配器的差异全部封在这里:工具结果是 user 消息里的内容块、system 是顶层字段、
-// 流式事件按内容块下标分发。内核其余部分一行不改。
+// 流式事件按内容块下标分发、thinking 块带签名必须原样回传(Q53)。内核其余部分一行不改。
 import type { StopReason, ToolCall, Usage } from "../events.js";
 import type { Message } from "../messages.js";
-import { type AssistantTurn, mergeRetry, type Provider, type ToolDef } from "../provider.js";
+import {
+  type AssistantTurn,
+  clampEffort,
+  type EffortLevel,
+  fetchModelIds,
+  mergeRetry,
+  type Provider,
+  type ToolDef,
+  type WireOptions,
+} from "../provider.js";
 import { ProviderError, parseRetryAfter } from "./errors.js";
 import { type RetryOptions, withRetry } from "./retry.js";
 
@@ -25,6 +34,8 @@ export type AnthropicEvent =
       content_block:
         | { type: "text" }
         | { type: "tool_use"; id: string; name: string }
+        | { type: "thinking" }
+        | { type: "redacted_thinking"; data: string }
         | { type: string };
     }
   | {
@@ -33,6 +44,8 @@ export type AnthropicEvent =
       delta:
         | { type: "text_delta"; text: string }
         | { type: "input_json_delta"; partial_json: string }
+        | { type: "thinking_delta"; thinking: string }
+        | { type: "signature_delta"; signature: string }
         | { type: string };
     }
   | { type: "content_block_stop"; index: number }
@@ -45,9 +58,31 @@ export type AnthropicEvent =
   | { type: "ping" }
   | { type: "error"; error: { type: string; message: string } };
 
+/** 模型的思考块,签名绑定前缀,回传时一字不能改。 */
+export type ThinkingBlock =
+  | { type: "thinking"; thinking: string; signature: string }
+  | { type: "redacted_thinking"; data: string };
+
+/** 存进 assistant/message.opaque 的形态。带模型名:签名跨模型无效,换模型后丢弃。 */
+export type AnthropicOpaque = {
+  kind: "anthropic-thinking";
+  model: string;
+  blocks: ThinkingBlock[];
+};
+
+export function isAnthropicOpaque(x: unknown): x is AnthropicOpaque {
+  return (
+    typeof x === "object" &&
+    x !== null &&
+    (x as { kind?: unknown }).kind === "anthropic-thinking" &&
+    Array.isArray((x as { blocks?: unknown }).blocks)
+  );
+}
+
 export type AnthropicAcc = {
   text: string;
   blocks: Map<number, { id: string; name: string; argsJson: string }>;
+  thinking: Map<number, ThinkingBlock>;
   stopReason?: string;
   inputTokens?: number;
   cacheReadTokens?: number;
@@ -56,7 +91,15 @@ export type AnthropicAcc = {
 };
 
 export function newAnthropicAcc(): AnthropicAcc {
-  return { text: "", blocks: new Map() };
+  return { text: "", blocks: new Map(), thinking: new Map() };
+}
+
+/** 已累积的思考文本(给人看的那份)。 */
+export function thinkingText(acc: AnthropicAcc): string {
+  return [...acc.thinking.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([, b]) => (b.type === "thinking" ? b.thinking : ""))
+    .join("");
 }
 
 /** 喂入一个已解析的事件,返回本事件的文本增量。纯函数,不碰网络。 */
@@ -78,12 +121,21 @@ export function feedAnthropicEvent(acc: AnthropicAcc, ev: AnthropicEvent): strin
       }
       return "";
     }
-    case "content_block_start":
-      if (ev.content_block.type === "tool_use") {
-        const b = ev.content_block as { id: string; name: string };
-        acc.blocks.set(ev.index, { id: b.id, name: b.name, argsJson: "" });
+    case "content_block_start": {
+      const b = ev.content_block;
+      if (b.type === "tool_use") {
+        const t = b as { id: string; name: string };
+        acc.blocks.set(ev.index, { id: t.id, name: t.name, argsJson: "" });
+      } else if (b.type === "thinking") {
+        acc.thinking.set(ev.index, { type: "thinking", thinking: "", signature: "" });
+      } else if (b.type === "redacted_thinking") {
+        acc.thinking.set(ev.index, {
+          type: "redacted_thinking",
+          data: (b as { data: string }).data,
+        });
       }
       return "";
+    }
     case "content_block_delta": {
       const d = ev.delta;
       if (d.type === "text_delta") {
@@ -94,6 +146,13 @@ export function feedAnthropicEvent(acc: AnthropicAcc, ev: AnthropicEvent): strin
       if (d.type === "input_json_delta") {
         const slot = acc.blocks.get(ev.index);
         if (slot) slot.argsJson += (d as { partial_json: string }).partial_json;
+      }
+      if (d.type === "thinking_delta" || d.type === "signature_delta") {
+        const slot = acc.thinking.get(ev.index);
+        if (slot?.type === "thinking") {
+          if (d.type === "thinking_delta") slot.thinking += (d as { thinking: string }).thinking;
+          else slot.signature = (d as { signature: string }).signature;
+        }
       }
       return "";
     }
@@ -109,7 +168,7 @@ export function feedAnthropicEvent(acc: AnthropicAcc, ev: AnthropicEvent): strin
   }
 }
 
-export function finishAnthropicAcc(acc: AnthropicAcc, aborted: boolean): AssistantTurn {
+export function finishAnthropicAcc(acc: AnthropicAcc, aborted: boolean, model = ""): AssistantTurn {
   const toolCalls: ToolCall[] = [...acc.blocks.entries()]
     .sort(([a], [b]) => a - b)
     .map(([, b]) => ({ id: b.id, name: b.name, args: safeParse(b.argsJson) }));
@@ -128,11 +187,20 @@ export function finishAnthropicAcc(acc: AnthropicAcc, aborted: boolean): Assista
           ...(acc.cacheReadTokens !== undefined && { cacheReadTokens: acc.cacheReadTokens }),
         }
       : undefined;
+  const reasoning = thinkingText(acc);
+  // 打断的半截思考块没有签名,回传必 400,只留可读文本。
+  const blocks = aborted
+    ? []
+    : [...acc.thinking.entries()].sort(([a], [b]) => a - b).map(([, b]) => b);
   return {
     text: acc.text,
     toolCalls: aborted ? [] : toolCalls,
     stopReason,
     ...(usage && { usage }),
+    ...(reasoning && { reasoning }),
+    ...(blocks.length > 0 && {
+      opaque: { kind: "anthropic-thinking", model, blocks } satisfies AnthropicOpaque,
+    }),
   };
 }
 
@@ -146,15 +214,20 @@ function safeParse(s: string): unknown {
 }
 
 type WireBlock =
+  | ThinkingBlock
   | { type: "text"; text: string }
   | { type: "tool_use"; id: string; name: string; input: unknown }
   | { type: "tool_result"; tool_use_id: string; content: string; is_error?: boolean };
 
 /**
- * 内部消息 → Anthropic wire。两处结构差异:system 抽到顶层;连续的工具结果合并进同一条 user 消息
- * (协议要求紧随 assistant 的那条 user 消息包含其全部 tool_use 的应答)。
+ * 内部消息 → Anthropic wire。结构差异:system 抽到顶层;连续的工具结果合并进同一条 user 消息
+ * (协议要求紧随 assistant 的那条 user 消息包含其全部 tool_use 的应答);
+ * assistant 的 thinking 块放在内容之首原样回传,只回传同一模型产生的(签名跨模型无效)。
  */
-export function toAnthropicWire(messages: Message[]): {
+export function toAnthropicWire(
+  messages: Message[],
+  opts: { model?: string } = {},
+): {
   system: string | undefined;
   messages: { role: "user" | "assistant"; content: WireBlock[] }[];
 } {
@@ -170,11 +243,14 @@ export function toAnthropicWire(messages: Message[]): {
         break;
       case "assistant": {
         const content: WireBlock[] = [];
+        if (isAnthropicOpaque(m.opaque) && (!opts.model || m.opaque.model === opts.model)) {
+          content.push(...m.opaque.blocks);
+        }
         if (m.content) content.push({ type: "text", text: m.content });
         for (const tc of m.toolCalls) {
           content.push({ type: "tool_use", id: tc.id, name: tc.name, input: tc.args ?? {} });
         }
-        if (content.length === 0) content.push({ type: "text", text: "(空)" });
+        if (!m.content && m.toolCalls.length === 0) content.push({ type: "text", text: "(空)" });
         out.push({ role: "assistant", content });
         break;
       }
@@ -198,21 +274,61 @@ export function toAnthropicWire(messages: Message[]): {
   return { system, messages: out };
 }
 
-export function anthropic(opts: {
+/** adaptive:4.7+ 与 5 系,effort 直传;budget:4.6 及更早,按级别给 budget_tokens。 */
+export type ThinkingMode = "adaptive" | "budget";
+
+const BUDGETS: Record<Exclude<EffortLevel, "off">, number> = {
+  low: 2048,
+  medium: 8192,
+  high: 16384,
+  xhigh: 32000,
+  max: 32000,
+};
+
+/** 强度 → 请求字段(Q52)。缺省不传;off 发 disabled(不可关的模型会 400,由用户配置 effortLevels 排除 off)。 */
+export function anthropicEffortParams(
+  level: EffortLevel | undefined,
+  mode: ThinkingMode,
+  maxTokens: number,
+): Record<string, unknown> {
+  if (level === undefined) return {};
+  if (level === "off") return { thinking: { type: "disabled" } };
+  if (mode === "budget") {
+    // budget_tokens 须 ≥ 1024 且 < max_tokens。
+    const budget = Math.max(1024, Math.min(BUDGETS[level], maxTokens - 1));
+    return { thinking: { type: "enabled", budget_tokens: budget } };
+  }
+  return { thinking: { type: "adaptive" }, output_config: { effort: level } };
+}
+
+export type AnthropicOptions = {
   baseUrl?: string;
   apiKey: string;
   model: string;
   maxTokens?: number;
   retry?: RetryOptions;
-}): Provider {
+  thinkingMode?: ThinkingMode;
+  effortLevels?: EffortLevel[];
+  extraBody?: Record<string, unknown>;
+  extraHeaders?: Record<string, string>;
+};
+
+export function anthropic(opts: AnthropicOptions): Provider {
   const baseUrl = (opts.baseUrl ?? "https://api.anthropic.com").replace(/\/$/, "");
-  const wire = (messages: Message[], tools: ToolDef[]) => {
-    const w = toAnthropicWire(messages);
+  const maxTokens = opts.maxTokens ?? 8192;
+  const headers = {
+    "content-type": "application/json",
+    "x-api-key": opts.apiKey,
+    "anthropic-version": "2023-06-01",
+    ...opts.extraHeaders,
+  };
+  const wire = (messages: Message[], tools: ToolDef[], w: WireOptions = {}) => {
+    const body = toAnthropicWire(messages, { model: opts.model });
     return {
       model: opts.model,
-      max_tokens: opts.maxTokens ?? 8192,
-      ...(w.system && { system: w.system }),
-      messages: w.messages,
+      max_tokens: maxTokens,
+      ...(body.system && { system: body.system }),
+      messages: body.messages,
       ...(tools.length > 0 && {
         tools: tools.map((t) => ({
           name: t.name,
@@ -221,17 +337,24 @@ export function anthropic(opts: {
         })),
       }),
       stream: true,
+      ...anthropicEffortParams(
+        w.effort && clampEffort(w.effort, opts.effortLevels),
+        opts.thinkingMode ?? "adaptive",
+        maxTokens,
+      ),
+      ...opts.extraBody,
     };
   };
   return {
     model: opts.model,
     wire,
+    listModels: () => fetchModelIds(`${baseUrl}/v1/models`, headers),
     async complete(
       messages: Message[],
       tools: ToolDef[],
-      { onDelta, signal, onRetry, onRaw } = {},
+      { onDelta, onReasoning, signal, onRetry, onRaw, effort } = {},
     ) {
-      const body = wire(messages, tools);
+      const body = wire(messages, tools, effort ? { effort } : {});
 
       return withRetry(
         async () => {
@@ -239,11 +362,7 @@ export function anthropic(opts: {
           try {
             const res = await fetch(`${baseUrl}/v1/messages`, {
               method: "POST",
-              headers: {
-                "content-type": "application/json",
-                "x-api-key": opts.apiKey,
-                "anthropic-version": "2023-06-01",
-              },
+              headers,
               body: JSON.stringify(body),
               signal: signal ?? null,
             });
@@ -267,8 +386,13 @@ export function anthropic(opts: {
                 if (!line.startsWith("data:")) continue;
                 const data = line.slice(5).trim();
                 if (!data) continue;
+                const before = thinkingText(acc).length;
                 const delta = feedAnthropicEvent(acc, JSON.parse(data) as AnthropicEvent);
                 if (delta && onDelta) onDelta(delta);
+                if (onReasoning) {
+                  const now = thinkingText(acc);
+                  if (now.length > before) onReasoning(now.slice(before));
+                }
               }
             }
             if (acc.error) {
@@ -283,9 +407,9 @@ export function anthropic(opts: {
                 retryable: !acc.text,
               });
             }
-            return finishAnthropicAcc(acc, false);
+            return finishAnthropicAcc(acc, false, opts.model);
           } catch (err) {
-            if (signal?.aborted) return finishAnthropicAcc(acc, true);
+            if (signal?.aborted) return finishAnthropicAcc(acc, true, opts.model);
             throw err;
           }
         },

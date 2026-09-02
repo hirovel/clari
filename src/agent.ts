@@ -1,7 +1,7 @@
 import { now } from "./events.js";
 import type { EventLog } from "./log.js";
 import { runTurn, type TurnDeps, type TurnOutcome } from "./loop.js";
-import type { Provider } from "./provider.js";
+import type { EffortLevel, Provider } from "./provider.js";
 import type { Tool } from "./tools.js";
 
 export type AgentOptions = {
@@ -13,6 +13,8 @@ export type AgentOptions = {
   onDelta?: (textDelta: string) => void;
   onReasoning?: (reasoningDelta: string) => void;
   onRaw?: (line: string) => void;
+  /** 强度级别(Q52),缺省不传;setEffort 会话中切换,下一请求生效。 */
+  effort?: EffortLevel;
 };
 
 /**
@@ -37,6 +39,16 @@ export class Agent {
 
   get provider(): Provider {
     return this.opts.provider;
+  }
+
+  get effort(): EffortLevel | undefined {
+    return this.opts.effort;
+  }
+
+  /** 切换强度级别;undefined = 恢复不传。每条 request 事件都记着当时的级别,不另记事件。 */
+  setEffort(level: EffortLevel | undefined): void {
+    if (level === undefined) delete this.opts.effort;
+    else this.opts.effort = level;
   }
 
   /** 会话中切换模型:下一次请求起生效;记一条只给人看的事件,审计时知道哪段由谁生成。 */
@@ -70,6 +82,7 @@ export class Agent {
       ...(this.opts.onDelta && { onDelta: this.opts.onDelta }),
       ...(this.opts.onReasoning && { onReasoning: this.opts.onReasoning }),
       ...(this.opts.onRaw && { onRaw: this.opts.onRaw }),
+      effort: () => this.opts.effort,
     });
     try {
       return await this.active;

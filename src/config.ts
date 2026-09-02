@@ -1,11 +1,25 @@
-// 供应商配置:哪家、什么协议、key 从哪来、模型名怎么匹配到家。
-// key 只从配置文件字段或环境变量读取,内核不持久化、不打印。
+// 供应商配置(Q44/Q57/Q59):哪家、什么协议、key 从哪来、模型名怎么匹配到家,以及每个模型的能力数据。
+// 分层原则:协议形状写在适配器代码里(多年不变);模型名、窗口、强度集合、thinking 模式是数据,放这里;
+// API 新增的参数用 extraBody / extraHeaders 逐字透传,不必等代码。key 只从配置字段或环境变量读取。
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import type { Provider } from "./provider.js";
+import type { EffortLevel, OpenAIDialect, Provider } from "./provider.js";
 import { openaiCompat } from "./provider.js";
-import { anthropic } from "./providers/anthropic.js";
+import { anthropic, type ThinkingMode } from "./providers/anthropic.js";
+
+/** 单个模型的能力数据。字符串形式等价于只有 name。 */
+export type ModelConfig = {
+  name: string;
+  contextWindow?: number;
+  maxTokens?: number;
+  /** 支持的强度级别;请求了不支持的会向下回退。不写 = 不校验。 */
+  effortLevels?: EffortLevel[];
+  /** Anthropic:adaptive(4.7+/5 系)或 budget(4.6 及更早)。 */
+  thinkingMode?: ThinkingMode;
+  /** 逐字合并进请求正文。 */
+  extraBody?: Record<string, unknown>;
+};
 
 export type ProviderConfig = {
   protocol: "openai" | "anthropic";
@@ -14,50 +28,86 @@ export type ProviderConfig = {
   apiKey?: string;
   /** 存放 key 的环境变量名。 */
   apiKeyEnv?: string;
-  /** 该家已知的模型名;用于按模型名匹配供应商。 */
-  models: string[];
+  /** 该家的模型;字符串或带能力数据的对象。用于按模型名匹配供应商。 */
+  models: (string | ModelConfig)[];
+  /** 供应商级缺省,模型级可覆盖。 */
   contextWindow?: number;
   maxTokens?: number;
   /** thinking 模型的推理字段名(DeepSeek 为 reasoning_content),带工具多轮时必须原样回传。 */
   reasoningField?: string;
+  /** openai 协议的方言:强度参数写法不同。 */
+  dialect?: OpenAIDialect;
+  thinkingMode?: ThinkingMode;
+  effortLevels?: EffortLevel[];
+  extraBody?: Record<string, unknown>;
+  extraHeaders?: Record<string, string>;
 };
 
 export type KernelConfig = {
   /** 缺省模型;命令行 --model 可覆盖。 */
   default: string;
+  /** 模板里的能力数据核对日期。过期是常态,发现靠 /models。 */
+  verifiedAt?: string;
   providers: Record<string, ProviderConfig>;
 };
 
 export const DEFAULT_CONFIG_PATH = join(homedir(), ".agent-kernel", "config.json");
 
 export const CONFIG_TEMPLATE: KernelConfig = {
-  default: "deepseek-chat",
+  default: "deepseek-v4-pro",
+  verifiedAt: "2026-09-02",
   providers: {
     deepseek: {
       protocol: "openai",
       baseUrl: "https://api.deepseek.com",
       apiKeyEnv: "DEEPSEEK_API_KEY",
-      models: ["deepseek-chat", "deepseek-reasoner"],
-      contextWindow: 131072,
+      dialect: "deepseek",
       reasoningField: "reasoning_content",
+      contextWindow: 131072,
+      models: [
+        { name: "deepseek-v4-pro", effortLevels: ["off", "low", "high", "max"] },
+        { name: "deepseek-v4-flash", effortLevels: ["off", "low", "high", "max"] },
+      ],
     },
     anthropic: {
       protocol: "anthropic",
       baseUrl: "https://api.anthropic.com",
       apiKeyEnv: "ANTHROPIC_API_KEY",
-      models: ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"],
       contextWindow: 200000,
       maxTokens: 8192,
+      models: [
+        { name: "claude-opus-5", effortLevels: ["off", "low", "medium", "high", "xhigh", "max"] },
+        { name: "claude-sonnet-5", effortLevels: ["off", "low", "medium", "high", "xhigh", "max"] },
+        {
+          name: "claude-haiku-4-5-20251001",
+          thinkingMode: "budget",
+          effortLevels: ["off", "low", "medium", "high"],
+        },
+      ],
     },
     openai: {
       protocol: "openai",
       baseUrl: "https://api.openai.com/v1",
       apiKeyEnv: "OPENAI_API_KEY",
-      models: ["gpt-5", "gpt-5-mini"],
       contextWindow: 400000,
+      models: [
+        { name: "gpt-5.5", effortLevels: ["off", "low", "medium", "high", "xhigh"] },
+        { name: "gpt-5.6", effortLevels: ["off", "low", "medium", "high", "xhigh", "max"] },
+      ],
     },
   },
 };
+
+/** 模型名列表(兼容字符串与对象两种写法)。 */
+export function modelNames(p: ProviderConfig): string[] {
+  return p.models.map((m) => (typeof m === "string" ? m : m.name));
+}
+
+/** 某模型的能力数据;字符串写法或未列出的模型返回只有 name 的对象。 */
+export function modelConfig(p: ProviderConfig, name: string): ModelConfig {
+  const found = p.models.find((m) => (typeof m === "string" ? m : m.name) === name);
+  return typeof found === "object" ? found : { name };
+}
 
 /** 读配置;文件不存在时写入模板并返回它(key 字段留空,由用户填)。 */
 export function loadConfig(path = DEFAULT_CONFIG_PATH): { config: KernelConfig; created: boolean } {
@@ -124,6 +174,10 @@ function validate(raw: unknown, path: string): KernelConfig {
     if (typeof p.baseUrl !== "string" || !Array.isArray(p.models)) {
       throw new Error(`供应商 ${name} 缺少 baseUrl 或 models`);
     }
+    for (const m of p.models) {
+      const ok = typeof m === "string" || (typeof m === "object" && typeof m?.name === "string");
+      if (!ok) throw new Error(`供应商 ${name} 的 models 元素必须是字符串或带 name 的对象`);
+    }
   }
   return c as KernelConfig;
 }
@@ -133,6 +187,10 @@ export type Resolved = {
   provider: ProviderConfig;
   model: string;
   contextWindow: number;
+  maxTokens?: number;
+  effortLevels?: EffortLevel[];
+  thinkingMode?: ThinkingMode;
+  extraBody?: Record<string, unknown>;
 };
 
 /**
@@ -151,7 +209,7 @@ export function resolveModel(config: KernelConfig, requested?: string): Resolved
     return finish(pn, p, name.slice(slash + 1));
   }
 
-  const listed = entries.find(([, p]) => p.models.includes(name));
+  const listed = entries.find(([, p]) => modelNames(p).includes(name));
   if (listed) return finish(listed[0], listed[1], name);
 
   const guess = entries.find(([pn, p]) => {
@@ -162,11 +220,25 @@ export function resolveModel(config: KernelConfig, requested?: string): Resolved
   });
   if (guess) return finish(guess[0], guess[1], name);
 
-  const all = entries.flatMap(([pn, p]) => p.models.map((m) => `${pn}/${m}`));
+  const all = entries.flatMap(([pn, p]) => modelNames(p).map((m) => `${pn}/${m}`));
   throw new Error(`无法为模型 "${name}" 匹配供应商。已配置的模型:\n  ${all.join("\n  ")}`);
 
   function finish(pn: string, p: ProviderConfig, model: string): Resolved {
-    return { providerName: pn, provider: p, model, contextWindow: p.contextWindow ?? 128000 };
+    const m = modelConfig(p, model);
+    const maxTokens = m.maxTokens ?? p.maxTokens;
+    const effortLevels = m.effortLevels ?? p.effortLevels;
+    const thinkingMode = m.thinkingMode ?? p.thinkingMode;
+    const extraBody = p.extraBody || m.extraBody ? { ...p.extraBody, ...m.extraBody } : undefined;
+    return {
+      providerName: pn,
+      provider: p,
+      model,
+      contextWindow: m.contextWindow ?? p.contextWindow ?? 128000,
+      ...(maxTokens !== undefined && { maxTokens }),
+      ...(effortLevels && { effortLevels }),
+      ...(thinkingMode && { thinkingMode }),
+      ...(extraBody && { extraBody }),
+    };
   }
 }
 
@@ -184,18 +256,30 @@ export function resolveApiKey(name: string, p: ProviderConfig, env = process.env
 }
 
 export function createProvider(r: Resolved, apiKey: string): Provider {
+  // 手工构造的 Resolved 可能只填了供应商级字段,这里统一回落。
+  const effortLevels = r.effortLevels ?? r.provider.effortLevels;
+  const extraBody = r.extraBody ?? r.provider.extraBody;
+  const maxTokens = r.maxTokens ?? r.provider.maxTokens;
+  const thinkingMode = r.thinkingMode ?? r.provider.thinkingMode;
+  const shared = {
+    apiKey,
+    model: r.model,
+    ...(effortLevels && { effortLevels }),
+    ...(extraBody && { extraBody }),
+    ...(r.provider.extraHeaders && { extraHeaders: r.provider.extraHeaders }),
+  };
   if (r.provider.protocol === "anthropic") {
     return anthropic({
       baseUrl: r.provider.baseUrl,
-      apiKey,
-      model: r.model,
-      ...(r.provider.maxTokens && { maxTokens: r.provider.maxTokens }),
+      ...shared,
+      ...(maxTokens !== undefined && { maxTokens }),
+      ...(thinkingMode && { thinkingMode }),
     });
   }
   return openaiCompat({
     baseUrl: r.provider.baseUrl,
-    apiKey,
-    model: r.model,
+    ...shared,
     ...(r.provider.reasoningField && { reasoningField: r.provider.reasoningField }),
+    ...(r.provider.dialect && { dialect: r.provider.dialect }),
   });
 }

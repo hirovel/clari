@@ -13,7 +13,7 @@ import {
 import { estimateTokens } from "../src/context.js";
 import type { AgentEvent } from "../src/events.js";
 import { deriveMessages, type Message } from "../src/messages.js";
-import type { Provider, ToolDef } from "../src/provider.js";
+import { type Provider, parseEffort, type ToolDef } from "../src/provider.js";
 import { c } from "./theme.js";
 
 type RequestEvent = Extract<AgentEvent, { type: "request" }>;
@@ -201,6 +201,7 @@ export function summaryLines(rec: RequestRecord, messages: Message[]): string[] 
     row("时间", `${r.at}`),
     row("模型", r.model),
     row("原因", REASONS[r.reason]),
+    row("强度", r.effort ?? "未设置(不传,用供应商默认)"),
     row("发送", `${r.messages} 条消息 · ${r.tools.length} 个工具 · 估算 ${r.estimatedTokens} tok`),
   ];
   if (r.threshold !== undefined) {
@@ -370,11 +371,13 @@ export function wireLines(
   provider: Provider | undefined,
   messages: Message[],
   defs: ToolDef[],
+  effort?: string,
 ): string[] {
   if (!provider?.wire) {
     return [c.faint("该 provider 未实现 wire(),无法重建线路层正文;发送分区展示的是内核层投影。")];
   }
-  const body = provider.wire(messages, defs);
+  const level = effort ? parseEffort(effort) : undefined;
+  const body = provider.wire(messages, defs, level ? { effort: level } : {});
   const json = JSON.stringify(body, null, 2);
   return [
     c.faint(`请求正文,与实际发送逐字节一致(鉴权头不在正文内)。${json.length} 字符。`),
@@ -535,7 +538,7 @@ export class RequestInspector implements Component {
       case 4:
         return toolLines(defs);
       case 5:
-        return wireLines(this.deps.providerFor(rec.index), messages, defs);
+        return wireLines(this.deps.providerFor(rec.index), messages, defs, rec.request.effort);
       case 6:
         return receivedLines(rec, this.deps.rawFor?.(rec.index));
     }

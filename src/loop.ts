@@ -2,7 +2,7 @@ import { type CompactionStrategy, estimateAfter, type PreservationPolicy } from 
 import { now, type ToolCall } from "./events.js";
 import type { EventLog } from "./log.js";
 import { deriveMessages } from "./messages.js";
-import type { AssistantTurn, Provider, ToolDef } from "./provider.js";
+import type { AssistantTurn, EffortLevel, Provider, ToolDef } from "./provider.js";
 import { isContextOverflow, ProviderError } from "./providers/errors.js";
 import { type Tool, validateArgs } from "./tools.js";
 
@@ -54,6 +54,8 @@ export type TurnDeps = {
   onReasoning?: (reasoningDelta: string) => void;
   /** 原始流逐行回调(trace)。不进日志:体量大且可由 provider 重放,由 CLI 决定是否写旁路文件。 */
   onRaw?: (line: string) => void;
+  /** 强度级别(Q52)。给函数则每次请求前取值,会话中切换下一请求即生效。缺省不传。 */
+  effort?: EffortLevel | (() => EffortLevel | undefined);
   /** 压缩配置(Q33):给了就启用自动触发与溢出恢复。 */
   compaction?: CompactionConfig;
 };
@@ -187,6 +189,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
     // 请求事件(Q48):正文不落盘,它就是此刻的投影;记下规模与口径,检视器按需原样重建。
     const messages = deriveMessages(log.events);
     const cfg = deps.compaction;
+    const effort = typeof deps.effort === "function" ? deps.effort() : deps.effort;
     log.append({
       type: "request",
       at: now(),
@@ -196,6 +199,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
       estimatedTokens: estimateAfter(log.events),
       ...(cfg && { threshold: cfg.window - (cfg.reserveTokens ?? DEFAULT_RESERVE) }),
       reason: overflowRecovered ? "overflow-retry" : "turn",
+      ...(effort && { effort }),
     });
     const startedAt = Date.now();
 
@@ -206,6 +210,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
         ...(onReasoning && { onReasoning }),
         ...(signal && { signal }),
         ...(deps.onRaw && { onRaw: deps.onRaw }),
+        ...(effort && { effort }),
         onRetry: ({ attempt, delayMs, error }) => {
           const status = statusOf(error);
           log.append({
