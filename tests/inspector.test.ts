@@ -39,6 +39,10 @@ async function session(): Promise<{ log: EventLog; provider: Provider }> {
     at: "2026-09-01T09:00:00.000Z",
     model: "fake",
     system: "你是助手",
+    sections: [
+      { name: "角色与规则", chars: 4 },
+      { name: "环境", chars: 60 },
+    ],
   });
   log.append({ type: "user/message", at: "2026-09-01T09:00:01.000Z", text: "读一下" });
   const provider = scripted([
@@ -136,6 +140,8 @@ describe("请求检视器(Q49)", () => {
     doc = text();
     expect(doc).toContain("[3 发送]");
     expect(doc).toContain("[1] system");
+    expect(doc).toContain("├ 角色与规则");
+    expect(doc).toContain("├ 环境  15 tok · 94%");
     expect(doc).toContain("你是助手");
     expect(doc).toContain("[2] user");
     expect(doc).toContain("读一下");

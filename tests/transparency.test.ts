@@ -84,6 +84,28 @@ describe("请求层记录(Q48)", () => {
     expect(typeof resp.latencyMs).toBe("number");
   });
 
+  it("执行过的工具结果带耗时;未执行的(未知工具)没有", async () => {
+    const log = fresh();
+    await runTurn({
+      log,
+      provider: scripted([
+        {
+          text: "",
+          toolCalls: [
+            { id: "c1", name: "echo", args: { text: "a" } },
+            { id: "c2", name: "nope", args: {} },
+          ],
+          stopReason: "tool",
+        },
+        { text: "done", toolCalls: [], stopReason: "end" },
+      ]),
+      tools: [echo],
+    });
+    const results = log.events.filter((e) => e.type === "tool/result");
+    expect(results[0] && "durationMs" in results[0] && typeof results[0].durationMs).toBe("number");
+    expect(results[1] && "durationMs" in results[1]).toBe(false);
+  });
+
   it("未配置压缩时 request 不带阈值", async () => {
     const log = fresh();
     await runTurn({

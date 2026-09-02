@@ -4,15 +4,13 @@
 // stdout:最终回复文本;--json 时输出结构化结果。非零退出码 = 请求失败。
 import { Agent } from "../src/agent.js";
 import type { AgentEvent } from "../src/events.js";
-import { now } from "../src/events.js";
 import { maxSteps } from "../src/loop.js";
 import {
+  beginSession,
   bootstrap,
   buildCompaction,
   buildTools,
-  openSession,
   parseCommonArgs,
-  systemPromptFor,
 } from "./bootstrap.js";
 
 let args: ReturnType<typeof parseCommonArgs>;
@@ -37,22 +35,7 @@ try {
   process.exit(1);
 }
 
-const { log, sessionFile, resumed } = openSession(args);
-if (!resumed) {
-  log.append({
-    type: "session/start",
-    at: now(),
-    model: choice.model,
-    system: systemPromptFor(args),
-  });
-} else {
-  const lastModel = [...log.events]
-    .reverse()
-    .find((e) => e.type === "session/start" || e.type === "session/model");
-  if (lastModel && "model" in lastModel && lastModel.model !== choice.model) {
-    log.append({ type: "session/model", at: now(), model: choice.model });
-  }
-}
+const { log, sessionFile } = beginSession(args, choice);
 const compaction = buildCompaction(args.compaction, choice.contextWindow);
 const tools = buildTools(log, choice, compaction, args.subagent);
 

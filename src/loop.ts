@@ -106,27 +106,13 @@ export function recordingProvider(
         return await provider.complete(messages, tools, {
           ...callOpts,
           ...(opts.onRaw && { onRaw: opts.onRaw }),
-          onRetry: ({ attempt, delayMs, error }) => {
-            callOpts.onRetry?.({ attempt, delayMs, error });
-            const status = statusOf(error);
-            log.append({
-              type: "retry",
-              at: now(),
-              attempt,
-              delayMs,
-              error: error.message,
-              ...(status !== undefined && { status }),
-            });
+          onRetry: (info) => {
+            callOpts.onRetry?.(info);
+            logRetry(log, info);
           },
         });
       } catch (err) {
-        const status = statusOf(err);
-        log.append({
-          type: "request/error",
-          at: now(),
-          error: (err as Error).message,
-          ...(status !== undefined && { status }),
-        });
+        logRequestError(log, err);
         throw err;
       }
     },
@@ -211,26 +197,10 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
         ...(signal && { signal }),
         ...(deps.onRaw && { onRaw: deps.onRaw }),
         ...(effort && { effort }),
-        onRetry: ({ attempt, delayMs, error }) => {
-          const status = statusOf(error);
-          log.append({
-            type: "retry",
-            at: now(),
-            attempt,
-            delayMs,
-            error: error.message,
-            ...(status !== undefined && { status }),
-          });
-        },
+        onRetry: (info) => logRetry(log, info),
       });
     } catch (err) {
-      const status = statusOf(err);
-      log.append({
-        type: "request/error",
-        at: now(),
-        error: (err as Error).message,
-        ...(status !== undefined && { status }),
-      });
+      logRequestError(log, err);
       // 溢出恢复(Q33):压缩取得进展才许重试,且只重试一次。
       const overflow = cfg && (cfg.isOverflow ?? defaultIsOverflow)(err as Error);
       if (!overflow || overflowRecovered) throw err;
@@ -285,7 +255,35 @@ function statusOf(err: unknown): number | undefined {
   return err instanceof ProviderError ? err.status : undefined;
 }
 
-function appendResult(log: EventLog, call: ToolCall, content: string, isError: boolean): void {
+function logRetry(log: EventLog, info: { attempt: number; delayMs: number; error: Error }): void {
+  const status = statusOf(info.error);
+  log.append({
+    type: "retry",
+    at: now(),
+    attempt: info.attempt,
+    delayMs: info.delayMs,
+    error: info.error.message,
+    ...(status !== undefined && { status }),
+  });
+}
+
+function logRequestError(log: EventLog, err: unknown): void {
+  const status = statusOf(err);
+  log.append({
+    type: "request/error",
+    at: now(),
+    error: (err as Error).message,
+    ...(status !== undefined && { status }),
+  });
+}
+
+function appendResult(
+  log: EventLog,
+  call: ToolCall,
+  content: string,
+  isError: boolean,
+  durationMs?: number,
+): void {
   log.append({
     type: "tool/result",
     at: now(),
@@ -293,6 +291,7 @@ function appendResult(log: EventLog, call: ToolCall, content: string, isError: b
     name: call.name,
     content,
     isError,
+    ...(durationMs !== undefined && { durationMs }),
   });
 }
 
@@ -325,13 +324,14 @@ async function executeCalls(
       appendResult(ctx.log, call, checked.error, true);
       continue;
     }
+    const startedAt = Date.now();
     try {
       const signal = ctx.signal ?? new AbortController().signal;
       const content = await tool.execute(checked.value as never, { signal });
-      appendResult(ctx.log, call, content, false);
+      appendResult(ctx.log, call, content, false, Date.now() - startedAt);
     } catch (err) {
       // Q9:执行失败也是结果。打断导致的失败同样如实记录。
-      appendResult(ctx.log, call, (err as Error).message, true);
+      appendResult(ctx.log, call, (err as Error).message, true, Date.now() - startedAt);
     }
   }
 }

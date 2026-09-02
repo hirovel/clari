@@ -9,14 +9,13 @@
 import { appendFileSync } from "node:fs";
 import { ProcessTerminal } from "@earendil-works/pi-tui";
 import {
+  beginSession,
   bootstrap,
   buildCompaction,
   buildTools,
   DEFAULT_CONFIG_PATH,
-  openSession,
   parseCommonArgs,
   RESERVE,
-  systemPromptFor,
 } from "./bootstrap.js";
 import { createTuiApp, type ModelChoice } from "./tui-app.js";
 
@@ -43,14 +42,14 @@ try {
   process.exit(1);
 }
 
-let session: ReturnType<typeof openSession>;
+let session: ReturnType<typeof beginSession>;
 try {
-  session = openSession(args);
+  session = beginSession(args, first);
 } catch (err) {
   console.error((err as Error).message);
   process.exit(1);
 }
-const { log, sessionFile, resumed } = session;
+const { log, sessionFile } = session;
 const compaction = buildCompaction(args.compaction, first.contextWindow, RESERVE);
 const tools = buildTools(log, first, compaction, args.subagent);
 const traceFile = sessionFile.replace(/\.jsonl$/, ".trace.jsonl");
@@ -64,8 +63,6 @@ createTuiApp({
   reserveTokens: RESERVE,
   info: { model: first.model, providerName: first.providerName, sessionFile },
   settings: boot.settings,
-  systemPrompt: systemPromptFor(args),
-  resume: resumed,
   fold: args.fold,
   trace: args.trace,
   ...(args.effort && { effort: args.effort }),

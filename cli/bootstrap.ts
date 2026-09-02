@@ -14,6 +14,7 @@ import {
   setApiKey,
   setDefaultModel,
 } from "../src/config.js";
+import { now } from "../src/events.js";
 import { EventLog } from "../src/log.js";
 import type { CompactionConfig } from "../src/loop.js";
 import { EFFORT_LEVELS, type EffortLevel, parseEffort } from "../src/provider.js";
@@ -225,16 +226,57 @@ export function openSession(args: Pick<CommonArgs, "resume" | "continue">): {
 }
 
 /** 系统提示词(Q51):--system-prompt 整段替换,--append-system-prompt 追加;否则 角色 → 环境 → 项目指令。 */
-export function systemPromptFor(args: CommonArgs, cwd = process.cwd()): string {
+export function systemPromptFor(
+  args: Pick<CommonArgs, "systemPromptFile" | "appendSystemPromptFile">,
+  cwd = process.cwd(),
+): { text: string; sections: { name: string; source?: string; chars: number }[] } {
   const read = (p: string | undefined) => (p ? readFileSync(p, "utf8") : undefined);
   const replace = read(args.systemPromptFile);
   const append = read(args.appendSystemPromptFile);
-  return buildSystemPrompt({
+  const built = buildSystemPrompt({
     base: BASE_PROMPT,
     cwd,
     ...(replace !== undefined && { replace }),
     ...(append !== undefined && { append }),
-  }).text;
+  });
+  return {
+    text: built.text,
+    sections: built.sections.map((s) => ({
+      name: s.name,
+      ...(s.source && { source: s.source }),
+      chars: s.text.length,
+    })),
+  };
+}
+
+/**
+ * 开始会话:新建时落 session/start(系统提示词与分段构成);恢复时沿用日志里的系统提示词,
+ * 只在当前模型与日志最后记录的不同时追加 session/model。两个入口共用,界面层不再碰 session/start。
+ */
+export function beginSession(
+  args: Pick<CommonArgs, "resume" | "continue" | "systemPromptFile" | "appendSystemPromptFile">,
+  choice: Pick<ModelChoice, "model">,
+  cwd = process.cwd(),
+): { log: EventLog; sessionFile: string; resumed: boolean } {
+  const s = openSession(args);
+  if (!s.resumed) {
+    const p = systemPromptFor(args, cwd);
+    s.log.append({
+      type: "session/start",
+      at: now(),
+      model: choice.model,
+      system: p.text,
+      sections: p.sections,
+    });
+    return s;
+  }
+  const last = [...s.log.events]
+    .reverse()
+    .find((e) => e.type === "session/start" || e.type === "session/model");
+  if (last && "model" in last && last.model !== choice.model) {
+    s.log.append({ type: "session/model", at: now(), model: choice.model });
+  }
+  return s;
 }
 
 export { DEFAULT_CONFIG_PATH };

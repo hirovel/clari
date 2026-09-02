@@ -2,7 +2,13 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { latestSession, openSession, parseCommonArgs } from "../cli/bootstrap.js";
+import {
+  beginSession,
+  latestSession,
+  openSession,
+  parseCommonArgs,
+  systemPromptFor,
+} from "../cli/bootstrap.js";
 import { createTuiApp } from "../cli/tui-app.js";
 import { EventLog } from "../src/log.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
@@ -119,7 +125,6 @@ describe("会话恢复(Q54)", () => {
       reserveTokens: 20000,
       info: { model: "m1", providerName: "p", sessionFile: file },
       systemPrompt: "这份不该被用",
-      resume: true,
       onExit: () => {},
     });
     let doc = app2.lines(100).map(stripAnsi).join("\n");
@@ -147,21 +152,20 @@ describe("会话恢复(Q54)", () => {
     app2.inspector.close();
     app2.stop();
 
-    // 换模型恢复:记一条 session/model
-    const log3 = EventLog.load(file, { attach: true });
-    const app3 = createTuiApp({
-      terminal: new VirtualTerminal(100, 40),
-      log: log3,
-      provider: scripted("m2", []),
-      tools: [],
-      compaction: { strategy: async () => null, window: 100000, reserveTokens: 20000 },
-      reserveTokens: 20000,
-      info: { model: "m2", providerName: "p", sessionFile: file },
-      systemPrompt: "x",
-      resume: true,
-      onExit: () => {},
-    });
-    expect(log3.events.at(-1)).toMatchObject({ type: "session/model", model: "m2" });
-    app3.stop();
+    // 换模型恢复:入口层(beginSession)记一条 session/model,界面层不再碰
+    const s3 = beginSession({ resume: file, continue: false }, { model: "m2" });
+    expect(s3.resumed).toBe(true);
+    expect(s3.log.events.at(-1)).toMatchObject({ type: "session/model", model: "m2" });
+    // 同模型恢复不多记
+    const s4 = beginSession({ resume: file, continue: false }, { model: "m2" });
+    expect(s4.log.events.filter((e) => e.type === "session/model")).toHaveLength(1);
+  });
+
+  it("新会话的系统提示词带分段构成(名称、来源、字符数)", () => {
+    tmp = mkdtempSync(join(tmpdir(), "ak-prompt-"));
+    const p = systemPromptFor({}, tmp);
+    expect(p.sections.map((s) => s.name)).toEqual(["角色与规则", "环境"]);
+    expect(p.sections.every((s) => s.chars > 0)).toBe(true);
+    expect(p.text).toContain("工作目录:");
   });
 });

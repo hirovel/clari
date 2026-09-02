@@ -31,6 +31,8 @@ export type AgentEvent =
       model: string;
       /** 解析后的完整系统提示词。入日志的理由:模型可见即必须入日志。 */
       system: string;
+      /** 系统提示词的分段构成(名称、来源、字符数),只给人看:检视器与 /context 据此按段拆分。 */
+      sections?: { name: string; source?: string; chars: number }[];
     }
   | { type: "user/message"; at: string; text: string }
   | {
@@ -61,6 +63,8 @@ export type AgentEvent =
       content: string;
       /** 错误也是结果(Q9):校验失败/执行异常/被打断,一律以 result 回喂,不抛出循环。 */
       isError: boolean;
+      /** 工具执行耗时;未执行(拒绝/校验失败/打断)时缺省。只给人看。 */
+      durationMs?: number;
     }
   | { type: "session/interrupt"; at: string }
   /** 会话中切换模型。只给人看(不投影):此后的 assistant 消息由新模型生成。 */

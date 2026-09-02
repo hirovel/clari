@@ -308,7 +308,13 @@ export function decisionLines(rec: RequestRecord): string[] {
   return lines;
 }
 
-export function sentLines(messages: Message[], folded: boolean): string[] {
+export type PromptSectionMeta = { name: string; source?: string; chars: number };
+
+export function sentLines(
+  messages: Message[],
+  folded: boolean,
+  sections?: PromptSectionMeta[],
+): string[] {
   const total = messages.reduce((n, m) => n + messageTokens(m), 0);
   const lines: string[] = [
     c.faint(
@@ -321,6 +327,17 @@ export function sentLines(messages: Message[], folded: boolean): string[] {
     lines.push(
       `${c.jin(`[${i + 1}] ${roleLabel(m)}`)}  ${c.soft(`${tok} tok · ${pctOf(tok, total)}`)}`,
     );
+    // 系统提示词按段拆开(Q51):角色、环境、项目指令各占多少。
+    if (m.role === "system" && sections && sections.length > 0) {
+      const chars = sections.reduce((n, s) => n + s.chars, 0);
+      for (const s of sections) {
+        lines.push(
+          c.faint(
+            `    ├ ${s.name}  ${Math.ceil(s.chars / 4)} tok · ${pctOf(s.chars, chars)}${s.source ? `  ${s.source}` : ""}`,
+          ),
+        );
+      }
+    }
     if (m.role === "assistant" && m.reasoning) {
       lines.push(
         ...(folded
@@ -533,8 +550,11 @@ export class RequestInspector implements Component {
         return summaryLines(rec, messages);
       case 2:
         return decisionLines(rec);
-      case 3:
-        return sentLines(messages, this.folded);
+      case 3: {
+        const start = events.find((e) => e.type === "session/start");
+        const sections = start?.type === "session/start" ? start.sections : undefined;
+        return sentLines(messages, this.folded, sections);
+      }
       case 4:
         return toolLines(defs);
       case 5:

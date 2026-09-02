@@ -61,7 +61,8 @@ export type TuiAppDeps = {
   reserveTokens: number;
   info: { model: string; providerName: string; sessionFile: string };
   settings?: TuiSettings;
-  systemPrompt: string;
+  /** 日志为空时用它落 session/start;入口已经落过(bootstrap.beginSession)就不需要。 */
+  systemPrompt?: string;
   onExit?: () => void;
   /** 工具结果初始是否折叠。缺省不折叠(Q34);Ctrl+O 随时切换。 */
   fold?: boolean;
@@ -72,11 +73,6 @@ export type TuiAppDeps = {
   /** 初始强度级别(Q52);缺省不传。 */
   effort?: EffortLevel;
   effortLevels?: EffortLevel[];
-  /**
-   * 恢复会话(Q54):log 已含历史事件。启动时把历史逐条渲染到屏幕,不再追加 session/start;
-   * 系统提示词以日志里那份为准。当前模型与日志最后记录的模型不同时,追加一条 session/model。
-   */
-  resume?: boolean;
 };
 
 export type TuiApp = {
@@ -156,7 +152,8 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
   // 显示状态(Q49):折叠/隐藏只改屏幕,不改日志;切换键重绘已有节点。
   let foldResults = deps.fold ?? false;
   let showReasoning = true;
-  const resultNodes: { node: Text; name: string; content: string; isError: boolean }[] = [];
+  type ResultRecord = { name: string; content: string; isError: boolean; durationMs?: number };
+  const resultNodes: ({ node: Text } & ResultRecord)[] = [];
   const reasoningNodes: { node: Text; text: string }[] = [];
 
   // 请求层记录(Q48):发出每个请求时用的 provider,以及开 trace 时收到的原始流。都不进日志。
@@ -241,7 +238,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
   }
 
   /** 工具结果的屏幕文本。折叠只是显示状态,内容原封不动留在节点里。 */
-  function resultText(r: { name: string; content: string; isError: boolean }): string {
+  function resultText(r: ResultRecord): string {
     const mark = r.isError ? c.zhu("✗") : c.green("✓");
     const trimmed = r.content.trim();
     const all = trimmed ? trimmed.split("\n") : [];
@@ -250,7 +247,11 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     else if (foldResults && all.length > FOLD_HEAD + 1) {
       body = `${indent(all.slice(0, FOLD_HEAD).join("\n"))}\n${c.soft(`  … 还有 ${all.length - FOLD_HEAD} 行(Ctrl+O 展开)`)}`;
     } else body = indent(trimmed);
-    const meta = all.length > 1 ? c.faint(`  ${all.length} 行`) : "";
+    const metaParts = [
+      ...(all.length > 1 ? [`${all.length} 行`] : []),
+      ...(r.durationMs !== undefined ? [fmtMs(r.durationMs)] : []),
+    ];
+    const meta = metaParts.length > 0 ? c.faint(`  ${metaParts.join(" · ")}`) : "";
     return `${mark} ${c.soft(r.name)}${meta}\n${r.isError ? c.soft(body) : c.faint(body)}`;
   }
 
@@ -382,7 +383,12 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       }
       case "tool/result": {
         // 默认完整显示,不折叠(Q34);Ctrl+O 切换折叠,内容仍在节点里。
-        const rec = { name: e.name, content: e.content, isError: e.isError };
+        const rec: ResultRecord = {
+          name: e.name,
+          content: e.content,
+          isError: e.isError,
+          ...(e.durationMs !== undefined && { durationMs: e.durationMs }),
+        };
         const node = new Text(resultText(rec), 1, 0);
         resultNodes.push({ node, ...rec });
         transcript.addChild(node);
@@ -428,20 +434,22 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     updateStatus();
   }
 
-  if (deps.resume && log.events.length > 0) {
-    // 屏幕即历史:用同一个渲染函数把已有事件过一遍,历史与新事件长得一样。
+  if (log.events.length > 0) {
+    // 日志已有内容(入口落过 session/start,或恢复的会话):屏幕即历史,
+    // 用同一个渲染函数把已有事件过一遍,历史与新事件长得一样(Q54)。
     for (const e of log.events) render(e);
     log.subscribe(render);
-    const lastModel = [...log.events]
-      .reverse()
-      .find((e) => e.type === "session/start" || e.type === "session/model");
-    if (lastModel && "model" in lastModel && lastModel.model !== info.model) {
-      log.append({ type: "session/model", at: now(), model: info.model });
+    if (log.events.length > 1) {
+      note(c.jin(`◇ 已恢复会话:${log.events.length} 条事件,继续写入 ${info.sessionFile}`));
     }
-    note(c.jin(`◇ 已恢复会话:${log.events.length} 条事件,继续写入 ${info.sessionFile}`));
   } else {
     log.subscribe(render);
-    log.append({ type: "session/start", at: now(), model: info.model, system: deps.systemPrompt });
+    log.append({
+      type: "session/start",
+      at: now(),
+      model: info.model,
+      system: deps.systemPrompt ?? "",
+    });
   }
   updateHeader();
   updateStatus();
@@ -679,6 +687,21 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       lines.push(
         `${c.jin(bar)} ${pct(p.share).padStart(4)}  ${c.soft(`${p.tokens} tok · ${p.count} 条 · ${p.label}`)}`,
       );
+    }
+    // 系统提示词按段拆开(Q51):角色、环境、项目指令各占多少,一眼可见。
+    const start = log.events.find((e) => e.type === "session/start");
+    const sections = start?.type === "session/start" ? start.sections : undefined;
+    if (sections && sections.length > 0) {
+      const total = sections.reduce((n, s) => n + s.chars, 0);
+      lines.push(c.soft("系统提示词构成"));
+      for (const s of sections) {
+        const tok = Math.ceil(s.chars / 4);
+        lines.push(
+          c.faint(
+            `  ├ ${s.name.padEnd(8)} ${String(tok).padStart(6)} tok · ${pct(total > 0 ? s.chars / total : 0).padStart(4)}${s.source ? `  ${s.source}` : ""}`,
+          ),
+        );
+      }
     }
     return lines.join("\n");
   }
