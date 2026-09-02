@@ -33,9 +33,12 @@ export class EventLog {
     return () => this.listeners.delete(fn);
   }
 
-  /** 从 JSONL 文件重建日志(回放的入口)。不挂文件 = 纯内存回放。 */
-  static load(filePath: string): EventLog {
-    const log = new EventLog();
+  /**
+   * 从 JSONL 文件重建日志(回放的入口)。缺省不挂文件 = 纯内存回放;
+   * attach 则沿用同一文件继续追加(会话恢复,Q54)。
+   */
+  static load(filePath: string, opts: { attach?: boolean } = {}): EventLog {
+    const log = opts.attach ? new EventLog(filePath) : new EventLog();
     const raw = readFileSync(filePath, "utf8");
     const lines = raw.split("\n");
     for (let i = 0; i < lines.length; i++) {

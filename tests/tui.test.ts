@@ -328,6 +328,41 @@ describe("TUI 壳", () => {
     app.stop();
   });
 
+  it("edit 调用显示行级 diff,write 显示前几行与总行数(Q58)", async () => {
+    const { app } = boot(
+      scripted([
+        {
+          text: "",
+          toolCalls: [
+            {
+              id: "c1",
+              name: "edit",
+              args: { path: "a.ts", oldText: "x = 1\ny = 2", newText: "x = 1\ny = 3" },
+            },
+            {
+              id: "c2",
+              name: "write",
+              args: {
+                path: "b.txt",
+                content: Array.from({ length: 20 }, (_, i) => `L${i}`).join("\n"),
+              },
+            },
+          ],
+          stopReason: "tool",
+        },
+        { text: "done", toolCalls: [], stopReason: "end" },
+      ]),
+    );
+    await app.submit("改");
+    const doc = text(app);
+    expect(doc).toContain("- y = 2");
+    expect(doc).toContain("+ y = 3");
+    expect(doc).toContain("+ L0");
+    expect(doc).toContain("… 共 20 行");
+    expect(doc).not.toContain("+ L19");
+    app.stop();
+  });
+
   it("请求失败不崩:错误以朱标行呈现,状态回到空闲", async () => {
     const provider: Provider = {
       model: "fake-model",

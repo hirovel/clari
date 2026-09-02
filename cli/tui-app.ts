@@ -30,6 +30,7 @@ import {
 import type { Tool } from "../src/tools.js";
 import { fmtMs, fmtTok, RequestInspector } from "./inspector.js";
 import { c, editorTheme, markdownTheme } from "./theme.js";
+import { diffLines, hunks } from "./tools/diff.js";
 
 export type ModelChoice = {
   provider: Provider;
@@ -71,6 +72,11 @@ export type TuiAppDeps = {
   /** 初始强度级别(Q52);缺省不传。 */
   effort?: EffortLevel;
   effortLevels?: EffortLevel[];
+  /**
+   * 恢复会话(Q54):log 已含历史事件。启动时把历史逐条渲染到屏幕,不再追加 session/start;
+   * 系统提示词以日志里那份为准。当前模型与日志最后记录的模型不同时,追加一条 session/model。
+   */
+  resume?: boolean;
 };
 
 export type TuiApp = {
@@ -280,7 +286,13 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
   let overlay: OverlayHandle | undefined;
   const inspector = new RequestInspector({
     events: () => log.events,
-    providerFor: (i) => providersAt.get(i),
+    // 恢复的会话拿不到当时的 provider 对象;模型名相同就用当前的重建线路正文,否则如实缺省。
+    providerFor: (i) => {
+      const known = providersAt.get(i);
+      if (known) return known;
+      const e = log.events[i];
+      return e?.type === "request" && e.model === agent.provider.model ? agent.provider : undefined;
+    },
     tools: defs,
     rows: () => deps.terminal.rows,
     ...(deps.trace && { rawFor: (i: number) => rawAt.get(i) }),
@@ -360,6 +372,9 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
               0,
             ),
           );
+          // edit/write 的改动内容直接可见(Q58):diff 从参数算出,不进日志。
+          const detail = toolCallDetail(tc.name, tc.args);
+          if (detail) transcript.addChild(new Text(detail, 1, 0));
         }
         if (e.stopReason === "aborted") note(c.faint("— 已打断 —"));
         if (e.stopReason === "length") note(c.jin("◇ 输出被截断,已要求模型重发"));
@@ -413,8 +428,21 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     updateStatus();
   }
 
-  log.subscribe(render);
-  log.append({ type: "session/start", at: now(), model: info.model, system: deps.systemPrompt });
+  if (deps.resume && log.events.length > 0) {
+    // 屏幕即历史:用同一个渲染函数把已有事件过一遍,历史与新事件长得一样。
+    for (const e of log.events) render(e);
+    log.subscribe(render);
+    const lastModel = [...log.events]
+      .reverse()
+      .find((e) => e.type === "session/start" || e.type === "session/model");
+    if (lastModel && "model" in lastModel && lastModel.model !== info.model) {
+      log.append({ type: "session/model", at: now(), model: info.model });
+    }
+    note(c.jin(`◇ 已恢复会话:${log.events.length} 条事件,继续写入 ${info.sessionFile}`));
+  } else {
+    log.subscribe(render);
+    log.append({ type: "session/start", at: now(), model: info.model, system: deps.systemPrompt });
+  }
   updateHeader();
   updateStatus();
 
@@ -731,6 +759,39 @@ function formatArgs(args: unknown): string {
     s = `${a.path}${range}`;
   } else s = JSON.stringify(args) ?? "";
   return s.length > 160 ? `${s.slice(0, 160)}…` : s;
+}
+
+/** 最多展示的改动行数;超出的折成一行计数。 */
+const DETAIL_MAX_LINES = 60;
+
+/** edit → 行级 diff(- 朱 / + 绿 / 上下文淡);write → 前几行加总行数。其它工具无详情。 */
+export function toolCallDetail(name: string, args: unknown): string {
+  const a = (args ?? {}) as Record<string, unknown>;
+  let lines: string[] = [];
+  if (name === "edit" && typeof a.oldText === "string" && typeof a.newText === "string") {
+    lines = hunks(diffLines(a.oldText, a.newText)).map((l) => {
+      switch (l.kind) {
+        case "-":
+          return c.zhu(`  - ${l.text}`);
+        case "+":
+          return c.green(`  + ${l.text}`);
+        case "…":
+          return c.faint(`    ${l.text}`);
+        default:
+          return c.faint(`    ${l.text}`);
+      }
+    });
+  } else if (name === "write" && typeof a.content === "string") {
+    const all = a.content.split("\n");
+    lines = all.slice(0, 12).map((l) => c.green(`  + ${l}`));
+    if (all.length > 12) lines.push(c.faint(`    … 共 ${all.length} 行`));
+  }
+  if (lines.length === 0) return "";
+  if (lines.length > DETAIL_MAX_LINES) {
+    const rest = lines.length - DETAIL_MAX_LINES;
+    lines = [...lines.slice(0, DETAIL_MAX_LINES), c.faint(`    … 还有 ${rest} 行改动`)];
+  }
+  return lines.join("\n");
 }
 
 function indent(s: string): string {

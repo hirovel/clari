@@ -8,7 +8,8 @@
     "check": "tsc --noEmit && biome check . && vitest run",
     "tui": "tsx cli/tui.ts",
     "chat": "tsx cli/chat.ts",
-    "replay": "tsx cli/replay.ts"
+    "replay": "tsx cli/replay.ts",
+    "once": "tsx cli/run.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.0.0",
