@@ -1,7 +1,7 @@
 import { type CompactionStrategy, estimateAfter, type PreservationPolicy } from "./compaction.js";
-import { now, type ToolCall } from "./events.js";
+import { type AgentEvent, now, type ToolCall } from "./events.js";
 import type { EventLog } from "./log.js";
-import { deriveMessages } from "./messages.js";
+import { deriveMessages, type Message } from "./messages.js";
 import type { AssistantTurn, EffortLevel, Provider, ToolDef } from "./provider.js";
 import { isContextOverflow, ProviderError } from "./providers/errors.js";
 import { type Tool, validateArgs } from "./tools.js";
@@ -101,6 +101,7 @@ export function recordingProvider(
         estimatedTokens: estimateAfter(log.events),
         ...(opts.threshold !== undefined && { threshold: opts.threshold }),
         reason: "compaction",
+        body: describeRequestBody(log.events, messages),
       });
       try {
         return await provider.complete(messages, tools, {
@@ -249,6 +250,26 @@ function inject(log: EventLog, boundary: "step" | "turn", texts: string[]): numb
   log.append({ type: "decision", at: now(), slot: "steering", boundary, injected: texts.length });
   for (const text of texts) log.append({ type: "user/message", at: now(), text });
   return texts.length;
+}
+
+/**
+ * 把一次请求的消息表示成"前缀投影 + 尾部":找最长的事件前缀,其投影是 messages 的前缀,
+ * 剩下的消息原样记为 tail。正常步的 tail 为空;压缩摘要请求的 tail 是那条摘要指示。
+ * 记这个而不是记全文,是为了不让日志膨胀成 O(n²),同时仍能逐字节重建。
+ */
+export function describeRequestBody(
+  events: readonly AgentEvent[],
+  messages: Message[],
+): { prefixEvents: number; tail: Message[] } {
+  const same = (a: Message, b: Message) => JSON.stringify(a) === JSON.stringify(b);
+  for (let k = events.length; k >= 0; k--) {
+    const derived = deriveMessages(events.slice(0, k));
+    if (derived.length > messages.length) continue;
+    if (derived.every((m, i) => same(m, messages[i] as Message))) {
+      return { prefixEvents: k, tail: messages.slice(derived.length) };
+    }
+  }
+  return { prefixEvents: 0, tail: messages };
 }
 
 function statusOf(err: unknown): number | undefined {

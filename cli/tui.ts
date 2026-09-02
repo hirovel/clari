@@ -50,7 +50,13 @@ try {
   process.exit(1);
 }
 const { log, sessionFile } = session;
-const compaction = buildCompaction(args.compaction, first.contextWindow, RESERVE);
+let compaction: Awaited<ReturnType<typeof buildCompaction>>;
+try {
+  compaction = await buildCompaction(args.compaction, first.contextWindow, RESERVE);
+} catch (err) {
+  console.error((err as Error).message);
+  process.exit(1);
+}
 const tools = buildTools(log, first, compaction, args.subagent);
 const traceFile = sessionFile.replace(/\.jsonl$/, ".trace.jsonl");
 

@@ -85,6 +85,8 @@ export type TuiApp = {
   /** 请求检视器(Ctrl+R)。lines() 在打开时返回检视器的渲染行,便于离线验证。 */
   inspector: {
     open(): void;
+    /** 直接进入事件视图。 */
+    openEvents(): void;
     close(): void;
     isOpen(): boolean;
     key(data: string): void;
@@ -99,7 +101,8 @@ export type TuiApp = {
 const FOLD_HEAD = 3;
 
 const COMMANDS = [
-  { name: "inspect", description: "请求检视器:每次 API 请求的发送、接收与决策(Ctrl+R)" },
+  { name: "inspect", description: "请求检视器:每次 API 请求的发送、接收、决策与写入(Ctrl+R)" },
+  { name: "events", description: "事件视图:内核维护的全部事件数组,逐条原样 JSON(检视器内 Tab)" },
   { name: "context", description: "上下文构成:各部分 token 与占比" },
   { name: "compact", description: "手动压缩,可附指示:/compact 保留报错" },
   { name: "model", description: "切换模型:/model 供应商/模型;不带参数列出可选" },
@@ -421,7 +424,10 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
         const cost = e.usage
           ? `  摘要请求 #${requestCount} · ${fmtTok(e.usage.inputTokens)}→${fmtTok(e.usage.outputTokens)} tok · ${fmtMs(e.latencyMs)}`
           : "";
-        note(`${c.jin(`◇ 已压缩:${parts.join(",")}`)}${c.faint(`${cost}  /context 查看新构成`)}`);
+        const who = e.strategy ? `(${e.strategy})` : "";
+        note(
+          `${c.jin(`◇ 已压缩${who}:${parts.join(",")}`)}${c.faint(`${cost}  /context 查看新构成`)}`,
+        );
         break;
       }
       case "session/model":
@@ -497,6 +503,11 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
         break;
       case "inspect":
         openInspector();
+        break;
+      case "events":
+        openInspector();
+        inspector.showEvents();
+        tui.requestRender();
         break;
       case "context":
         note(renderContext());
@@ -758,6 +769,10 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     lines: (width = deps.terminal.columns) => tui.render(width),
     inspector: {
       open: openInspector,
+      openEvents: () => {
+        openInspector();
+        inspector.showEvents();
+      },
       close: closeInspector,
       isOpen: () => overlay !== undefined,
       key: (data) => inspector.handleInput(data),

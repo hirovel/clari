@@ -4,7 +4,9 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   beginSession,
+  buildCompaction,
   latestSession,
+  loadCompactionStrategy,
   openSession,
   parseCommonArgs,
   systemPromptFor,
@@ -60,7 +62,7 @@ describe("入口参数与会话文件", () => {
     });
     expect(parseCommonArgs(["-p", "hi", "--continue"]).rest).toEqual(["hi"]);
     expect(() => parseCommonArgs(["--effort", "ultra"])).toThrow("未知强度级别");
-    expect(() => parseCommonArgs(["--compaction", "zip"])).toThrow("未知压缩策略");
+    expect(parseCommonArgs(["--compaction", "./x.mjs"]).compaction).toBe("./x.mjs");
     expect(() => parseCommonArgs(["--bogus"])).toThrow("未知参数");
     expect(() => parseCommonArgs(["--model"])).toThrow("需要一个值");
   });
@@ -159,6 +161,25 @@ describe("会话恢复(Q54)", () => {
     // 同模型恢复不多记
     const s4 = beginSession({ resume: file, continue: false }, { model: "m2" });
     expect(s4.log.events.filter((e) => e.type === "session/model")).toHaveLength(1);
+  });
+
+  it("压缩策略:内置名、外部模块路径(扩展点)、未知名报错", async () => {
+    tmp = mkdtempSync(join(tmpdir(), "ak-strategy-"));
+    const file = join(tmp, "my-strategy.mjs");
+    writeFileSync(
+      file,
+      "export default async (input) => ({ cleared: [], strategy: `mine(${input.events.length})` });\n",
+    );
+    const custom = await loadCompactionStrategy(file);
+    const out = await custom({ events: [], window: 1, targetTokens: 1 });
+    expect(out?.strategy).toBe("mine(0)");
+    const cfg = await buildCompaction("clear", 1000, 100);
+    expect(cfg).toMatchObject({ window: 1000, reserveTokens: 100 });
+    await expect(loadCompactionStrategy("zip")).rejects.toThrow("未知压缩策略");
+    writeFileSync(join(tmp, "bad.mjs"), "export const nothing = 1;\n");
+    await expect(loadCompactionStrategy(join(tmp, "bad.mjs"))).rejects.toThrow(
+      "default 导出一个函数",
+    );
   });
 
   it("新会话的系统提示词带分段构成(名称、来源、字符数)", () => {

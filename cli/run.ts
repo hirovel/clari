@@ -36,7 +36,13 @@ try {
 }
 
 const { log, sessionFile } = beginSession(args, choice);
-const compaction = buildCompaction(args.compaction, choice.contextWindow);
+let compaction: Awaited<ReturnType<typeof buildCompaction>>;
+try {
+  compaction = await buildCompaction(args.compaction, choice.contextWindow);
+} catch (err) {
+  console.error((err as Error).message);
+  process.exit(2);
+}
 const tools = buildTools(log, choice, compaction, args.subagent);
 
 const agent = new Agent({

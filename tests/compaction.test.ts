@@ -116,7 +116,7 @@ describe("clearToolResults", () => {
       window: 1000,
       targetTokens: 500,
     });
-    expect(p).toEqual({ cleared: [3] });
+    expect(p).toMatchObject({ cleared: [3] });
   });
 
   it("清除量不足 clearAtLeast 不动手", async () => {
@@ -135,7 +135,7 @@ describe("clearToolResults", () => {
       window: 1000,
       targetTokens: 500,
     });
-    expect(p).toEqual({ cleared: [5] });
+    expect(p).toMatchObject({ cleared: [5] });
   });
 });
 

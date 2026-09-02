@@ -1,9 +1,10 @@
 import { Type } from "@sinclair/typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { collectRequests } from "../cli/inspector.js";
+import { clearToolResults, keepRecentTokens, llmSummarize } from "../src/compaction.js";
 import type { AgentEvent } from "../src/events.js";
 import { EventLog } from "../src/log.js";
-import { maxSteps, runTurn } from "../src/loop.js";
+import { describeRequestBody, maxSteps, recordingProvider, runTurn } from "../src/loop.js";
 import { deriveMessages } from "../src/messages.js";
 import { type AssistantTurn, openaiCompat, type Provider } from "../src/provider.js";
 import { ProviderError } from "../src/providers/errors.js";
@@ -265,6 +266,95 @@ describe("请求层记录(Q48)", () => {
     expect(c.request.reason).toBe("overflow-retry");
     expect(c.before.map((e) => e.type)).toEqual(["compaction"]);
     expect(c.response?.text).toBe("b");
+  });
+});
+
+describe("策略请求的真实正文与策略名(Q60)", () => {
+  it("describeRequestBody:正常步 tail 为空;摘要请求 = 前缀投影 + 指示消息", () => {
+    const log = fresh();
+    log.append({ type: "assistant/message", at: "t", text: "a", toolCalls: [], stopReason: "end" });
+    const plain = deriveMessages(log.events);
+    expect(describeRequestBody(log.events, plain)).toEqual({ prefixEvents: 3, tail: [] });
+
+    const withInstruction = [
+      ...deriveMessages(log.events.slice(0, 2)),
+      { role: "user" as const, content: "请压缩" },
+    ];
+    expect(describeRequestBody(log.events, withInstruction)).toEqual({
+      prefixEvents: 2,
+      tail: [{ role: "user", content: "请压缩" }],
+    });
+
+    const standalone = [
+      { role: "system" as const, content: "你是会话压缩助手。" },
+      { role: "user" as const, content: "全文…" },
+    ];
+    expect(describeRequestBody(log.events, standalone)).toEqual({
+      prefixEvents: 0,
+      tail: standalone,
+    });
+  });
+
+  it("recordingProvider 把摘要请求的真实正文记进 request.body;压缩事件带策略名", async () => {
+    const log = fresh();
+    log.append({
+      type: "assistant/message",
+      at: "t",
+      text: "",
+      toolCalls: [{ id: "c1", name: "big", args: {} }],
+      stopReason: "tool",
+    });
+    log.append({
+      type: "tool/result",
+      at: "t",
+      callId: "c1",
+      name: "big",
+      content: "x".repeat(4000),
+      isError: false,
+    });
+    log.append({
+      type: "assistant/message",
+      at: "t",
+      text: "ok",
+      toolCalls: [],
+      stopReason: "end",
+    });
+    const summarizer: Provider = {
+      model: "fake",
+      async complete() {
+        return {
+          text: "摘要正文",
+          toolCalls: [],
+          stopReason: "end",
+          usage: { inputTokens: 900, outputTokens: 10 },
+        };
+      },
+    };
+    const strategy = llmSummarize();
+    const payload = await strategy({
+      events: log.events,
+      window: 100000,
+      targetTokens: 50,
+      provider: recordingProvider(log, summarizer),
+      preservation: keepRecentTokens(10),
+    });
+    expect(payload?.strategy).toBe("llmSummarize(structuredFull, replay)");
+    const req = log.events.find((e) => e.type === "request");
+    if (req?.type !== "request") throw new Error("应记 request");
+    expect(req.reason).toBe("compaction");
+    const body = req.body;
+    if (!body) throw new Error("应记 body");
+    expect(body.tail).toHaveLength(1);
+    expect(body.tail[0]?.role).toBe("user");
+    expect((body.tail[0] as { content: string }).content).toContain("压缩");
+    expect(body.prefixEvents).toBeGreaterThan(0);
+
+    const cleared = await clearToolResults({ keepRecent: 0, clearAtLeast: 1 })({
+      events: log.events,
+      window: 1,
+      targetTokens: 1,
+    });
+    expect(cleared?.strategy).toBe("clearToolResults(keepRecent=0, clearAtLeast=1)");
   });
 });
 

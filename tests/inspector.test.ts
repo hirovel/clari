@@ -1,6 +1,7 @@
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
 import { fmtMs, fmtTok, RequestInspector } from "../cli/inspector.js";
+import type { AgentEvent } from "../src/events.js";
 import { EventLog } from "../src/log.js";
 import { runTurn } from "../src/loop.js";
 import type { AssistantTurn, Provider, ToolDef } from "../src/provider.js";
@@ -196,6 +197,90 @@ describe("请求检视器(Q49)", () => {
     expect(insp.isDetail).toBe(false);
     insp.handleInput("\x1b");
     expect(closed()).toBe(1);
+  });
+
+  it("第 7 分区 写入:本次请求之后追加的事件原样 JSON", async () => {
+    const { log, provider } = await session();
+    const { insp, text } = build(log, provider, 60);
+    insp.handleInput("g");
+    insp.handleInput("\r");
+    insp.handleInput("7");
+    const doc = text();
+    expect(doc).toContain("[7 写入]");
+    expect(doc).toContain("assistant/message");
+    expect(doc).toContain("tool/result");
+    expect(doc).toContain('"callId": "c1"');
+    expect(doc).toContain("模型可见");
+    expect(doc).not.toContain('"text": "完成"'); // 那是下一次请求的写入
+  });
+
+  it("事件视图(Tab):内核维护的全部事件,逐条大小与可见性;Enter 看原样 JSON", async () => {
+    const { log, provider } = await session();
+    const { insp, text } = build(log, provider, 30);
+    insp.handleInput("\t");
+    let doc = text();
+    expect(insp.currentMode).toBe("events");
+    expect(doc).toContain("事件日志");
+    expect(doc).toContain(`${log.events.length} 条`);
+    expect(doc).toContain("#0    ");
+    expect(doc).toContain("session/start");
+    expect(doc).toContain("request");
+    expect(doc).toContain("只给人看");
+    expect(doc).toContain("模型可见");
+    insp.handleInput("g");
+    insp.handleInput("\r");
+    doc = text();
+    expect(insp.currentMode).toBe("event");
+    expect(doc).toContain("事件 #0");
+    expect(doc).toContain('"type": "session/start"');
+    expect(doc).toContain('"system": "你是助手"');
+    insp.handleInput("]");
+    expect(text()).toContain("事件 #1");
+    insp.handleInput("\x1b");
+    expect(insp.currentMode).toBe("events");
+    insp.handleInput("\t");
+    expect(insp.currentMode).toBe("list");
+  });
+
+  it("压缩请求的发送分区显示真实发出的消息(前缀 + 摘要指示),线路 JSON 同源", () => {
+    const events: AgentEvent[] = [
+      { type: "session/start", at: "t", model: "fake", system: "S" },
+      { type: "user/message", at: "t", text: "U1" },
+      { type: "assistant/message", at: "t", text: "A1", toolCalls: [], stopReason: "end" },
+      { type: "user/message", at: "t", text: "U2" },
+      {
+        type: "request",
+        at: "t",
+        model: "fake",
+        messages: 4,
+        tools: [],
+        estimatedTokens: 10,
+        reason: "compaction",
+        body: { prefixEvents: 3, tail: [{ role: "user", content: "请压缩以上对话" }] },
+      },
+      {
+        type: "compaction",
+        at: "t",
+        summary: "摘要",
+        coversFrom: 2,
+        coversUpTo: 3,
+        strategy: "llmSummarize(structuredFull, replay)",
+      },
+    ];
+    const log = new EventLog();
+    for (const e of events) log.append(e);
+    const { insp, text } = build(log, scripted([]));
+    insp.handleInput("\r");
+    insp.handleInput("3");
+    const doc = text();
+    expect(doc).toContain("请压缩以上对话");
+    expect(doc).toContain("A1");
+    expect(doc).not.toContain("U2"); // 前缀只到第 3 条事件
+    insp.handleInput("5");
+    expect(text()).toContain("请压缩以上对话");
+    insp.handleInput("1");
+    expect(text()).toContain("策略");
+    expect(text()).toContain("llmSummarize(structuredFull, replay)");
   });
 
   it("没有请求时给出提示而不崩", () => {

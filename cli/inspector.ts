@@ -12,7 +12,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { estimateTokens } from "../src/context.js";
 import type { AgentEvent } from "../src/events.js";
-import { deriveMessages, type Message } from "../src/messages.js";
+import { compactionState, deriveMessages, type Message } from "../src/messages.js";
 import { type Provider, parseEffort, type ToolDef } from "../src/provider.js";
 import { c } from "./theme.js";
 
@@ -79,8 +79,8 @@ export function collectRequests(events: readonly AgentEvent[]): RequestRecord[] 
   return out;
 }
 
-export const SECTIONS = ["概要", "决策", "发送", "工具定义", "线路 JSON", "接收"] as const;
-export type Section = 1 | 2 | 3 | 4 | 5 | 6;
+export const SECTIONS = ["概要", "决策", "发送", "工具定义", "线路 JSON", "接收", "写入"] as const;
+export type Section = 1 | 2 | 3 | 4 | 5 | 6 | 7;
 
 export type InspectorDeps = {
   events: () => readonly AgentEvent[];
@@ -171,13 +171,14 @@ export function listRow(rec: RequestRecord, selected: boolean): string {
     tail = rec.request.reason === "compaction" ? "… 无结果" : "… 进行中";
   }
   const retry = rec.retries.length > 0 ? `  重试 ${rec.retries.length}` : "";
-  const reason =
+  // 请求种类放在前面:一眼分出正常步、压缩摘要、溢出重发;行尾被截断也不丢这个信息。
+  const kind =
     rec.request.reason === "overflow-retry"
-      ? "  溢出重发"
+      ? "溢出重发  "
       : rec.request.reason === "compaction"
-        ? "  压缩"
+        ? "压缩  "
         : "";
-  const body = `${head} ${clock(rec.request.at)}  ${model}  ${sent}  ${tail}${retry}${reason}`;
+  const body = `${head} ${clock(rec.request.at)}  ${model}  ${kind}${sent}  ${tail}${retry}`;
   return `${mark} ${selected ? c.bold(c.ink(body)) : c.soft(body)}`;
 }
 
@@ -204,6 +205,7 @@ export function summaryLines(rec: RequestRecord, messages: Message[]): string[] 
     row("强度", r.effort ?? "未设置(不传,用供应商默认)"),
     row("发送", `${r.messages} 条消息 · ${r.tools.length} 个工具 · 估算 ${r.estimatedTokens} tok`),
   ];
+  if (rec.compaction?.strategy) lines.push(row("策略", rec.compaction.strategy));
   if (r.threshold !== undefined) {
     const room = r.threshold - r.estimatedTokens;
     lines.push(
@@ -273,7 +275,7 @@ export function decisionLines(rec: RequestRecord): string[] {
         if (e.cleared?.length) parts.push(`清除 ${e.cleared.length} 条工具结果`);
         if (e.tokensBefore !== undefined) parts.push(`压缩前 ${e.tokensBefore} tok`);
         if (e.usage) parts.push(`摘要请求 ${e.usage.inputTokens}→${e.usage.outputTokens} tok`);
-        lines.push(`${c.jin("◇")} 压缩:${parts.join(",")}`);
+        lines.push(`${c.jin("◇")} 压缩${e.strategy ? `(${e.strategy})` : ""}:${parts.join(",")}`);
         break;
       }
       case "decision":
@@ -459,19 +461,114 @@ export function receivedLines(rec: RequestRecord, raw: string[] | undefined): st
   return lines;
 }
 
+// ---------- 请求正文重建与写入视图 ----------
+
+/**
+ * 某次请求实际发出的消息。正常步 = 请求之前全部事件的投影;
+ * 策略自己发的请求(压缩摘要)记了 body:前缀投影 + 策略追加的尾部消息,同样逐字节可重建。
+ */
+export function messagesFor(events: readonly AgentEvent[], rec: RequestRecord): Message[] {
+  const b = rec.request.body;
+  if (b) return [...deriveMessages(events.slice(0, b.prefixEvents)), ...(b.tail as Message[])];
+  return deriveMessages(events.slice(0, rec.index));
+}
+
+const PROJECTED = new Set(["session/start", "user/message", "assistant/message", "tool/result"]);
+
+function visibility(e: AgentEvent): string {
+  return PROJECTED.has(e.type) ? "模型可见" : "只给人看";
+}
+
+function jsonLines(e: AgentEvent, pad: string): string[] {
+  return JSON.stringify(e, null, 2)
+    .split("\n")
+    .map((l) => pad + l);
+}
+
+/** 第 7 分区:这次请求之后追加进日志的事件,原样 JSON。 */
+export function writtenLines(
+  events: readonly AgentEvent[],
+  rec: RequestRecord,
+  until: number,
+): string[] {
+  const lines: string[] = [
+    c.faint(
+      `请求 #${rec.n} 发出后追加进日志的事件(下标 ${rec.index + 1} 到 ${until - 1}),原样 JSON。内核记住的就是这些,没有别的。`,
+    ),
+    "",
+  ];
+  if (until <= rec.index + 1) {
+    lines.push(c.faint("(尚无)"));
+    return lines;
+  }
+  for (let i = rec.index + 1; i < until; i++) {
+    const e = events[i];
+    if (!e) continue;
+    lines.push(
+      `${c.jin(`#${i}`)} ${c.ink(e.type)}  ${c.soft(`${JSON.stringify(e).length} 字符 · ${visibility(e)}`)}`,
+    );
+    lines.push(...jsonLines(e, "    ").map((l) => c.faint(l)));
+    lines.push("");
+  }
+  return lines;
+}
+
+/** 事件视图的一行:下标、时间、类型、大小、可见性、压缩状态。 */
+export function eventRow(events: readonly AgentEvent[], i: number, selected: boolean): string {
+  const e = events[i];
+  if (!e) return "";
+  const state = compactionState(events);
+  let flag = "";
+  if (e.type === "tool/result" && state.cleared.has(i)) flag = "  已清除→占位";
+  else if (state.summary && i >= state.coversFrom && i < state.coversUpTo) flag = "  已被摘要覆盖";
+  const size = JSON.stringify(e).length;
+  const body = `${`#${i}`.padEnd(5)} ${clock(e.at)}  ${e.type.padEnd(18)} ${String(size).padStart(7)} 字符  ${visibility(e)}${flag}`;
+  const mark = selected ? c.zhu("▸") : " ";
+  const tone = selected
+    ? c.bold(c.ink(body))
+    : PROJECTED.has(e.type)
+      ? c.soft(body)
+      : c.faint(body);
+  return `${mark} ${tone}`;
+}
+
+/** 单条事件的原样 JSON 视图。 */
+export function eventLines(events: readonly AgentEvent[], i: number): string[] {
+  const e = events[i];
+  if (!e) return [c.faint("(无此事件)")];
+  const state = compactionState(events);
+  const notes: string[] = [visibility(e)];
+  if (e.type === "tool/result" && state.cleared.has(i)) {
+    notes.push("投影时已换成占位文本(原文仍在这里)");
+  } else if (state.summary && i >= state.coversFrom && i < state.coversUpTo) {
+    notes.push("投影时已被摘要取代(原文仍在这里)");
+  }
+  return [
+    c.faint(`${JSON.stringify(e).length} 字符 · ${notes.join(" · ")}`),
+    "",
+    ...jsonLines(e, "").map((l) => c.ink(l)),
+  ];
+}
+
 // ---------- 组件 ----------
 
+type Mode = "list" | "detail" | "events" | "event";
+
 export class RequestInspector implements Component {
-  private mode: "list" | "detail" = "list";
+  private mode: Mode = "list";
   private selected = 0;
+  private eventSelected = 0;
   private section: Section = 1;
   private scroll = 0;
   private folded = false;
   private lastViewport = 10;
+  private recCache: { len: number; recs: RequestRecord[] } | undefined;
+  /** 已按宽度换行的分区内容缓存;键含事件数,日志一变自然失效。生产级会话动辄上千事件,不能每个按键都重算。 */
+  private lineCache = new Map<string, string[]>();
 
   constructor(private deps: InspectorDeps) {}
 
-  /** 打开时回到列表并选中最新一条。 */
+  /** 打开时回到请求列表并选中最新一条。 */
   reset(): void {
     this.mode = "list";
     this.section = 1;
@@ -479,71 +576,134 @@ export class RequestInspector implements Component {
     this.selected = Math.max(0, this.records().length - 1);
   }
 
+  /** 直接进入事件视图(/events)。 */
+  showEvents(): void {
+    this.mode = "events";
+    this.scroll = 0;
+    this.eventSelected = Math.max(0, this.deps.events().length - 1);
+  }
+
   get isDetail(): boolean {
     return this.mode === "detail";
   }
 
-  records(): RequestRecord[] {
-    return collectRequests(this.deps.events());
+  get currentMode(): Mode {
+    return this.mode;
   }
 
-  invalidate(): void {}
+  records(): RequestRecord[] {
+    const events = this.deps.events();
+    if (this.recCache?.len !== events.length) {
+      this.recCache = { len: events.length, recs: collectRequests(events) };
+    }
+    return this.recCache.recs;
+  }
+
+  invalidate(): void {
+    this.lineCache.clear();
+  }
 
   handleInput(data: string): void {
     const recs = this.records();
-    if (this.mode === "list") {
-      if (matchesKey(data, Key.escape) || data === "q") this.deps.onClose();
-      else if (matchesKey(data, Key.up) || data === "k")
-        this.selected = Math.max(0, this.selected - 1);
-      else if (matchesKey(data, Key.down) || data === "j")
-        this.selected = Math.min(Math.max(0, recs.length - 1), this.selected + 1);
-      else if (matchesKey(data, Key.home) || data === "g") this.selected = 0;
-      else if (matchesKey(data, Key.end) || data === "G")
-        this.selected = Math.max(0, recs.length - 1);
-      else if (matchesKey(data, Key.enter) && recs.length > 0) {
-        this.mode = "detail";
-        this.scroll = 0;
-      }
-    } else {
-      const page = Math.max(1, this.lastViewport - 1);
-      if (matchesKey(data, Key.escape) || data === "q") {
-        this.mode = "list";
-        this.scroll = 0;
-      } else if (matchesKey(data, Key.up) || data === "k")
-        this.scroll = Math.max(0, this.scroll - 1);
-      else if (matchesKey(data, Key.down) || data === "j") this.scroll += 1;
-      else if (matchesKey(data, Key.pageUp)) this.scroll = Math.max(0, this.scroll - page);
-      else if (matchesKey(data, Key.pageDown)) this.scroll += page;
-      else if (matchesKey(data, Key.home) || data === "g") this.scroll = 0;
-      else if (matchesKey(data, Key.end) || data === "G") this.scroll = Number.MAX_SAFE_INTEGER;
-      else if (matchesKey(data, Key.left) || data === "h") this.switchSection(-1);
-      else if (matchesKey(data, Key.right) || data === "l") this.switchSection(1);
-      else if (/^[1-6]$/.test(data)) {
-        this.section = Number(data) as Section;
-        this.scroll = 0;
-      } else if (data === "f") {
-        this.folded = !this.folded;
-        this.scroll = 0;
-      } else if (data === "[" || data === "]") {
-        // 不离开详情页切换请求。
-        const step = data === "]" ? 1 : -1;
-        this.selected = Math.min(Math.max(0, recs.length - 1), Math.max(0, this.selected + step));
-        this.scroll = 0;
-      }
+    const events = this.deps.events();
+    const page = Math.max(1, this.lastViewport - 1);
+    const tab = data === "\t";
+    switch (this.mode) {
+      case "list":
+        if (matchesKey(data, Key.escape) || data === "q") this.deps.onClose();
+        else if (tab) this.showEvents();
+        else if (matchesKey(data, Key.up) || data === "k")
+          this.selected = Math.max(0, this.selected - 1);
+        else if (matchesKey(data, Key.down) || data === "j")
+          this.selected = Math.min(Math.max(0, recs.length - 1), this.selected + 1);
+        else if (matchesKey(data, Key.home) || data === "g") this.selected = 0;
+        else if (matchesKey(data, Key.end) || data === "G")
+          this.selected = Math.max(0, recs.length - 1);
+        else if (matchesKey(data, Key.enter) && recs.length > 0) {
+          this.mode = "detail";
+          this.scroll = 0;
+        }
+        break;
+      case "detail":
+        if (matchesKey(data, Key.escape) || data === "q") {
+          this.mode = "list";
+          this.scroll = 0;
+        } else if (matchesKey(data, Key.up) || data === "k")
+          this.scroll = Math.max(0, this.scroll - 1);
+        else if (matchesKey(data, Key.down) || data === "j") this.scroll += 1;
+        else if (matchesKey(data, Key.pageUp)) this.scroll = Math.max(0, this.scroll - page);
+        else if (matchesKey(data, Key.pageDown)) this.scroll += page;
+        else if (matchesKey(data, Key.home) || data === "g") this.scroll = 0;
+        else if (matchesKey(data, Key.end) || data === "G") this.scroll = Number.MAX_SAFE_INTEGER;
+        else if (matchesKey(data, Key.left) || data === "h") this.switchSection(-1);
+        else if (matchesKey(data, Key.right) || data === "l") this.switchSection(1);
+        else if (/^[1-7]$/.test(data)) {
+          this.section = Number(data) as Section;
+          this.scroll = 0;
+        } else if (data === "f") {
+          this.folded = !this.folded;
+          this.scroll = 0;
+        } else if (data === "[" || data === "]") {
+          const step = data === "]" ? 1 : -1;
+          this.selected = Math.min(Math.max(0, recs.length - 1), Math.max(0, this.selected + step));
+          this.scroll = 0;
+        }
+        break;
+      case "events":
+        if (matchesKey(data, Key.escape) || data === "q") this.deps.onClose();
+        else if (tab) {
+          this.mode = "list";
+          this.scroll = 0;
+        } else if (matchesKey(data, Key.up) || data === "k")
+          this.eventSelected = Math.max(0, this.eventSelected - 1);
+        else if (matchesKey(data, Key.down) || data === "j")
+          this.eventSelected = Math.min(Math.max(0, events.length - 1), this.eventSelected + 1);
+        else if (matchesKey(data, Key.pageUp))
+          this.eventSelected = Math.max(0, this.eventSelected - page);
+        else if (matchesKey(data, Key.pageDown))
+          this.eventSelected = Math.min(Math.max(0, events.length - 1), this.eventSelected + page);
+        else if (matchesKey(data, Key.home) || data === "g") this.eventSelected = 0;
+        else if (matchesKey(data, Key.end) || data === "G")
+          this.eventSelected = Math.max(0, events.length - 1);
+        else if (matchesKey(data, Key.enter) && events.length > 0) {
+          this.mode = "event";
+          this.scroll = 0;
+        }
+        break;
+      case "event":
+        if (matchesKey(data, Key.escape) || data === "q") {
+          this.mode = "events";
+          this.scroll = 0;
+        } else if (matchesKey(data, Key.up) || data === "k")
+          this.scroll = Math.max(0, this.scroll - 1);
+        else if (matchesKey(data, Key.down) || data === "j") this.scroll += 1;
+        else if (matchesKey(data, Key.pageUp)) this.scroll = Math.max(0, this.scroll - page);
+        else if (matchesKey(data, Key.pageDown)) this.scroll += page;
+        else if (matchesKey(data, Key.home) || data === "g") this.scroll = 0;
+        else if (matchesKey(data, Key.end) || data === "G") this.scroll = Number.MAX_SAFE_INTEGER;
+        else if (data === "[" || data === "]") {
+          const step = data === "]" ? 1 : -1;
+          this.eventSelected = Math.min(
+            Math.max(0, events.length - 1),
+            Math.max(0, this.eventSelected + step),
+          );
+          this.scroll = 0;
+        }
+        break;
     }
     this.deps.requestRender();
   }
 
   private switchSection(step: number): void {
     const next = this.section + step;
-    this.section = (next < 1 ? 6 : next > 6 ? 1 : next) as Section;
+    this.section = (next < 1 ? 7 : next > 7 ? 1 : next) as Section;
     this.scroll = 0;
   }
 
   /** 当前分区的完整内容行(未按视口裁切),测试与预览用。 */
   sectionLines(rec: RequestRecord, section: Section): string[] {
     const events = this.deps.events();
-    const messages = deriveMessages(events.slice(0, rec.index));
+    const messages = messagesFor(events, rec);
     const defs = this.deps.tools().filter((d) => rec.request.tools.includes(d.name));
     switch (section) {
       case 1:
@@ -561,42 +721,95 @@ export class RequestInspector implements Component {
         return wireLines(this.deps.providerFor(rec.index), messages, defs, rec.request.effort);
       case 6:
         return receivedLines(rec, this.deps.rawFor?.(rec.index));
+      case 7: {
+        const recs = this.records();
+        const next = recs.find((r) => r.index > rec.index);
+        return writtenLines(events, rec, next ? next.index : events.length);
+      }
     }
+  }
+
+  private cached(key: string, build: () => string[]): string[] {
+    const hit = this.lineCache.get(key);
+    if (hit) return hit;
+    if (this.lineCache.size > 64) this.lineCache.clear();
+    const lines = build();
+    this.lineCache.set(key, lines);
+    return lines;
   }
 
   render(width: number): string[] {
     const w = Math.max(20, width);
     const inner = w - 2;
     const rows = Math.max(8, this.deps.rows());
-    const recs = this.records();
+    const events = this.deps.events();
     const rule = c.faint("─".repeat(inner));
     const pad = (s: string) => ` ${truncateToWidth(s, inner, "…", true)} `;
+    const fill = (body: string[], viewport: number) => {
+      while (body.length < viewport) body.push(pad(""));
+      return body;
+    };
+    /** 让选中行始终可见的窗口起点。 */
+    const windowStart = (sel: number, total: number, viewport: number) =>
+      Math.max(0, Math.min(sel - Math.floor(viewport / 2), total - viewport));
 
     if (this.mode === "list") {
-      const title = `${c.bold(c.jin("请求检视"))}  ${c.soft(`${recs.length} 次请求`)}`;
+      const recs = this.records();
+      const title = `${c.bold(c.jin("请求检视"))}  ${c.soft(`${recs.length} 次请求`)}  ${c.faint("Tab 切到事件视图")}`;
       const columns = c.faint(
         "  序号  时间      模型  发送(条数 · 估算 tok)  → 实测(缓存)  +输出  耗时  停止原因",
       );
       const head = [pad(title), pad(columns), pad(rule)];
-      const foot = [pad(rule), pad(c.faint("↑↓ 选择 · Enter 详情 · Esc 关闭"))];
+      const foot = [pad(rule), pad(c.faint("↑↓ 选择 · Enter 详情 · Tab 事件视图 · Esc 关闭"))];
       const viewport = rows - head.length - foot.length;
       this.lastViewport = viewport;
       let body: string[];
       if (recs.length === 0) body = [pad(c.faint("尚无请求。发一条消息后再来。"))];
       else {
-        // 让选中行始终可见。
-        const start = Math.max(
-          0,
-          Math.min(this.selected - Math.floor(viewport / 2), recs.length - viewport),
-        );
+        const start = windowStart(this.selected, recs.length, viewport);
         body = recs
           .slice(start, start + viewport)
           .map((r, i) => pad(listRow(r, start + i === this.selected)));
       }
-      while (body.length < viewport) body.push(pad(""));
-      return [...head, ...body, ...foot];
+      return [...head, ...fill(body, viewport), ...foot];
     }
 
+    if (this.mode === "events") {
+      const title = `${c.bold(c.jin("事件日志"))}  ${c.soft(`${events.length} 条`)}  ${c.faint("内核维护的全部状态就是这个数组;屏幕、请求视图、模型看到的消息都是它的投影")}`;
+      const columns = c.faint("  下标  时间      类型                  大小  可见性  压缩状态");
+      const head = [pad(title), pad(columns), pad(rule)];
+      const foot = [pad(rule), pad(c.faint("↑↓ 选择 · Enter 原样 JSON · Tab 请求视图 · Esc 关闭"))];
+      const viewport = rows - head.length - foot.length;
+      this.lastViewport = viewport;
+      const start = windowStart(this.eventSelected, events.length, viewport);
+      const body = this.cached(
+        `events:${events.length}:${start}:${this.eventSelected}:${inner}`,
+        () =>
+          events
+            .slice(start, start + viewport)
+            .map((_, i) => pad(eventRow(events, start + i, start + i === this.eventSelected))),
+      ).slice();
+      return [...head, ...fill(body, viewport), ...foot];
+    }
+
+    if (this.mode === "event") {
+      const e = events[this.eventSelected];
+      const title = `${c.bold(c.jin(`事件 #${this.eventSelected}`))}  ${c.ink(e?.type ?? "")}  ${c.faint(e ? clock(e.at) : "")}  ${c.faint(`(${this.eventSelected + 1}/${events.length})`)}`;
+      const head = [pad(title), pad(rule)];
+      const content = this.cached(`event:${events.length}:${this.eventSelected}:${inner}`, () =>
+        eventLines(events, this.eventSelected).flatMap((l) => wrapTextWithAnsi(l, inner)),
+      );
+      return this.scrollable(
+        head,
+        content,
+        "↑↓ 滚动 · PgUp/PgDn 翻页 · [ ] 上下一条 · Esc 返回",
+        rows,
+        pad,
+        rule,
+      );
+    }
+
+    const recs = this.records();
     const rec = recs[this.selected];
     if (!rec) {
       this.mode = "list";
@@ -608,9 +821,29 @@ export class RequestInspector implements Component {
     }).join(" ");
     const title = `${c.bold(c.jin(`请求 #${rec.n}`))}  ${c.ink(rec.request.model)}  ${c.faint(clock(rec.request.at))}  ${c.faint(`(${this.selected + 1}/${recs.length})`)}`;
     const head = [pad(title), pad(tabs), pad(rule)];
-    const content = this.sectionLines(rec, this.section).flatMap((l) => wrapTextWithAnsi(l, inner));
-    const footHint =
-      "↑↓ 滚动 · PgUp/PgDn 翻页 · ←→ 或 1-6 切分区 · [ ] 切请求 · f 折叠正文 · Esc 返回";
+    const content = this.cached(
+      `detail:${events.length}:${rec.index}:${this.section}:${this.folded}:${inner}`,
+      () => this.sectionLines(rec, this.section).flatMap((l) => wrapTextWithAnsi(l, inner)),
+    );
+    return this.scrollable(
+      head,
+      content,
+      "↑↓ 滚动 · PgUp/PgDn 翻页 · ←→ 或 1-7 切分区 · [ ] 切请求 · f 折叠正文 · Esc 返回",
+      rows,
+      pad,
+      rule,
+    );
+  }
+
+  /** 带位置提示的视口:头部固定,内容按 scroll 裁切,尾部显示第几行到第几行。 */
+  private scrollable(
+    head: string[],
+    content: string[],
+    hint: string,
+    rows: number,
+    pad: (s: string) => string,
+    rule: string,
+  ): string[] {
     const viewport = Math.max(1, rows - head.length - 2);
     this.lastViewport = viewport;
     const maxScroll = Math.max(0, content.length - viewport);
@@ -621,7 +854,7 @@ export class RequestInspector implements Component {
       content.length <= viewport
         ? `${content.length} 行`
         : `第 ${this.scroll + 1}-${Math.min(content.length, this.scroll + viewport)} 行 / ${content.length}`;
-    const foot = [pad(rule), pad(`${c.faint(footHint)}  ${c.soft(pos)}`)];
+    const foot = [pad(rule), pad(`${c.faint(hint)}  ${c.soft(pos)}`)];
     return [...head, ...slice.map(pad), ...foot];
   }
 }

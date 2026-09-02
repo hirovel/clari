@@ -253,6 +253,11 @@ describe("TUI 壳", () => {
     expect(app.inspector.isOpen()).toBe(true);
     term.feed("\x12");
     expect(app.inspector.isOpen()).toBe(false);
+    // /events 直接进事件视图
+    await app.command("/events");
+    expect(app.inspector.isOpen()).toBe(true);
+    expect(app.inspector.lines(100).map(stripAnsi).join("\n")).toContain("事件日志");
+    app.inspector.close();
     app.stop();
   });
 

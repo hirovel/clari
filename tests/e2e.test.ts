@@ -182,7 +182,7 @@ describe("端到端(假服务器)", () => {
     // 屏幕视角
     expect(doc).toContain("· 重试 1:429");
     expect(doc).toContain("✓ big");
-    expect(doc).toContain("◇ 已压缩:摘要覆盖事件");
+    expect(doc).toContain("◇ 已压缩(llmSummarize(structuredFull, replay)):摘要覆盖事件");
     expect(doc).toContain("完成:文件已看过");
     expect(doc).toContain("→ 实测 900(缓存 600)");
     expect(doc).toContain("○ 空闲");

@@ -92,6 +92,8 @@ export type CompactionPayload = {
   /** 摘要请求的用量与耗时;策略有 LLM 调用时填。 */
   usage?: Usage;
   latencyMs?: number;
+  /** 策略名与参数,给人看:这次压缩是谁做的。 */
+  strategy?: string;
 };
 
 export type CompactionInput = {
@@ -150,7 +152,10 @@ export function clearToolResults(
     const toClear = candidates.slice(0, Math.max(0, candidates.length - keepRecent));
     const saved = toClear.reduce((n, c) => n + c.tokens, 0);
     if (saved < clearAtLeast) return null;
-    return { cleared: toClear.map((c) => c.idx) };
+    return {
+      cleared: toClear.map((c) => c.idx),
+      strategy: `clearToolResults(keepRecent=${keepRecent}, clearAtLeast=${clearAtLeast})`,
+    };
   };
 }
 
@@ -232,6 +237,7 @@ export function llmSummarize(
       tokensBefore: estimateAfter(events),
       ...(turn.usage && { usage: turn.usage }),
       latencyMs: Date.now() - startedAt,
+      strategy: `llmSummarize(${promptName(prompt)}, ${callStyle})`,
     };
   };
 }
@@ -273,17 +279,26 @@ function serialize(messages: Message[]): string {
 export function pipeline(...strategies: CompactionStrategy[]): CompactionStrategy {
   return async (input) => {
     let acc: CompactionPayload | null = null;
+    const names: string[] = [];
     for (const strategy of strategies) {
       const view = acc
         ? [...input.events, { type: "compaction", at: "", ...acc } as AgentEvent]
         : input.events;
       const p = await strategy({ ...input, events: view });
       if (!p) continue;
+      names.push(p.strategy ?? "匿名策略");
       acc = merge(acc, p);
       if (estimateAfter(input.events, acc) <= input.targetTokens) break;
     }
-    return acc;
+    return acc ? { ...acc, strategy: `pipeline(${names.join(" → ")})` } : null;
   };
+}
+
+/** 提示词的可读名:内置两版按名称,自定义的按长度标记。 */
+function promptName(prompt: string): string {
+  if (prompt === SUMMARY_PROMPTS.structuredFull) return "structuredFull";
+  if (prompt === SUMMARY_PROMPTS.minimal) return "minimal";
+  return `custom ${prompt.length} 字`;
 }
 
 function merge(a: CompactionPayload | null, b: CompactionPayload): CompactionPayload {

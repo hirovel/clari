@@ -1,8 +1,14 @@
 // 两个入口(tui.ts 交互、run.ts 一次性)共用的组装:参数、配置、模型、工具、压缩、会话文件、系统提示词。
 // 只做拼装,不含界面。
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { clearToolResults, llmSummarize, pipeline } from "../src/compaction.js";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import {
+  type CompactionStrategy,
+  clearToolResults,
+  llmSummarize,
+  pipeline,
+} from "../src/compaction.js";
 import {
   createProvider,
   DEFAULT_CONFIG_PATH,
@@ -35,7 +41,8 @@ export const SESSIONS_DIR = "sessions";
 export type CommonArgs = {
   model?: string;
   effort?: EffortLevel;
-  compaction: "llm" | "clear" | "pipeline";
+  /** 内置名 llm | clear | pipeline,或一个导出 CompactionStrategy 的模块路径(.mjs/.js/.ts)。 */
+  compaction: string;
   subagent: boolean;
   trace: boolean;
   fold: boolean;
@@ -79,14 +86,9 @@ export function parseCommonArgs(argv: string[]): CommonArgs {
         out.effort = level;
         break;
       }
-      case "--compaction": {
-        const v = takeValue(i++, a);
-        if (v !== "llm" && v !== "clear" && v !== "pipeline") {
-          throw new Error(`未知压缩策略 "${v}",可选:llm clear pipeline`);
-        }
-        out.compaction = v;
+      case "--compaction":
+        out.compaction = takeValue(i++, a);
         break;
-      }
       case "--resume":
         out.resume = takeValue(i++, a);
         break;
@@ -168,18 +170,42 @@ export function bootstrap(): Bootstrap {
   };
 }
 
-export function buildCompaction(
-  name: CommonArgs["compaction"],
+export const BUILTIN_STRATEGIES: Record<string, () => CompactionStrategy> = {
+  llm: () => llmSummarize(),
+  clear: () => clearToolResults(),
+  pipeline: () => pipeline(clearToolResults(), llmSummarize()),
+};
+
+/**
+ * 压缩策略:内置名,或外部模块路径(扩展点)。模块用 default 导出一个 CompactionStrategy 函数,
+ * 例如 `export default async (input) => ({ cleared: [...], strategy: "我的策略" })`。
+ * 这样对比新策略不必改仓库代码:`pnpm once -- "任务" --compaction ./my-strategy.mjs --json`。
+ */
+export async function loadCompactionStrategy(name: string): Promise<CompactionStrategy> {
+  const builtin = BUILTIN_STRATEGIES[name];
+  if (builtin) return builtin();
+  if (/[\\/]|\.(m?js|ts)$/.test(name)) {
+    const mod = (await import(pathToFileURL(resolve(name)).href)) as {
+      default?: unknown;
+      strategy?: unknown;
+    };
+    const fn = mod.default ?? mod.strategy;
+    if (typeof fn !== "function") {
+      throw new Error(`压缩策略模块 ${name} 必须 default 导出一个函数`);
+    }
+    return fn as CompactionStrategy;
+  }
+  throw new Error(
+    `未知压缩策略 "${name}",可选:${Object.keys(BUILTIN_STRATEGIES).join(" ")},或模块路径`,
+  );
+}
+
+export async function buildCompaction(
+  name: string,
   window: number,
   reserveTokens = RESERVE,
-): CompactionConfig {
-  const strategy =
-    name === "clear"
-      ? clearToolResults()
-      : name === "pipeline"
-        ? pipeline(clearToolResults(), llmSummarize())
-        : llmSummarize();
-  return { strategy, window, reserveTokens };
+): Promise<CompactionConfig> {
+  return { strategy: await loadCompactionStrategy(name), window, reserveTokens };
 }
 
 export function buildTools(

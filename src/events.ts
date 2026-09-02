@@ -1,6 +1,8 @@
 // 事件即真相(Q5 裁决):凡是进入模型请求的内容,必须可以从事件日志重建。
 // 模型看到的消息永远是 deriveMessages(events) 的投影,没有第二份状态。
 
+import type { Message } from "./messages.js";
+
 export type ToolCall = {
   id: string;
   name: string;
@@ -90,6 +92,11 @@ export type AgentEvent =
       reason: "turn" | "overflow-retry" | "compaction";
       /** 请求的强度级别(Q52);未设置时缺省,请求里也没有强度参数。 */
       effort?: string;
+      /**
+       * 正常步不记正文(它就是此前事件的投影)。策略自己发的请求(压缩摘要)发的不是纯投影,
+       * 记下差异部分:前 prefixEvents 条事件的投影 + tail 里的消息 = 实际发出的全部消息。
+       */
+      body?: { prefixEvents: number; tail: Message[] };
     }
   /** 同一请求内的一次重试(退避等待之前记录)。只给人看。 */
   | {
@@ -135,6 +142,8 @@ export type AgentEvent =
       /** 摘要请求的用量与耗时(有 LLM 调用的策略才有)。只给人看。 */
       usage?: Usage;
       latencyMs?: number;
+      /** 是哪个策略、什么参数做的这次压缩,如 llmSummarize(structuredFull, replay)。只给人看。 */
+      strategy?: string;
     };
 
 export function now(): string {
