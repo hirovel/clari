@@ -10,6 +10,7 @@ import { now } from "../src/events.js";
 import { EventLog } from "../src/log.js";
 import type { CompactionConfig } from "../src/loop.js";
 import { openaiCompat } from "../src/provider.js";
+import { createTaskTool } from "../src/subagent.js";
 import { bashTool } from "./tools/bash.js";
 import { editTool, readTool, writeTool } from "./tools/fs.js";
 
@@ -62,10 +63,17 @@ console.log(
   "运行中输入 = 插话;/stop = 打断;/context = 上下文构成;/compact [指示] = 手动压缩;Ctrl+C = 退出\n",
 );
 
+// subagent 是可选装能力,默认不装(KERNEL_SUBAGENT=1 开启)。子拿同样的四工具,不含 task。
+const baseTools = [readTool, writeTool, editTool, bashTool];
+const tools =
+  process.env.KERNEL_SUBAGENT === "1"
+    ? [...baseTools, createTaskTool({ parent: log, provider, tools: baseTools, compaction })]
+    : baseTools;
+
 const agent = new Agent({
   log,
   provider,
-  tools: [readTool, writeTool, editTool, bashTool],
+  tools,
   compaction,
   onDelta: (d) => process.stdout.write(d),
 });

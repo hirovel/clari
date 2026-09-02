@@ -16,6 +16,11 @@ export class EventLog {
     if (filePath) mkdirSync(dirname(filePath), { recursive: true });
   }
 
+  /** 落盘路径;纯内存日志为 undefined。子会话据此派生自己的路径。 */
+  get path(): string | undefined {
+    return this.filePath;
+  }
+
   append(e: AgentEvent): void {
     this.events.push(e);
     if (this.filePath) appendFileSync(this.filePath, JSON.stringify(e) + "\n");
