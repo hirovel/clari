@@ -45,6 +45,8 @@ export type AgentEvent =
        * 对人也可见 —— 透明度第一,思考过程不隐藏。
        */
       reasoning?: string;
+      /** 从发出请求到收齐响应的毫秒数。只给人看。 */
+      latencyMs?: number;
     }
   | {
       type: "tool/result";
@@ -58,6 +60,50 @@ export type AgentEvent =
   | { type: "session/interrupt"; at: string }
   /** 会话中切换模型。只给人看(不投影):此后的 assistant 消息由新模型生成。 */
   | { type: "session/model"; at: string; model: string }
+  /**
+   * 一次模型请求即将发出。只给人看。紧随其后的 assistant/message 就是它的响应
+   * (中间可能夹 retry 事件;失败则以 request/error 收尾)。
+   * 请求正文不重复落盘:它等于 deriveMessages(此事件之前的全部事件),投影是纯函数,随时可以原样重建。
+   */
+  | {
+      type: "request";
+      at: string;
+      model: string;
+      /** 投影出的消息条数。 */
+      messages: number;
+      /** 随请求发出的工具名。 */
+      tools: string[];
+      /** 发送前的估算 token(与自动压缩检查同一口径)。 */
+      estimatedTokens: number;
+      /** 自动压缩阈值;未配置压缩时缺省。 */
+      threshold?: number;
+      /** turn = 正常步;overflow-retry = 溢出压缩后的那一次重发。 */
+      reason: "turn" | "overflow-retry";
+    }
+  /** 同一请求内的一次重试(退避等待之前记录)。只给人看。 */
+  | {
+      type: "retry";
+      at: string;
+      attempt: number;
+      delayMs: number;
+      error: string;
+      status?: number;
+    }
+  /** 请求最终失败(重试用尽或不可重试)。只给人看;循环随后抛出。 */
+  | { type: "request/error"; at: string; error: string; status?: number }
+  /**
+   * 策略槽做出的、改变了走向的决定。只给人看。
+   * 内核按端到端原则只有这几处会"做决定",全部记录下来,检视器据此证明中间层没有藏聪明。
+   */
+  | {
+      type: "decision";
+      at: string;
+      slot: "steering";
+      boundary: "step" | "turn";
+      /** 本次注入的留言条数(随后的 user/message 事件即其内容)。 */
+      injected: number;
+    }
+  | { type: "decision"; at: string; slot: "termination"; steps: number; reason: string }
   | {
       /**
        * 压缩(Q31):追加事件,永不改写历史。投影读取它决定跳过什么、注入什么。

@@ -24,11 +24,32 @@ export type CompleteOptions = {
   onDelta?: (textDelta: string) => void;
   onReasoning?: (reasoningDelta: string) => void;
   signal?: AbortSignal;
+  /** 每次重试前回调(循环据此记 retry 事件)。 */
+  onRetry?: (info: { attempt: number; delayMs: number; error: Error }) => void;
+  /** 收到的每一行原始流(SSE 行,未解析)。透明度的最底层:开了 trace 就一字不漏。 */
+  onRaw?: (line: string) => void;
 };
 
 export interface Provider {
   readonly model: string;
   complete(messages: Message[], tools: ToolDef[], opts?: CompleteOptions): Promise<AssistantTurn>;
+  /**
+   * 给定消息与工具,返回将要发出的请求正文(不含鉴权头)。纯函数,与 complete 实际发送的逐字节一致。
+   * 检视器用它把"模型到底收到了什么"展示到 wire 层;不实现的 provider 只能看到内核层的消息投影。
+   */
+  wire?(messages: Message[], tools: ToolDef[]): unknown;
+}
+
+/** 把 CompleteOptions 里的 onRetry 并进适配器自己的重试配置,两边都收到通知。 */
+export function mergeRetry(
+  base: RetryOptions | undefined,
+  opts: Pick<CompleteOptions, "signal" | "onRetry">,
+): RetryOptions {
+  const onRetry: RetryOptions["onRetry"] = (info) => {
+    base?.onRetry?.(info);
+    opts.onRetry?.(info);
+  };
+  return { ...base, onRetry, ...(opts.signal && { signal: opts.signal }) };
 }
 
 // ---------- OpenAI-compatible 适配器(Q4b:先接一家,DeepSeek 走此协议) ----------
@@ -171,21 +192,23 @@ export function openaiCompat(opts: {
   retry?: RetryOptions;
 }): Provider {
   const baseUrl = opts.baseUrl.replace(/\/$/, "");
+  const wire = (messages: Message[], tools: ToolDef[]) => ({
+    model: opts.model,
+    messages: messages.map((m) => toWire(m, opts.reasoningField)),
+    ...(tools.length > 0 && {
+      tools: tools.map((t) => ({
+        type: "function",
+        function: { name: t.name, description: t.description, parameters: t.parameters },
+      })),
+    }),
+    stream: true,
+    stream_options: { include_usage: true },
+  });
   return {
     model: opts.model,
-    async complete(messages, tools, { onDelta, onReasoning, signal } = {}) {
-      const body = {
-        model: opts.model,
-        messages: messages.map((m) => toWire(m, opts.reasoningField)),
-        ...(tools.length > 0 && {
-          tools: tools.map((t) => ({
-            type: "function",
-            function: { name: t.name, description: t.description, parameters: t.parameters },
-          })),
-        }),
-        stream: true,
-        stream_options: { include_usage: true },
-      };
+    wire,
+    async complete(messages, tools, { onDelta, onReasoning, signal, onRetry, onRaw } = {}) {
+      const body = wire(messages, tools);
 
       return withRetry(
         async () => {
@@ -217,6 +240,7 @@ export function openaiCompat(opts: {
               const lines = buffer.split("\n");
               buffer = lines.pop() ?? "";
               for (const line of lines) {
+                if (onRaw && line.trim()) onRaw(line);
                 const data = line.replace(/^data: ?/, "").trim();
                 if (!data || !line.startsWith("data:") || data === "[DONE]") continue;
                 const before = acc.reasoning.length;
@@ -240,7 +264,7 @@ export function openaiCompat(opts: {
             throw err;
           }
         },
-        { ...opts.retry, ...(signal && { signal }) },
+        mergeRetry(opts.retry, { ...(signal && { signal }), ...(onRetry && { onRetry }) }),
       );
     },
   };

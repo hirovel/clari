@@ -80,6 +80,10 @@ export function deriveMessages(events: readonly AgentEvent[]): Message[] {
       case "session/interrupt":
       case "session/model":
       case "compaction":
+      case "request":
+      case "retry":
+      case "request/error":
+      case "decision":
         break;
     }
   }

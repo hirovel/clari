@@ -50,6 +50,13 @@ const turns: AssistantTurn[] = [
 let i = 0;
 const provider: Provider = {
   model: "deepseek-chat",
+  wire: (messages, tools) => ({
+    model: "deepseek-chat",
+    messages,
+    tools: tools.map((t) => ({ type: "function", function: t })),
+    stream: true,
+    stream_options: { include_usage: true },
+  }),
   async complete(_m, _t, opts) {
     const t = turns[i++];
     if (!t) throw new Error("脚本越界");
@@ -91,7 +98,8 @@ const read = defineTool({
   },
 });
 
-const term = new VirtualTerminal(100, 60);
+// 行数决定检视器覆盖层的高度;预览取 34 行,接近一屏终端。
+const term = new VirtualTerminal(100, 34);
 const log = new EventLog();
 const app = createTuiApp({
   terminal: term,
@@ -108,7 +116,23 @@ const app = createTuiApp({
 await app.submit("为什么 queue 模式的测试挂了?");
 log.append({ type: "compaction", at: "t", cleared: [3, 5] });
 await app.command("/context");
+
+// 请求检视器(Ctrl+R)的几个画面,接在会话画面之后。
+const divider = (t: string) => ["", `\x1b[38;2;201;165;78m━━ ${t} ━━\x1b[39m`, ""];
+const shots: string[] = [];
+app.inspector.open();
+shots.push(...divider("Ctrl+R 请求检视:列表"), ...app.inspector.lines(100));
+app.inspector.key("g");
+app.inspector.key("\r");
+shots.push(...divider("详情 · 1 概要"), ...app.inspector.lines(100));
+app.inspector.key("3");
+shots.push(...divider("详情 · 3 发送(完整正文)"), ...app.inspector.lines(100));
+app.inspector.key("]");
+app.inspector.key("]");
+app.inspector.key("6");
+shots.push(...divider("详情 · 6 接收"), ...app.inspector.lines(100));
+app.inspector.close();
 app.stop();
 
-writeFileSync(out, ansiToHtmlDocument(app.lines(100), "agent-kernel TUI 预览"), "utf8");
+writeFileSync(out, ansiToHtmlDocument([...app.lines(100), ...shots], "agent-kernel TUI 预览"), "utf8");
 console.log(`已写入 ${out}`);

@@ -8,6 +8,7 @@ import {
   Loader,
   Markdown,
   matchesKey,
+  type OverlayHandle,
   Spacer,
   type Terminal,
   Text,
@@ -19,8 +20,9 @@ import { contextBreakdown } from "../src/context.js";
 import { type AgentEvent, now } from "../src/events.js";
 import type { EventLog } from "../src/log.js";
 import type { CompactionConfig } from "../src/loop.js";
-import type { Provider } from "../src/provider.js";
+import type { Provider, ToolDef } from "../src/provider.js";
 import type { Tool } from "../src/tools.js";
+import { fmtMs, fmtTok, RequestInspector } from "./inspector.js";
 import { c, editorTheme, markdownTheme } from "./theme.js";
 
 export type ModelChoice = {
@@ -52,6 +54,12 @@ export type TuiAppDeps = {
   settings?: TuiSettings;
   systemPrompt: string;
   onExit?: () => void;
+  /** 工具结果初始是否折叠。缺省不折叠(Q34);Ctrl+O 随时切换。 */
+  fold?: boolean;
+  /** 记录每次请求收到的原始流,供检视器"接收"分区逐行展示。 */
+  trace?: boolean;
+  /** 原始流旁路输出(如写 trace 文件)。requestIndex 是 request 事件在日志中的下标。 */
+  onRaw?: (requestIndex: number, line: string) => void;
 };
 
 export type TuiApp = {
@@ -61,10 +69,24 @@ export type TuiApp = {
   command(text: string): Promise<void>;
   /** 当前文档的渲染行(带 ANSI),用于离线验证与预览。 */
   lines(width?: number): string[];
+  /** 请求检视器(Ctrl+R)。lines() 在打开时返回检视器的渲染行,便于离线验证。 */
+  inspector: {
+    open(): void;
+    close(): void;
+    isOpen(): boolean;
+    key(data: string): void;
+    lines(width?: number): string[];
+  };
+  toggleFold(): void;
+  toggleReasoning(): void;
   stop(): void;
 };
 
+/** 折叠时保留的行数。 */
+const FOLD_HEAD = 3;
+
 const COMMANDS = [
+  { name: "inspect", description: "请求检视器:每次 API 请求的发送、接收与决策(Ctrl+R)" },
   { name: "context", description: "上下文构成:各部分 token 与占比" },
   { name: "compact", description: "手动压缩,可附指示:/compact 保留报错" },
   { name: "model", description: "切换模型:/model 供应商/模型;不带参数列出可选" },
@@ -90,7 +112,15 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
   editor.setAutocompleteProvider(new CombinedAutocompleteProvider(COMMANDS, process.cwd()));
 
   tui.addChild(header);
-  tui.addChild(new Text(c.faint("运行中输入即插话 · Esc 打断 · /help 命令"), 1, 0));
+  tui.addChild(
+    new Text(
+      c.faint(
+        "运行中输入即插话 · Esc 打断 · Ctrl+R 请求检视 · Ctrl+O 折叠结果 · Ctrl+T 思考 · /help",
+      ),
+      1,
+      0,
+    ),
+  );
   tui.addChild(new Spacer(1));
   tui.addChild(transcript);
   tui.addChild(live);
@@ -105,15 +135,38 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
   let reasoningBuffer = "";
   let loader: Loader | undefined;
 
+  // 显示状态(Q49):折叠/隐藏只改屏幕,不改日志;切换键重绘已有节点。
+  let foldResults = deps.fold ?? false;
+  let showReasoning = true;
+  const resultNodes: { node: Text; name: string; content: string; isError: boolean }[] = [];
+  const reasoningNodes: { node: Text; text: string }[] = [];
+
+  // 请求层记录(Q48):发出每个请求时用的 provider,以及开 trace 时收到的原始流。都不进日志。
+  const providersAt = new Map<number, Provider>();
+  const rawAt = new Map<number, string[]>();
+  let requestCount = 0;
+  let lastRequestIndex = -1;
+  let lastRequest: Extract<AgentEvent, { type: "request" }> | undefined;
+
   // 推理内容不隐藏(Q34):thinking 模型的思考过程以淡字实时呈现。
   const renderReasoning = (s: string) =>
-    `${c.faint("思考")}\n${c.faint(c.italic(indent(s.trim())))}`;
+    showReasoning
+      ? `${c.faint("思考")}\n${c.faint(c.italic(indent(s.trim())))}`
+      : c.faint("思考(已隐藏,Ctrl+T 显示)");
 
   const agent = new Agent({
     log,
     provider: deps.provider,
     tools,
     compaction,
+    onRaw: (line) => {
+      if (deps.trace) {
+        const bucket = rawAt.get(lastRequestIndex) ?? [];
+        bucket.push(line);
+        rawAt.set(lastRequestIndex, bucket);
+      }
+      deps.onRaw?.(lastRequestIndex, line);
+    },
     onDelta: (d) => {
       if (!streaming) {
         transcript.addChild(new Spacer(1));
@@ -159,6 +212,74 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     tui.requestRender();
   }
 
+  /** 工具结果的屏幕文本。折叠只是显示状态,内容原封不动留在节点里。 */
+  function resultText(r: { name: string; content: string; isError: boolean }): string {
+    const mark = r.isError ? c.zhu("✗") : c.green("✓");
+    const trimmed = r.content.trim();
+    const all = trimmed ? trimmed.split("\n") : [];
+    let body: string;
+    if (all.length === 0) body = "  (无输出)";
+    else if (foldResults && all.length > FOLD_HEAD + 1) {
+      body = `${indent(all.slice(0, FOLD_HEAD).join("\n"))}\n${c.soft(`  … 还有 ${all.length - FOLD_HEAD} 行(Ctrl+O 展开)`)}`;
+    } else body = indent(trimmed);
+    return `${mark} ${c.soft(r.name)}\n${r.isError ? c.soft(body) : c.faint(body)}`;
+  }
+
+  function toggleFold(): void {
+    foldResults = !foldResults;
+    for (const r of resultNodes) r.node.setText(resultText(r));
+    note(c.faint(foldResults ? "· 工具结果已折叠(Ctrl+O 展开)" : "· 工具结果已展开"));
+  }
+
+  function toggleReasoning(): void {
+    showReasoning = !showReasoning;
+    for (const r of reasoningNodes) r.node.setText(renderReasoning(r.text));
+    if (reasoningView) reasoningView.setText(renderReasoning(reasoningBuffer));
+    note(c.faint(showReasoning ? "· 思考已显示" : "· 思考已隐藏(Ctrl+T 显示)"));
+  }
+
+  /** 一步请求的一行小结:估算 vs 实测、缓存、输出、耗时、停止原因。检视器展开全部细节。 */
+  function requestSummary(e: Extract<AgentEvent, { type: "assistant/message" }>): string {
+    if (!lastRequest) return "";
+    const u = e.usage;
+    const measured = u
+      ? `→ 实测 ${fmtTok(u.inputTokens)}${u.cacheReadTokens !== undefined ? `(缓存 ${fmtTok(u.cacheReadTokens)})` : ""} · +${fmtTok(u.outputTokens)}`
+      : "→ 无用量";
+    return c.faint(
+      `· #${requestCount}  ${lastRequest.messages} 条消息 ≈${fmtTok(lastRequest.estimatedTokens)} ${measured} · ${fmtMs(e.latencyMs)} · ${e.stopReason}`,
+    );
+  }
+
+  // ---------- 请求检视器(Q49) ----------
+
+  const defs = (): ToolDef[] =>
+    tools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters }));
+  let overlay: OverlayHandle | undefined;
+  const inspector = new RequestInspector({
+    events: () => log.events,
+    providerFor: (i) => providersAt.get(i),
+    tools: defs,
+    rows: () => deps.terminal.rows,
+    ...(deps.trace && { rawFor: (i: number) => rawAt.get(i) }),
+    onClose: () => closeInspector(),
+    requestRender: () => tui.requestRender(),
+  });
+
+  function openInspector(): void {
+    if (overlay) return;
+    inspector.reset();
+    overlay = tui.showOverlay(inspector, { width: "100%", maxHeight: "100%", anchor: "top-left" });
+    tui.requestRender();
+  }
+
+  function closeInspector(): void {
+    if (!overlay) return;
+    overlay.hide();
+    overlay = undefined;
+    tui.setFocus(editor);
+    tui.requestRender();
+  }
+
   function showLoader(message: string): void {
     hideLoader();
     loader = new Loader(tui, c.zhu, c.faint, message);
@@ -183,12 +304,16 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
         break;
       case "assistant/message": {
         if (reasoningView) {
-          if (e.reasoning) reasoningView.setText(renderReasoning(e.reasoning));
-          else transcript.removeChild(reasoningView);
+          if (e.reasoning) {
+            reasoningView.setText(renderReasoning(e.reasoning));
+            reasoningNodes.push({ node: reasoningView, text: e.reasoning });
+          } else transcript.removeChild(reasoningView);
           reasoningView = undefined;
           reasoningBuffer = "";
         } else if (e.reasoning) {
-          transcript.addChild(new Text(renderReasoning(e.reasoning), 1, 0));
+          const node = new Text(renderReasoning(e.reasoning), 1, 0);
+          reasoningNodes.push({ node, text: e.reasoning });
+          transcript.addChild(node);
         }
         if (streaming) {
           if (e.text) streaming.setText(e.text);
@@ -210,20 +335,40 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
           );
         }
         if (e.usage) lastUsage = e.usage;
+        // 每步一行请求小结(Q48):始终显示,一行不爆;细节进检视器。
+        const summary = requestSummary(e);
+        if (summary) note(summary);
         if (e.stopReason === "aborted") note(c.faint("— 已打断 —"));
         if (e.stopReason === "length") note(c.jin("◇ 输出被截断,已要求模型重发"));
         break;
       }
       case "tool/result": {
-        const mark = e.isError ? c.zhu("✗") : c.green("✓");
-        const trimmed = e.content.trim();
-        const body = trimmed ? indent(trimmed) : "  (无输出)";
-        // 默认完整显示,不折叠(Q34)。
-        transcript.addChild(
-          new Text(`${mark} ${c.soft(e.name)}\n${e.isError ? c.soft(body) : c.faint(body)}`, 1, 0),
-        );
+        // 默认完整显示,不折叠(Q34);Ctrl+O 切换折叠,内容仍在节点里。
+        const rec = { name: e.name, content: e.content, isError: e.isError };
+        const node = new Text(resultText(rec), 1, 0);
+        resultNodes.push({ node, ...rec });
+        transcript.addChild(node);
         break;
       }
+      case "request":
+        requestCount += 1;
+        lastRequestIndex = log.events.length - 1;
+        lastRequest = e;
+        providersAt.set(lastRequestIndex, agent.provider);
+        break;
+      case "retry":
+        note(
+          c.faint(
+            `· 重试 ${e.attempt}:${e.status ?? ""} ${e.error.split("\n")[0]},${fmtMs(e.delayMs)} 后再试`,
+          ),
+        );
+        break;
+      case "decision":
+        if (e.slot === "steering") note(c.faint(`· 插话注入 ${e.injected} 条(${e.boundary} 边界)`));
+        break;
+      case "request/error":
+        // 循环随后抛出,submit 的 catch 负责呈现,这里不重复。
+        break;
       case "compaction": {
         const parts: string[] = [];
         if (e.summary !== undefined)
@@ -287,6 +432,9 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
         break;
       case "stop":
         agent.interrupt();
+        break;
+      case "inspect":
+        openInspector();
         break;
       case "context":
         note(renderContext());
@@ -418,6 +566,20 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       exit();
       return { consume: true };
     }
+    if (matchesKey(data, Key.ctrl("r"))) {
+      if (overlay) closeInspector();
+      else openInspector();
+      return { consume: true };
+    }
+    if (overlay) return undefined; // 检视器打开时,其余按键归它
+    if (matchesKey(data, Key.ctrl("o"))) {
+      toggleFold();
+      return { consume: true };
+    }
+    if (matchesKey(data, Key.ctrl("t"))) {
+      toggleReasoning();
+      return { consume: true };
+    }
     if (matchesKey(data, Key.escape) && agent.running && !editor.isShowingAutocomplete()) {
       agent.interrupt();
       return { consume: true };
@@ -439,6 +601,15 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     submit,
     command,
     lines: (width = deps.terminal.columns) => tui.render(width),
+    inspector: {
+      open: openInspector,
+      close: closeInspector,
+      isOpen: () => overlay !== undefined,
+      key: (data) => inspector.handleInput(data),
+      lines: (width = deps.terminal.columns) => (overlay ? inspector.render(width) : []),
+    },
+    toggleFold,
+    toggleReasoning,
     stop,
   };
 }

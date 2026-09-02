@@ -3,7 +3,7 @@ import { now, type ToolCall } from "./events.js";
 import type { EventLog } from "./log.js";
 import { deriveMessages } from "./messages.js";
 import type { AssistantTurn, Provider, ToolDef } from "./provider.js";
-import { isContextOverflow } from "./providers/errors.js";
+import { isContextOverflow, ProviderError } from "./providers/errors.js";
 import { type Tool, validateArgs } from "./tools.js";
 
 // ---------- 策略槽(Q27:全部是开放接口,内置实现无特权,自定义实现从外部注入) ----------
@@ -52,6 +52,8 @@ export type TurnDeps = {
   signal?: AbortSignal;
   onDelta?: (textDelta: string) => void;
   onReasoning?: (reasoningDelta: string) => void;
+  /** 原始流逐行回调(trace)。不进日志:体量大且可由 provider 重放,由 CLI 决定是否写旁路文件。 */
+  onRaw?: (line: string) => void;
   /** 压缩配置(Q33):给了就启用自动触发与溢出恢复。 */
   compaction?: CompactionConfig;
 };
@@ -124,16 +126,49 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
       await compactIfNeeded(deps, deps.compaction, false);
     }
 
+    // 请求事件(Q48):正文不落盘,它就是此刻的投影;记下规模与口径,检视器按需原样重建。
+    const messages = deriveMessages(log.events);
+    const cfg = deps.compaction;
+    log.append({
+      type: "request",
+      at: now(),
+      model: provider.model,
+      messages: messages.length,
+      tools: defs.map((d) => d.name),
+      estimatedTokens: estimateAfter(log.events),
+      ...(cfg && { threshold: cfg.window - (cfg.reserveTokens ?? DEFAULT_RESERVE) }),
+      reason: overflowRecovered ? "overflow-retry" : "turn",
+    });
+    const startedAt = Date.now();
+
     let turn: AssistantTurn;
     try {
-      turn = await provider.complete(deriveMessages(log.events), defs, {
+      turn = await provider.complete(messages, defs, {
         ...(onDelta && { onDelta }),
         ...(onReasoning && { onReasoning }),
         ...(signal && { signal }),
+        ...(deps.onRaw && { onRaw: deps.onRaw }),
+        onRetry: ({ attempt, delayMs, error }) => {
+          const status = statusOf(error);
+          log.append({
+            type: "retry",
+            at: now(),
+            attempt,
+            delayMs,
+            error: error.message,
+            ...(status !== undefined && { status }),
+          });
+        },
       });
     } catch (err) {
+      const status = statusOf(err);
+      log.append({
+        type: "request/error",
+        at: now(),
+        error: (err as Error).message,
+        ...(status !== undefined && { status }),
+      });
       // 溢出恢复(Q33):压缩取得进展才许重试,且只重试一次。
-      const cfg = deps.compaction;
       const overflow = cfg && (cfg.isOverflow ?? defaultIsOverflow)(err as Error);
       if (!overflow || overflowRecovered) throw err;
       overflowRecovered = true;
@@ -141,7 +176,12 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
       if (!progressed) throw err;
       continue;
     }
-    log.append({ type: "assistant/message", at: now(), ...turn });
+    log.append({
+      type: "assistant/message",
+      at: now(),
+      ...turn,
+      latencyMs: Date.now() - startedAt,
+    });
     steps += 1;
 
     if (turn.stopReason === "aborted") return "aborted";
@@ -155,21 +195,31 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
     }
 
     // step 边界。审批等待发生在上面的执行阶段,此处才排队列 —— 留言永不落进确认窗口(Q20 硬规矩)。
-    let injected = steering("step") ? inject(log, drainQueue()) : 0;
+    let injected = steering("step") ? inject(log, "step", drainQueue()) : 0;
 
     if (turn.stopReason === "end") {
-      if (injected === 0 && steering("turn")) injected = inject(log, drainQueue());
+      if (injected === 0 && steering("turn")) injected = inject(log, "turn", drainQueue());
       if (injected === 0) return "idle"; // 无事可欠,turn 结束
     }
 
     const reason = termination({ steps });
-    if (reason !== null) return { stopped: reason };
+    if (reason !== null) {
+      log.append({ type: "decision", at: now(), slot: "termination", steps, reason });
+      return { stopped: reason };
+    }
   }
 }
 
-function inject(log: EventLog, texts: string[]): number {
+/** 注入留言。决定先于内容落盘:检视器读到 decision 就知道随后几条 user/message 是插话而非新 turn。 */
+function inject(log: EventLog, boundary: "step" | "turn", texts: string[]): number {
+  if (texts.length === 0) return 0;
+  log.append({ type: "decision", at: now(), slot: "steering", boundary, injected: texts.length });
   for (const text of texts) log.append({ type: "user/message", at: now(), text });
   return texts.length;
+}
+
+function statusOf(err: unknown): number | undefined {
+  return err instanceof ProviderError ? err.status : undefined;
 }
 
 function appendResult(log: EventLog, call: ToolCall, content: string, isError: boolean): void {

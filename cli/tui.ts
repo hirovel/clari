@@ -1,5 +1,8 @@
 // TUI 入口:读配置、匹配供应商、组装工具与压缩,然后把界面交给 tui-app。
-// 用法:pnpm tui [-- --model <供应商/模型>] [--subagent] [--compaction llm|clear|pipeline]
+// 用法:pnpm tui [-- --model <供应商/模型>] [--subagent] [--compaction llm|clear|pipeline] [--trace] [--fold]
+//   --trace  逐行记录收到的原始流:检视器"接收"分区可看,并写入 <会话>.trace.jsonl
+//   --fold   工具结果初始折叠(Ctrl+O 随时切换;缺省完整显示)
+import { appendFileSync } from "node:fs";
 import { ProcessTerminal } from "@earendil-works/pi-tui";
 import { clearToolResults, llmSummarize, pipeline } from "../src/compaction.js";
 import {
@@ -88,6 +91,8 @@ const settings: TuiSettings = {
   },
 };
 
+const traceFile = sessionFile.replace(/\.jsonl$/, ".trace.jsonl");
+
 createTuiApp({
   terminal: new ProcessTerminal(),
   log,
@@ -98,10 +103,24 @@ createTuiApp({
   info: { model: first.model, providerName: first.providerName, sessionFile },
   settings,
   systemPrompt: SYSTEM_PROMPT,
+  fold: args.fold,
+  trace: args.trace,
+  ...(args.trace && {
+    onRaw: (requestIndex: number, line: string) =>
+      appendFileSync(traceFile, `${JSON.stringify({ request: requestIndex, line })}\n`),
+  }),
 });
 
-function parseArgs(argv: string[]): { model?: string; subagent: boolean; compaction?: string } {
-  const out: { model?: string; subagent: boolean; compaction?: string } = { subagent: false };
+type Args = {
+  model?: string;
+  subagent: boolean;
+  compaction?: string;
+  trace: boolean;
+  fold: boolean;
+};
+
+function parseArgs(argv: string[]): Args {
+  const out: Args = { subagent: false, trace: false, fold: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const next = argv[i + 1];
@@ -113,6 +132,10 @@ function parseArgs(argv: string[]): { model?: string; subagent: boolean; compact
       i++;
     } else if (a === "--subagent") {
       out.subagent = true;
+    } else if (a === "--trace") {
+      out.trace = true;
+    } else if (a === "--fold") {
+      out.fold = true;
     }
   }
   return out;

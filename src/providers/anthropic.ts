@@ -3,7 +3,7 @@
 // 流式事件按内容块下标分发。内核其余部分一行不改。
 import type { StopReason, ToolCall, Usage } from "../events.js";
 import type { Message } from "../messages.js";
-import type { AssistantTurn, Provider, ToolDef } from "../provider.js";
+import { type AssistantTurn, mergeRetry, type Provider, type ToolDef } from "../provider.js";
 import { ProviderError, parseRetryAfter } from "./errors.js";
 import { type RetryOptions, withRetry } from "./retry.js";
 
@@ -206,24 +206,32 @@ export function anthropic(opts: {
   retry?: RetryOptions;
 }): Provider {
   const baseUrl = (opts.baseUrl ?? "https://api.anthropic.com").replace(/\/$/, "");
+  const wire = (messages: Message[], tools: ToolDef[]) => {
+    const w = toAnthropicWire(messages);
+    return {
+      model: opts.model,
+      max_tokens: opts.maxTokens ?? 8192,
+      ...(w.system && { system: w.system }),
+      messages: w.messages,
+      ...(tools.length > 0 && {
+        tools: tools.map((t) => ({
+          name: t.name,
+          description: t.description,
+          input_schema: t.parameters,
+        })),
+      }),
+      stream: true,
+    };
+  };
   return {
     model: opts.model,
-    async complete(messages: Message[], tools: ToolDef[], { onDelta, signal } = {}) {
-      const wire = toAnthropicWire(messages);
-      const body = {
-        model: opts.model,
-        max_tokens: opts.maxTokens ?? 8192,
-        ...(wire.system && { system: wire.system }),
-        messages: wire.messages,
-        ...(tools.length > 0 && {
-          tools: tools.map((t) => ({
-            name: t.name,
-            description: t.description,
-            input_schema: t.parameters,
-          })),
-        }),
-        stream: true,
-      };
+    wire,
+    async complete(
+      messages: Message[],
+      tools: ToolDef[],
+      { onDelta, signal, onRetry, onRaw } = {},
+    ) {
+      const body = wire(messages, tools);
 
       return withRetry(
         async () => {
@@ -255,6 +263,7 @@ export function anthropic(opts: {
               const lines = buffer.split("\n");
               buffer = lines.pop() ?? "";
               for (const line of lines) {
+                if (onRaw && line.trim()) onRaw(line);
                 if (!line.startsWith("data:")) continue;
                 const data = line.slice(5).trim();
                 if (!data) continue;
@@ -280,7 +289,7 @@ export function anthropic(opts: {
             throw err;
           }
         },
-        { ...opts.retry, ...(signal && { signal }) },
+        mergeRetry(opts.retry, { ...(signal && { signal }), ...(onRetry && { onRetry }) }),
       );
     },
   };

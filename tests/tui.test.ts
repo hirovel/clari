@@ -162,6 +162,100 @@ describe("TUI 壳", () => {
     app.stop();
   });
 
+  it("每步一行请求小结;Ctrl+O 折叠/展开工具结果;Ctrl+T 隐藏/显示思考", async () => {
+    const long = defineTool({
+      name: "long",
+      description: "",
+      parameters: Type.Object({}),
+      async execute() {
+        return Array.from({ length: 10 }, (_, i) => `行${i + 1}`).join("\n");
+      },
+    });
+    const term = new VirtualTerminal(100, 40);
+    const app = createTuiApp({
+      terminal: term,
+      log: new EventLog(),
+      provider: scripted([
+        {
+          text: "",
+          toolCalls: [{ id: "c1", name: "long", args: {} }],
+          stopReason: "tool",
+          reasoning: "先拿到输出",
+          usage: { inputTokens: 1200, outputTokens: 20 },
+        },
+        {
+          text: "好了",
+          toolCalls: [],
+          stopReason: "end",
+          usage: { inputTokens: 1500, outputTokens: 5 },
+        },
+      ]),
+      tools: [long],
+      compaction: { strategy: async () => null, window: 100000, reserveTokens: 32000 },
+      reserveTokens: 32000,
+      info: { model: "fake-model", providerName: "fake", sessionFile: "s" },
+      systemPrompt: "sys",
+      onExit: () => {},
+    });
+    await app.submit("跑");
+    let doc = text(app);
+    expect(doc).toContain("· #1  2 条消息");
+    expect(doc).toContain("→ 实测 1.2k");
+    expect(doc).toContain("· #2  4 条消息");
+    expect(doc).toContain("行10"); // 默认完整显示(Q34)
+    expect(doc).toContain("先拿到输出");
+
+    term.feed("\x0f"); // Ctrl+O
+    doc = text(app);
+    expect(doc).toContain("行3");
+    expect(doc).not.toContain("行10");
+    expect(doc).toContain("… 还有 7 行(Ctrl+O 展开)");
+    term.feed("\x0f");
+    expect(text(app)).toContain("行10");
+
+    term.feed("\x14"); // Ctrl+T
+    doc = text(app);
+    expect(doc).not.toContain("先拿到输出");
+    expect(doc).toContain("思考(已隐藏,Ctrl+T 显示)");
+    term.feed("\x14");
+    expect(text(app)).toContain("先拿到输出");
+    app.stop();
+  });
+
+  it("Ctrl+R 打开请求检视器,检视器接管按键,Esc 关闭后回到编辑器", async () => {
+    const { app, term } = boot(
+      scripted([
+        {
+          text: "ok",
+          toolCalls: [],
+          stopReason: "end",
+          usage: { inputTokens: 100, outputTokens: 2 },
+        },
+      ]),
+    );
+    await app.submit("x");
+    expect(app.inspector.isOpen()).toBe(false);
+    term.feed("\x12"); // Ctrl+R
+    expect(app.inspector.isOpen()).toBe(true);
+    let doc = app.inspector.lines(100).map(stripAnsi).join("\n");
+    expect(doc).toContain("请求检视");
+    expect(doc).toContain("▸ #1");
+    app.inspector.key("\r");
+    doc = app.inspector.lines(100).map(stripAnsi).join("\n");
+    expect(doc).toContain("请求 #1");
+    expect(doc).toContain("[1 概要]");
+    app.inspector.key("\x1b");
+    app.inspector.key("\x1b");
+    expect(app.inspector.isOpen()).toBe(false);
+    expect(app.inspector.lines(100)).toEqual([]);
+    // 命令入口同样可用
+    await app.command("/inspect");
+    expect(app.inspector.isOpen()).toBe(true);
+    term.feed("\x12");
+    expect(app.inspector.isOpen()).toBe(false);
+    app.stop();
+  });
+
   it("请求失败不崩:错误以朱标行呈现,状态回到空闲", async () => {
     const provider: Provider = {
       model: "fake-model",

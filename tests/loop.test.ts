@@ -48,6 +48,11 @@ function call(name: string, args: unknown, id = "c1") {
   return { id, name, args };
 }
 
+/** 首条工具结果。请求/决策等只给人的事件夹在中间,不按固定下标取。 */
+function firstResult(log: EventLog) {
+  return log.events.find((e) => e.type === "tool/result");
+}
+
 describe("runTurn", () => {
   it("工具调用→执行→回喂→模型收尾:事件序列完整", async () => {
     const log = newLog();
@@ -60,15 +65,17 @@ describe("runTurn", () => {
       tools: [echoTool],
     });
     expect(outcome).toBe("idle");
+    // 每次模型请求前落一条 request(只给人看),响应紧随其后。
     expect(log.events.map((e) => e.type)).toEqual([
       "session/start",
       "user/message",
+      "request",
       "assistant/message",
       "tool/result",
+      "request",
       "assistant/message",
     ]);
-    const result = log.events[3];
-    expect(result).toMatchObject({ callId: "c1", content: "echo:hi", isError: false });
+    expect(firstResult(log)).toMatchObject({ callId: "c1", content: "echo:hi", isError: false });
   });
 
   it("工具抛异常→isError 结果回喂,循环继续不炸(Q9)", async () => {
@@ -82,7 +89,7 @@ describe("runTurn", () => {
       tools: [failTool],
     });
     expect(outcome).toBe("idle");
-    expect(log.events[3]).toMatchObject({ content: "工具内部错误", isError: true });
+    expect(firstResult(log)).toMatchObject({ content: "工具内部错误", isError: true });
   });
 
   it("参数校验失败→错误文本含路径与原参数,不执行工具(Q19)", async () => {
@@ -95,7 +102,7 @@ describe("runTurn", () => {
       ]),
       tools: [echoTool],
     });
-    const result = log.events[3] as { content: string; isError: boolean };
+    const result = firstResult(log) as { content: string; isError: boolean };
     expect(result.isError).toBe(true);
     expect(result.content).toContain("参数校验失败");
     expect(result.content).toContain('"wrong": 1');
@@ -112,7 +119,7 @@ describe("runTurn", () => {
       tools: [echoTool],
       slots: { approve: () => false },
     });
-    expect(log.events[3]).toMatchObject({ content: "用户拒绝执行此调用。", isError: true });
+    expect(firstResult(log)).toMatchObject({ content: "用户拒绝执行此调用。", isError: true });
   });
 
   it("maxSteps 终止策略叫停,返回 stopped 理由(Q8)", async () => {
@@ -166,13 +173,16 @@ describe("runTurn", () => {
       drainQueue: () => queue.splice(0),
     });
     const types = log.events.map((e) => e.type);
-    // 插话紧跟在工具结果之后、下一条 assistant 之前
+    // 插话紧跟在工具结果之后、下一条请求之前;注入决定先于留言落盘
     expect(types).toEqual([
       "session/start",
       "user/message",
+      "request",
       "assistant/message",
       "tool/result",
+      "decision",
       "user/message",
+      "request",
       "assistant/message",
     ]);
   });
@@ -196,10 +206,14 @@ describe("runTurn", () => {
     expect(types).toEqual([
       "session/start",
       "user/message",
+      "request",
       "assistant/message",
       "tool/result",
+      "request",
       "assistant/message",
+      "decision",
       "user/message",
+      "request",
       "assistant/message",
     ]);
   });
@@ -249,6 +263,6 @@ describe("runTurn", () => {
       ]),
       tools: [echoTool],
     });
-    expect(log.events[3]).toMatchObject({ content: '未知工具 "nope"。', isError: true });
+    expect(firstResult(log)).toMatchObject({ content: '未知工具 "nope"。', isError: true });
   });
 });

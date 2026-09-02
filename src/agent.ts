@@ -12,6 +12,7 @@ export type AgentOptions = {
   compaction?: TurnDeps["compaction"];
   onDelta?: (textDelta: string) => void;
   onReasoning?: (reasoningDelta: string) => void;
+  onRaw?: (line: string) => void;
 };
 
 /**
@@ -68,6 +69,7 @@ export class Agent {
       ...(this.opts.compaction && { compaction: this.opts.compaction }),
       ...(this.opts.onDelta && { onDelta: this.opts.onDelta }),
       ...(this.opts.onReasoning && { onReasoning: this.opts.onReasoning }),
+      ...(this.opts.onRaw && { onRaw: this.opts.onRaw }),
     });
     try {
       return await this.active;
