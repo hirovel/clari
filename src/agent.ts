@@ -28,6 +28,11 @@ export class Agent {
     return this.active !== undefined;
   }
 
+  /** 等待注入的留言条数(UI 状态栏用)。 */
+  get queued(): number {
+    return this.queue.length;
+  }
+
   /** 空闲时:入日志并开跑。运行中:进留言队列,注入时点由 steering 槽决定(Q20)。 */
   async prompt(text: string): Promise<TurnOutcome> {
     const log = this.opts.log;

@@ -6,6 +6,7 @@
     "test": "vitest run",
     "lint": "biome check .",
     "check": "tsc --noEmit && biome check . && vitest run",
+    "tui": "tsx cli/tui.ts",
     "chat": "tsx cli/chat.ts",
     "replay": "tsx cli/replay.ts"
   },
@@ -17,6 +18,7 @@
     "vitest": "^3.0.0"
   },
   "dependencies": {
+    "@earendil-works/pi-tui": "^0.84.4",
     "@sinclair/typebox": "^0.34.52"
   }
 }
