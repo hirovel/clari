@@ -8,6 +8,14 @@ import type { EffortLevel, OpenAIDialect, Provider } from "./provider.js";
 import { openaiCompat } from "./provider.js";
 import { anthropic, type ThinkingMode } from "./providers/anthropic.js";
 
+/** 每百万 token 的价格(美元)。缺哪项就不计哪项;整个缺省 = 不显示费用。 */
+export type ModelPrice = {
+  input: number;
+  output: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+};
+
 /** 单个模型的能力数据。字符串形式等价于只有 name。 */
 export type ModelConfig = {
   name: string;
@@ -19,6 +27,8 @@ export type ModelConfig = {
   thinkingMode?: ThinkingMode;
   /** 逐字合并进请求正文。 */
   extraBody?: Record<string, unknown>;
+  /** 价格数据,只用于显示费用;变价是常态,verifiedAt 标核对日期。 */
+  price?: ModelPrice;
 };
 
 export type ProviderConfig = {
@@ -41,6 +51,10 @@ export type ProviderConfig = {
   effortLevels?: EffortLevel[];
   extraBody?: Record<string, unknown>;
   extraHeaders?: Record<string, string>;
+  /** Anthropic 提示缓存断点,缺省开;中转站不支持时关。 */
+  promptCache?: boolean;
+  /** 流停滞判定毫秒数,缺省 90000;0 = 不限。 */
+  stallTimeoutMs?: number;
 };
 
 /** 系统提示词的段名(Q66):哪几段、什么顺序由配置或预设决定。 */
@@ -226,6 +240,7 @@ export type Resolved = {
   effortLevels?: EffortLevel[];
   thinkingMode?: ThinkingMode;
   extraBody?: Record<string, unknown>;
+  price?: ModelPrice;
 };
 
 /**
@@ -273,6 +288,7 @@ export function resolveModel(config: KernelConfig, requested?: string): Resolved
       ...(effortLevels && { effortLevels }),
       ...(thinkingMode && { thinkingMode }),
       ...(extraBody && { extraBody }),
+      ...(m.price && { price: m.price }),
     };
   }
 }
@@ -302,6 +318,7 @@ export function createProvider(r: Resolved, apiKey: string): Provider {
     ...(effortLevels && { effortLevels }),
     ...(extraBody && { extraBody }),
     ...(r.provider.extraHeaders && { extraHeaders: r.provider.extraHeaders }),
+    ...(r.provider.stallTimeoutMs !== undefined && { stallTimeoutMs: r.provider.stallTimeoutMs }),
   };
   if (r.provider.protocol === "anthropic") {
     return anthropic({
@@ -309,6 +326,7 @@ export function createProvider(r: Resolved, apiKey: string): Provider {
       ...shared,
       ...(maxTokens !== undefined && { maxTokens }),
       ...(thinkingMode && { thinkingMode }),
+      ...(r.provider.promptCache !== undefined && { promptCache: r.provider.promptCache }),
     });
   }
   return openaiCompat({

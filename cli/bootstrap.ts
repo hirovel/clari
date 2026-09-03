@@ -281,9 +281,17 @@ export function bootstrap(): Bootstrap {
       providerName: r.providerName,
       contextWindow: r.contextWindow,
       ...(r.effortLevels && { effortLevels: r.effortLevels }),
+      ...(r.price && { price: r.price }),
     };
   };
   const settings: TuiSettings = {
+    priceFor: (model) => {
+      try {
+        return resolveModel(config, model).price;
+      } catch {
+        return undefined;
+      }
+    },
     listModels: () =>
       Object.entries(config.providers).flatMap(([pn, p]) => modelNames(p).map((m) => `${pn}/${m}`)),
     switchModel: (name) => choose(name),

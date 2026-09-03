@@ -19,6 +19,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { Agent } from "../src/agent.js";
 import { contextBreakdown } from "../src/context.js";
+import { costOf, fmtCost, type Price, usageTotals } from "../src/cost.js";
 import { type AgentEvent, now, type ToolCall } from "../src/events.js";
 import type { EventLog } from "../src/log.js";
 import { type CompactionConfig, recordingProvider } from "../src/loop.js";
@@ -43,11 +44,15 @@ export type ModelChoice = {
   contextWindow: number;
   /** 该模型声明支持的强度级别;不声明 = 不校验。 */
   effortLevels?: EffortLevel[];
+  /** 价格数据(配置里给了才有),只用于显示费用。 */
+  price?: Price;
 };
 
 export type TuiSettings = {
   /** "供应商/模型" 列表,供 /model 与补全使用。 */
   listModels(): string[];
+  /** 某模型的价格;没配置返回 undefined。会话里换过模型时按各自价格累计。 */
+  priceFor?(model: string): Price | undefined;
   /** 按名切换模型(可能需要读 key),返回新 provider。 */
   switchModel(name: string): ModelChoice;
   /** 写入某供应商的 key 并落盘。 */
@@ -77,6 +82,8 @@ export type TuiAppDeps = {
   /** 初始强度级别(Q52);缺省不传。 */
   effort?: EffortLevel;
   effortLevels?: EffortLevel[];
+  /** 起始模型的价格(配置里给了才有)。 */
+  price?: Price;
   /** 审批槽的界面实现(Q64):ask = 每个工具调用弹一行确认;缺省 all 不问。 */
   approve?: "all" | "ask";
   /** 跨会话记忆已打开时的两个文件(Q65),供 /memory 看与删。 */
@@ -278,6 +285,10 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     );
   }
 
+  /** 当前模型的价格:配置接口优先,其次启动时带来的。 */
+  const priceFor = (model: string): Price | undefined =>
+    deps.settings?.priceFor?.(model) ?? (model === info.model ? deps.price : undefined);
+
   function updateStatus(): void {
     const state = agent.running ? c.zhu("● 运行中") : c.green("○ 空闲");
     const t = threshold();
@@ -290,11 +301,19 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       const tone = used >= 0.7 ? c.zhu : c.jin;
       tokens = `${tone(bar)} ${c.faint(`距自动压缩 ${pct(Math.max(0, 1 - used))} · ${lastUsage.inputTokens}→${lastUsage.outputTokens} tok`)}`;
     }
+    // 会话累计(含压缩摘要请求):输入、输出、缓存命中、费用。数据全部来自事件数组。
+    const totals = usageTotals(log.events, priceFor);
+    const sum =
+      totals.requests > 0
+        ? c.faint(
+            ` · 累计 ↑${fmtTok(totals.inputTokens)} ↓${fmtTok(totals.outputTokens)}${totals.cacheReadTokens > 0 ? ` 缓存 ${fmtTok(totals.cacheReadTokens)}` : ""}${totals.cost !== undefined ? ` ${fmtCost(totals.cost)}` : ""}`,
+          )
+        : "";
     const queued = agent.queued > 0 ? c.faint(` · 留言 ${agent.queued}`) : "";
     const effort = agent.effort ? c.faint(` · 强度 ${agent.effort}`) : "";
     const runningChildren = childViews.filter((v) => v.running).length;
     const kids = runningChildren > 0 ? c.faint(` · 子 ${runningChildren} 运行中`) : "";
-    status.setText(`${state}  ${tokens}${effort}${queued}${kids}`);
+    status.setText(`${state}  ${tokens}${sum}${effort}${queued}${kids}`);
     tui.requestRender();
   }
 
@@ -349,8 +368,10 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     const measured = u
       ? `→ 实测 ${fmtTok(u.inputTokens)}${u.cacheReadTokens !== undefined ? `(缓存 ${fmtTok(u.cacheReadTokens)})` : ""} · +${fmtTok(u.outputTokens)}`
       : "→ 无用量";
+    const price = u ? priceFor(lastRequest.model) : undefined;
+    const cost = u && price ? ` · ${fmtCost(costOf(u, price))}` : "";
     return c.faint(
-      `· #${requestCount}  ${lastRequest.messages} 条消息 ≈${fmtTok(lastRequest.estimatedTokens)} ${measured} · ${fmtMs(e.latencyMs)} · ${e.stopReason}`,
+      `· #${requestCount}  ${lastRequest.messages} 条消息 ≈${fmtTok(lastRequest.estimatedTokens)} ${measured}${cost} · ${fmtMs(e.latencyMs)} · ${e.stopReason}`,
     );
   }
 
@@ -948,6 +969,14 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     ];
     if (b.measuredTokens !== undefined)
       lines.push(c.faint(`上次请求实测输入 ${b.measuredTokens} tok`));
+    const totals = usageTotals(log.events, priceFor);
+    if (totals.requests > 0) {
+      lines.push(
+        c.faint(
+          `会话累计 ${totals.requests} 次请求 · 输入 ${totals.inputTokens} · 输出 ${totals.outputTokens} · 缓存命中 ${totals.cacheReadTokens} · 缓存写入 ${totals.cacheWriteTokens}${totals.cost !== undefined ? ` · 费用 ${fmtCost(totals.cost)}` : " · 未配置价格(config 里 models[].price)"}`,
+        ),
+      );
+    }
     for (const p of b.parts) {
       const bar = "█".repeat(Math.max(1, Math.round(p.share * 24))).padEnd(24);
       lines.push(

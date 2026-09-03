@@ -89,7 +89,7 @@ describe("toAnthropicWire", () => {
       { role: "tool", callId: "b", name: "bash", content: "E", isError: true },
       { role: "assistant", content: "", toolCalls: [] },
     ]);
-    expect(wire.system).toBe("S");
+    expect(wire.system).toEqual([{ type: "text", text: "S" }]);
     expect(wire.messages).toHaveLength(4);
     expect(wire.messages[1]?.content.map((b) => b.type)).toEqual(["tool_use", "tool_use"]);
     expect(wire.messages[2]?.role).toBe("user");

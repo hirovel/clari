@@ -2,6 +2,7 @@ import type { StopReason, ToolCall, Usage } from "./events.js";
 import type { Message } from "./messages.js";
 import { ProviderError, parseRetryAfter } from "./providers/errors.js";
 import { type RetryOptions, withRetry } from "./providers/retry.js";
+import { StreamStall, sseEvents } from "./providers/sse.js";
 
 /** 工具的对外描述(执行器在 tools.ts)。parameters 是 JSON Schema。 */
 export type ToolDef = {
@@ -137,7 +138,7 @@ export type SseChunk = {
       content?: string | null;
       reasoning_content?: string | null;
       tool_calls?: {
-        index: number;
+        index?: number;
         id?: string;
         function?: { name?: string; arguments?: string };
       }[];
@@ -178,8 +179,15 @@ export function feedChunk(acc: StreamAcc, chunk: SseChunk): string {
   }
   if (choice?.delta?.reasoning_content) acc.reasoning += choice.delta.reasoning_content;
   for (const tc of choice?.delta?.tool_calls ?? []) {
-    acc.toolCalls[tc.index] ??= { id: "", name: "", argsJson: "" };
-    const slot = acc.toolCalls[tc.index] as StreamAcc["toolCalls"][number];
+    // 有些中转站不带 index(整段一次发完):带 id 的当新调用,不带的续写最后一个。
+    const index =
+      typeof tc.index === "number"
+        ? tc.index
+        : tc.id
+          ? acc.toolCalls.length
+          : Math.max(0, acc.toolCalls.length - 1);
+    acc.toolCalls[index] ??= { id: "", name: "", argsJson: "" };
+    const slot = acc.toolCalls[index] as StreamAcc["toolCalls"][number];
     if (tc.id) slot.id = tc.id;
     if (tc.function?.name) slot.name += tc.function.name;
     if (tc.function?.arguments) slot.argsJson += tc.function.arguments;
@@ -273,7 +281,30 @@ export type OpenAICompatOptions = {
   extraBody?: Record<string, unknown>;
   /** 附加请求头(如 beta 头)。 */
   extraHeaders?: Record<string, string>;
+  /** 流停滞判定:连续这么久没有字节就断开重试;0 = 不限。缺省 90 秒。 */
+  stallTimeoutMs?: number;
 };
+
+/**
+ * 请求级中止控制:用户的 signal 之外,停滞超时也要能撤销底层 fetch。
+ * 返回的 signal 给 fetch;abort() 只由停滞调用,不会被误判成用户打断(调用方看的仍是用户的 signal)。
+ */
+export function linkedAbort(signal?: AbortSignal): AbortController {
+  const ac = new AbortController();
+  if (signal) {
+    if (signal.aborted) ac.abort();
+    else signal.addEventListener("abort", () => ac.abort(), { once: true });
+  }
+  return ac;
+}
+
+/** 停滞发生在已经吐字之后就不能重试(会重复输出);之前可以。 */
+export function stallToError(err: unknown, streamed: boolean): unknown {
+  if (err instanceof StreamStall && streamed) {
+    return new ProviderError(err.message, { retryable: false });
+  }
+  return err;
+}
 
 export function openaiCompat(opts: OpenAICompatOptions): Provider {
   const baseUrl = opts.baseUrl.replace(/\/$/, "");
@@ -307,12 +338,13 @@ export function openaiCompat(opts: OpenAICompatOptions): Provider {
       return withRetry(
         async () => {
           const acc = newAcc();
+          const ac = linkedAbort(signal);
           try {
             const res = await fetch(`${baseUrl}/chat/completions`, {
               method: "POST",
               headers,
               body: JSON.stringify(body),
-              signal: signal ?? null,
+              signal: ac.signal,
             });
             if (!res.ok || !res.body) {
               const text = await res.text();
@@ -324,22 +356,17 @@ export function openaiCompat(opts: OpenAICompatOptions): Provider {
               });
             }
 
-            const decoder = new TextDecoder();
-            let buffer = "";
-            for await (const bytes of res.body) {
-              buffer += decoder.decode(bytes as Uint8Array, { stream: true });
-              const lines = buffer.split("\n");
-              buffer = lines.pop() ?? "";
-              for (const line of lines) {
-                if (onRaw && line.trim()) onRaw(line);
-                const data = line.replace(/^data: ?/, "").trim();
-                if (!data || !line.startsWith("data:") || data === "[DONE]") continue;
-                const before = acc.reasoning.length;
-                const delta = feedChunk(acc, JSON.parse(data) as SseChunk);
-                if (delta && onDelta) onDelta(delta);
-                if (onReasoning && acc.reasoning.length > before) {
-                  onReasoning(acc.reasoning.slice(before));
-                }
+            const events = sseEvents(res.body as AsyncIterable<Uint8Array>, {
+              ...(onRaw && { onRaw }),
+              ...(opts.stallTimeoutMs !== undefined && { stallTimeoutMs: opts.stallTimeoutMs }),
+              onStall: () => ac.abort(),
+            });
+            for await (const chunk of events) {
+              const before = acc.reasoning.length;
+              const delta = feedChunk(acc, chunk as SseChunk);
+              if (delta && onDelta) onDelta(delta);
+              if (onReasoning && acc.reasoning.length > before) {
+                onReasoning(acc.reasoning.slice(before));
               }
             }
             if (!acc.finishReason) {
@@ -352,7 +379,7 @@ export function openaiCompat(opts: OpenAICompatOptions): Provider {
           } catch (err) {
             // 打断(Q11):已流出的部分作为 aborted turn 返回,由循环记入日志,不丢真相。
             if (signal?.aborted) return finishAcc(acc, true);
-            throw err;
+            throw stallToError(err, Boolean(acc.text || acc.reasoning));
           }
         },
         mergeRetry(opts.retry, { ...(signal && { signal }), ...(onRetry && { onRetry }) }),

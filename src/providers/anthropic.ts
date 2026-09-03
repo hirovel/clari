@@ -8,13 +8,16 @@ import {
   clampEffort,
   type EffortLevel,
   fetchModelIds,
+  linkedAbort,
   mergeRetry,
   type Provider,
+  stallToError,
   type ToolDef,
   type WireOptions,
 } from "../provider.js";
 import { ProviderError, parseRetryAfter } from "./errors.js";
 import { type RetryOptions, withRetry } from "./retry.js";
+import { sseEvents } from "./sse.js";
 
 /** 流式事件的最小类型,只声明用到的字段。 */
 export type AnthropicEvent =
@@ -86,6 +89,7 @@ export type AnthropicAcc = {
   stopReason?: string;
   inputTokens?: number;
   cacheReadTokens?: number;
+  cacheWriteTokens?: number;
   outputTokens?: number;
   error?: string;
 };
@@ -118,6 +122,8 @@ export function feedAnthropicEvent(acc: AnthropicAcc, ev: AnthropicEvent): strin
           (u.cache_read_input_tokens ?? 0);
         if (u.cache_read_input_tokens !== undefined)
           acc.cacheReadTokens = u.cache_read_input_tokens;
+        if (u.cache_creation_input_tokens !== undefined)
+          acc.cacheWriteTokens = u.cache_creation_input_tokens;
       }
       return "";
     }
@@ -185,6 +191,7 @@ export function finishAnthropicAcc(acc: AnthropicAcc, aborted: boolean, model = 
           inputTokens: acc.inputTokens ?? 0,
           outputTokens: acc.outputTokens ?? 0,
           ...(acc.cacheReadTokens !== undefined && { cacheReadTokens: acc.cacheReadTokens }),
+          ...(acc.cacheWriteTokens !== undefined && { cacheWriteTokens: acc.cacheWriteTokens }),
         }
       : undefined;
   const reasoning = thinkingText(acc);
@@ -213,30 +220,37 @@ function safeParse(s: string): unknown {
   }
 }
 
-type WireBlock =
+type CacheControl = { cache_control: { type: "ephemeral" } };
+
+type WireBlock = (
   | ThinkingBlock
   | { type: "text"; text: string }
   | { type: "tool_use"; id: string; name: string; input: unknown }
-  | { type: "tool_result"; tool_use_id: string; content: string; is_error?: boolean };
+  | { type: "tool_result"; tool_use_id: string; content: string; is_error?: boolean }
+) &
+  Partial<CacheControl>;
+
+type WireSystem = ({ type: "text"; text: string } & Partial<CacheControl>)[];
 
 /**
  * 内部消息 → Anthropic wire。结构差异:system 抽到顶层;连续的工具结果合并进同一条 user 消息
  * (协议要求紧随 assistant 的那条 user 消息包含其全部 tool_use 的应答);
  * assistant 的 thinking 块放在内容之首原样回传,只回传同一模型产生的(签名跨模型无效)。
+ * cache:在系统提示词与最后一条消息的末块放缓存断点。前缀不变即命中,每一步只为新增部分付全价。
  */
 export function toAnthropicWire(
   messages: Message[],
-  opts: { model?: string } = {},
+  opts: { model?: string; cache?: boolean } = {},
 ): {
-  system: string | undefined;
+  system: WireSystem | undefined;
   messages: { role: "user" | "assistant"; content: WireBlock[] }[];
 } {
-  let system: string | undefined;
+  let systemText: string | undefined;
   const out: { role: "user" | "assistant"; content: WireBlock[] }[] = [];
   for (const m of messages) {
     switch (m.role) {
       case "system":
-        system = system ? `${system}\n\n${m.content}` : m.content;
+        systemText = systemText ? `${systemText}\n\n${m.content}` : m.content;
         break;
       case "user":
         out.push({ role: "user", content: [{ type: "text", text: m.content || "(空)" }] });
@@ -258,7 +272,8 @@ export function toAnthropicWire(
         const block: WireBlock = {
           type: "tool_result",
           tool_use_id: m.callId,
-          content: m.content,
+          // 空内容块会被拒绝;空结果也是结果,用占位文本表示。
+          content: m.content || "(空)",
           ...(m.isError && { is_error: true }),
         };
         const last = out.at(-1);
@@ -269,6 +284,26 @@ export function toAnthropicWire(
         }
         break;
       }
+    }
+  }
+  const system: WireSystem | undefined =
+    systemText === undefined ? undefined : [{ type: "text", text: systemText }];
+  if (opts.cache) {
+    const mark = <T extends object>(b: T): T & CacheControl => ({
+      ...b,
+      cache_control: { type: "ephemeral" },
+    });
+    if (system?.[0]) system[0] = mark(system[0]);
+    const lastMsg = out.at(-1);
+    const lastBlock = lastMsg?.content.at(-1);
+    // 思考块不能挂断点;末块是思考块的情况只会出现在打断后,跳过即可。
+    if (
+      lastMsg &&
+      lastBlock &&
+      lastBlock.type !== "thinking" &&
+      lastBlock.type !== "redacted_thinking"
+    ) {
+      lastMsg.content[lastMsg.content.length - 1] = mark(lastBlock);
     }
   }
   return { system, messages: out };
@@ -311,11 +346,16 @@ export type AnthropicOptions = {
   effortLevels?: EffortLevel[];
   extraBody?: Record<string, unknown>;
   extraHeaders?: Record<string, string>;
+  /** 提示缓存断点(缺省开):系统提示词与最后一条消息各挂一个。 */
+  promptCache?: boolean;
+  /** 流停滞判定毫秒数;0 = 不限。缺省 90 秒。 */
+  stallTimeoutMs?: number;
 };
 
 export function anthropic(opts: AnthropicOptions): Provider {
   const baseUrl = (opts.baseUrl ?? "https://api.anthropic.com").replace(/\/$/, "");
   const maxTokens = opts.maxTokens ?? 8192;
+  const cache = opts.promptCache ?? true;
   const headers = {
     "content-type": "application/json",
     "x-api-key": opts.apiKey,
@@ -323,7 +363,7 @@ export function anthropic(opts: AnthropicOptions): Provider {
     ...opts.extraHeaders,
   };
   const wire = (messages: Message[], tools: ToolDef[], w: WireOptions = {}) => {
-    const body = toAnthropicWire(messages, { model: opts.model });
+    const body = toAnthropicWire(messages, { model: opts.model, cache });
     return {
       model: opts.model,
       max_tokens: maxTokens,
@@ -359,12 +399,13 @@ export function anthropic(opts: AnthropicOptions): Provider {
       return withRetry(
         async () => {
           const acc = newAnthropicAcc();
+          const ac = linkedAbort(signal);
           try {
             const res = await fetch(`${baseUrl}/v1/messages`, {
               method: "POST",
               headers,
               body: JSON.stringify(body),
-              signal: signal ?? null,
+              signal: ac.signal,
             });
             if (!res.ok || !res.body) {
               const text = await res.text();
@@ -375,24 +416,18 @@ export function anthropic(opts: AnthropicOptions): Provider {
                 ...(retryAfterMs !== undefined && { retryAfterMs }),
               });
             }
-            const decoder = new TextDecoder();
-            let buffer = "";
-            for await (const bytes of res.body) {
-              buffer += decoder.decode(bytes as Uint8Array, { stream: true });
-              const lines = buffer.split("\n");
-              buffer = lines.pop() ?? "";
-              for (const line of lines) {
-                if (onRaw && line.trim()) onRaw(line);
-                if (!line.startsWith("data:")) continue;
-                const data = line.slice(5).trim();
-                if (!data) continue;
-                const before = thinkingText(acc).length;
-                const delta = feedAnthropicEvent(acc, JSON.parse(data) as AnthropicEvent);
-                if (delta && onDelta) onDelta(delta);
-                if (onReasoning) {
-                  const now = thinkingText(acc);
-                  if (now.length > before) onReasoning(now.slice(before));
-                }
+            const events = sseEvents(res.body as AsyncIterable<Uint8Array>, {
+              ...(onRaw && { onRaw }),
+              ...(opts.stallTimeoutMs !== undefined && { stallTimeoutMs: opts.stallTimeoutMs }),
+              onStall: () => ac.abort(),
+            });
+            for await (const ev of events) {
+              const before = thinkingText(acc).length;
+              const delta = feedAnthropicEvent(acc, ev as AnthropicEvent);
+              if (delta && onDelta) onDelta(delta);
+              if (onReasoning) {
+                const now = thinkingText(acc);
+                if (now.length > before) onReasoning(now.slice(before));
               }
             }
             if (acc.error) {
@@ -410,7 +445,7 @@ export function anthropic(opts: AnthropicOptions): Provider {
             return finishAnthropicAcc(acc, false, opts.model);
           } catch (err) {
             if (signal?.aborted) return finishAnthropicAcc(acc, true, opts.model);
-            throw err;
+            throw stallToError(err, Boolean(acc.text || thinkingText(acc)));
           }
         },
         mergeRetry(opts.retry, { ...(signal && { signal }), ...(onRetry && { onRetry }) }),

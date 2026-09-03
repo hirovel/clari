@@ -24,7 +24,16 @@ export class EventLog {
   append(e: AgentEvent): void {
     this.events.push(e);
     if (this.filePath) appendFileSync(this.filePath, JSON.stringify(e) + "\n");
-    for (const fn of this.listeners) fn(e);
+    for (const fn of this.listeners) {
+      try {
+        fn(e);
+      } catch (err) {
+        // 订阅者(界面、统计)出错不许污染数据流:事件已经落盘,错误另行抛给进程级处理。
+        queueMicrotask(() => {
+          throw err;
+        });
+      }
+    }
   }
 
   /** 只读订阅。返回退订函数。 */

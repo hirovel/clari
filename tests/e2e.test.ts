@@ -288,7 +288,10 @@ describe("端到端(假服务器)", () => {
     expect(out).toBe("idle");
     expect(server.calls[0]?.url).toBe("/v1/messages");
     expect(server.calls[0]?.headers["x-api-key"]).toBe("sk-ant-test");
-    expect(server.calls[0]?.body.system).toBe("sys");
+    // 系统提示词是块数组,缺省挂缓存断点(前缀不变即命中,每步只为新增部分付全价)。
+    expect(server.calls[0]?.body.system).toEqual([
+      { type: "text", text: "sys", cache_control: { type: "ephemeral" } },
+    ]);
     expect(server.calls[0]?.body.max_tokens).toBe(512);
     const second = server.calls[1]?.body.messages as {
       role: string;

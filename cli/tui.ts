@@ -73,6 +73,21 @@ try {
 }
 // 子 agent 只会在用户输入之后出现,此时 app 已经建好;先声明后赋值即可。
 let app: ReturnType<typeof createTuiApp> | undefined;
+
+// 进程级兜底:界面代码抛出的异常必须先把终端还原,再把错误与会话文件打印出来,不能留下一个乱掉的终端。
+const crash = (kind: string) => (err: unknown) => {
+  try {
+    app?.stop();
+  } catch {
+    // 还原失败也要继续打印
+  }
+  const e = err as Error;
+  console.error(`\n${kind}:${e?.stack ?? String(err)}`);
+  console.error(`会话已落盘:${sessionFile};pnpm tui -- --resume ${sessionFile} 可恢复`);
+  process.exit(70);
+};
+process.on("uncaughtException", crash("未捕获异常"));
+process.on("unhandledRejection", crash("未处理的 Promise 拒绝"));
 const memory = args.memory ? memoryFiles() : undefined;
 const tools = buildTools(
   log,
@@ -99,6 +114,7 @@ app = createTuiApp({
   ...(memory && { memory }),
   ...(args.effort && { effort: args.effort }),
   ...(first.effortLevels && { effortLevels: first.effortLevels }),
+  ...(first.price && { price: first.price }),
   ...(args.trace && {
     onRaw: (requestIndex: number, line: string) =>
       appendFileSync(traceFile, `${JSON.stringify({ request: requestIndex, line })}\n`),

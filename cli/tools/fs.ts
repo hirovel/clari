@@ -1,10 +1,33 @@
 // 文件三工具:read / write / edit。内核对它们一无所知(Q2),从 CLI 层注入。
 // read 的截断策略可换(Q28):默认保头,自定义策略经 createReadTool 注入。
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, resolve } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { defineTool } from "../../src/tools.js";
 import { capLineLength, keepHead, type TruncationPolicy } from "./truncate.js";
+
+/** 单次整读的文件大小上限:再大就要求分段,不把整个文件拉进内存。 */
+export const MAX_READ_BYTES = 20 * 1024 * 1024;
+
+/** 头部采样里出现 NUL 即视为二进制;文本文件不会有它。 */
+export function looksBinary(path: string): boolean {
+  const fd = openSync(path, "r");
+  try {
+    const buf = Buffer.alloc(8192);
+    const n = readSync(fd, buf, 0, buf.length, 0);
+    return buf.subarray(0, n).includes(0);
+  } finally {
+    closeSync(fd);
+  }
+}
 
 export function createReadTool(opts: { truncate?: TruncationPolicy; maxLineChars?: number } = {}) {
   // 保头+分页是全行业共识(Q29 调查:pi/Claude Code/opencode/Cline 现行版一致,保尾无一家)。
@@ -21,7 +44,18 @@ export function createReadTool(opts: { truncate?: TruncationPolicy; maxLineChars
       limit: Type.Optional(Type.Number({ description: "最多返回的行数" })),
     }),
     async execute(args) {
-      const lines = capLine(readFileSync(resolve(args.path), "utf8")).split("\n");
+      const path = resolve(args.path);
+      const st = statSync(path);
+      if (st.isDirectory()) throw new Error(`${args.path} 是目录,用 ls 或 glob 列出内容。`);
+      if (st.size > MAX_READ_BYTES) {
+        throw new Error(
+          `文件 ${Math.round(st.size / 1024 / 1024)} MB,超过单次读取上限 ${MAX_READ_BYTES / 1024 / 1024} MB。用 bash 的 head/sed/grep 取需要的部分。`,
+        );
+      }
+      if (st.size > 0 && looksBinary(path)) {
+        throw new Error(`${args.path} 是二进制文件(${st.size} 字节),read 只读文本。`);
+      }
+      const lines = capLine(readFileSync(path, "utf8")).split("\n");
       const start = Math.max(1, args.offset ?? 1);
       const slice = lines.slice(start - 1, args.limit ? start - 1 + args.limit : undefined);
       const numbered = slice.map((l, i) => `${start + i}\t${l}`).join("\n");
@@ -61,13 +95,20 @@ export const editTool = defineTool({
   }),
   async execute(args) {
     const path = resolve(args.path);
-    const content = readFileSync(path, "utf8");
-    const count = content.split(args.oldText).length - 1;
+    const raw = readFileSync(path, "utf8");
+    // 换行风格:文件是 CRLF 时按 LF 匹配、按 CRLF 写回;模型给的原文里不必带 \r。
+    const crlf = raw.includes("\r\n");
+    const content = crlf ? raw.replaceAll("\r\n", "\n") : raw;
+    const oldText = args.oldText.replaceAll("\r\n", "\n");
+    const newText = args.newText.replaceAll("\r\n", "\n");
+    if (!oldText) throw new Error("oldText 不能为空。");
+    const count = content.split(oldText).length - 1;
     if (count === 0) throw new Error(`oldText 在 ${args.path} 中不存在,请先 read 确认原文。`);
     if (count > 1) {
       throw new Error(`oldText 在 ${args.path} 中出现 ${count} 次,不唯一。请提供更长的上下文。`);
     }
-    writeFileSync(path, content.replace(args.oldText, args.newText), "utf8");
+    const next = content.replace(oldText, () => newText);
+    writeFileSync(path, crlf ? next.replaceAll("\n", "\r\n") : next, "utf8");
     return `已替换 ${args.path} 中的一处文本。`;
   },
 });

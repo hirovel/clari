@@ -163,6 +163,7 @@ describe("Anthropic 用量归一", () => {
       inputTokens: 115,
       outputTokens: 7,
       cacheReadTokens: 100,
+      cacheWriteTokens: 5,
     });
   });
 });

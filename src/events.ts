@@ -16,6 +16,8 @@ export type Usage = {
   outputTokens: number;
   /** 输入中命中缓存的部分。各家字段名不同,适配器归一到这里。 */
   cacheReadTokens?: number;
+  /** 输入中本次写入缓存的部分(Anthropic 单独计价)。 */
+  cacheWriteTokens?: number;
   /** 输出中属于推理(thinking)的部分。 */
   reasoningTokens?: number;
 };

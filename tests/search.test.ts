@@ -65,7 +65,8 @@ describe("只读工具(Q56)", () => {
       { pattern: "beta", path: root },
       { signal: new AbortController().signal },
     );
-    expect(out).toBe("src/a.ts:2:function beta() {}");
+    // 路径带上用户给的 path 前缀,原样可再喂给 read。
+    expect(out).toBe(`${root.split("\\").join("/")}/src/a.ts:2:function beta() {}`);
     const none = await grep.execute(
       { pattern: "zzz", path: root },
       { signal: new AbortController().signal },

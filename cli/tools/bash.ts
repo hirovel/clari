@@ -8,15 +8,27 @@ import { Type } from "@sinclair/typebox";
 import { defineTool } from "../../src/tools.js";
 import { keepTail, type TruncationPolicy } from "./truncate.js";
 
-export function createBashTool(opts: { truncate?: TruncationPolicy } = {}) {
+/** 缺省超时(秒)与输出缓冲上限(字节)。超过就杀进程树,已收到的部分照常返回并说明。 */
+export const DEFAULT_TIMEOUT_S = 120;
+export const MAX_OUTPUT_BYTES = 10 * 1024 * 1024;
+
+export function createBashTool(
+  opts: { truncate?: TruncationPolicy; defaultTimeoutS?: number; maxOutputBytes?: number } = {},
+) {
   const truncate = opts.truncate ?? keepTail();
+  const defaultTimeout = opts.defaultTimeoutS ?? DEFAULT_TIMEOUT_S;
+  const maxBytes = opts.maxOutputBytes ?? MAX_OUTPUT_BYTES;
   return defineTool({
     name: "bash",
     description:
       "在当前工作目录执行 bash 命令,返回 stdout 与 stderr 合并输出。" +
+      `缺省 ${defaultTimeout} 秒超时,长任务用 timeout 参数加大。` +
       "输出超限时按截断策略保留一部分,全量写入临时文件并附路径。",
     parameters: Type.Object({
       command: Type.String({ description: "要执行的 bash 命令" }),
+      timeout: Type.Optional(
+        Type.Number({ description: `超时秒数,缺省 ${defaultTimeout};0 = 不限` }),
+      ),
     }),
     async execute(args, ctx) {
       const shell = findBash();
@@ -25,10 +37,22 @@ export function createBashTool(opts: { truncate?: TruncationPolicy } = {}) {
           "找不到 bash。可选方案:1. 安装 Git for Windows;2. 设环境变量 KERNEL_SHELL 指向 bash 可执行文件。",
         );
       }
-      const { output, exitCode, aborted } = await run(shell, args.command, ctx.signal);
-      const shown = applyTruncation(output, truncate);
-      if (aborted) throw new Error(`命令已被打断。已产出的输出:\n${shown}`);
-      if (exitCode !== 0) throw new Error(`${shown}\n命令退出码 ${exitCode}`);
+      const timeoutS = args.timeout ?? defaultTimeout;
+      const r = await run(shell, args.command, ctx.signal, {
+        timeoutMs: timeoutS > 0 ? timeoutS * 1000 : 0,
+        maxBytes,
+      });
+      const shown = applyTruncation(r.output, truncate);
+      if (r.aborted) throw new Error(`命令已被打断。已产出的输出:\n${shown}`);
+      if (r.timedOut) {
+        throw new Error(`命令超过 ${timeoutS} 秒未结束,已终止。已产出的输出:\n${shown}`);
+      }
+      if (r.overflowed) {
+        throw new Error(
+          `命令输出超过 ${Math.round(maxBytes / 1024 / 1024)} MB,已终止。请缩小输出范围。已产出的输出:\n${shown}`,
+        );
+      }
+      if (r.exitCode !== 0) throw new Error(`${shown}\n命令退出码 ${r.exitCode}`);
       return shown || "(无输出)";
     },
   });
@@ -56,11 +80,20 @@ function findBash(): string | null {
   return found || null;
 }
 
+type RunResult = {
+  output: string;
+  exitCode: number;
+  aborted: boolean;
+  timedOut: boolean;
+  overflowed: boolean;
+};
+
 function run(
   shell: string,
   command: string,
   signal: AbortSignal,
-): Promise<{ output: string; exitCode: number; aborted: boolean }> {
+  limits: { timeoutMs: number; maxBytes: number },
+): Promise<RunResult> {
   return new Promise((resolvePromise, rejectPromise) => {
     // POSIX 下 detached 开进程组,打断时整组杀掉;Windows 用 taskkill /T 杀进程树。
     const child = spawn(shell, ["-c", command], {
@@ -68,18 +101,16 @@ function run(
       windowsHide: true,
       detached: process.platform !== "win32",
     });
-    let output = "";
+    const chunks: Buffer[] = [];
+    let bytes = 0;
     let aborted = false;
-    child.stdout.on("data", (d: Buffer) => {
-      output += d.toString("utf8");
-    });
-    child.stderr.on("data", (d: Buffer) => {
-      output += d.toString("utf8");
-    });
+    let timedOut = false;
+    let overflowed = false;
+    let killed = false;
 
-    const onAbort = () => {
-      aborted = true;
-      if (child.pid === undefined) return;
+    const killTree = () => {
+      if (killed || child.pid === undefined) return;
+      killed = true;
       if (process.platform === "win32") {
         spawnSync("taskkill", ["/F", "/T", "/PID", String(child.pid)]);
       } else {
@@ -90,15 +121,48 @@ function run(
         }
       }
     };
-    signal.addEventListener("abort", onAbort, { once: true });
+    const onData = (d: Buffer) => {
+      if (overflowed) return;
+      chunks.push(d);
+      bytes += d.length;
+      if (bytes > limits.maxBytes) {
+        overflowed = true;
+        killTree();
+      }
+    };
+    child.stdout.on("data", onData);
+    child.stderr.on("data", onData);
 
-    child.on("error", (err) => {
+    const onAbort = () => {
+      aborted = true;
+      killTree();
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    const timer =
+      limits.timeoutMs > 0
+        ? setTimeout(() => {
+            timedOut = true;
+            killTree();
+          }, limits.timeoutMs)
+        : undefined;
+
+    const cleanup = () => {
       signal.removeEventListener("abort", onAbort);
+      if (timer) clearTimeout(timer);
+    };
+    child.on("error", (err) => {
+      cleanup();
       rejectPromise(err);
     });
     child.on("close", (code) => {
-      signal.removeEventListener("abort", onAbort);
-      resolvePromise({ output, exitCode: code ?? -1, aborted });
+      cleanup();
+      resolvePromise({
+        output: Buffer.concat(chunks).toString("utf8"),
+        exitCode: code ?? -1,
+        aborted,
+        timedOut,
+        overflowed,
+      });
     });
   });
 }

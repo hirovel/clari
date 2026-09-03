@@ -3,6 +3,7 @@
 //                 [--max-steps N] [--resume 文件 | --continue] [--system-prompt 文件] [--append-system-prompt 文件]
 // stdout:最终回复文本;--json 时输出结构化结果。非零退出码 = 请求失败。
 import { Agent } from "../src/agent.js";
+import { usageTotals } from "../src/cost.js";
 import type { AgentEvent } from "../src/events.js";
 import { maxSteps } from "../src/loop.js";
 import {
@@ -109,7 +110,6 @@ function summarize(
   file: string,
   model: string,
 ) {
-  const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 };
   let steps = 0;
   let requests = 0;
   let toolCalls = 0;
@@ -118,17 +118,9 @@ function summarize(
     if (e.type === "assistant/message") {
       steps++;
       toolCalls += e.toolCalls.length;
-      if (e.usage) {
-        usage.inputTokens += e.usage.inputTokens;
-        usage.outputTokens += e.usage.outputTokens;
-        usage.cacheReadTokens += e.usage.cacheReadTokens ?? 0;
-      }
-    }
-    if (e.type === "compaction" && e.usage) {
-      usage.inputTokens += e.usage.inputTokens;
-      usage.outputTokens += e.usage.outputTokens;
     }
   }
+  const totals = usageTotals(events, () => choice.price);
   return {
     ok: true,
     model,
@@ -138,7 +130,13 @@ function summarize(
     toolCalls,
     retries: events.filter((e) => e.type === "retry").length,
     compactions: events.filter((e) => e.type === "compaction").length,
-    usage,
+    usage: {
+      inputTokens: totals.inputTokens,
+      outputTokens: totals.outputTokens,
+      cacheReadTokens: totals.cacheReadTokens,
+      cacheWriteTokens: totals.cacheWriteTokens,
+    },
+    ...(totals.cost !== undefined && { costUsd: Number(totals.cost.toFixed(6)) }),
     text,
     sessionFile: file,
   };
