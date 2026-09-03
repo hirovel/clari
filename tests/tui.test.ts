@@ -253,10 +253,13 @@ describe("TUI 壳", () => {
     expect(app.inspector.isOpen()).toBe(true);
     term.feed("\x12");
     expect(app.inspector.isOpen()).toBe(false);
-    // /events 直接进事件视图
+    // /events 直接进事件视图,/compactions 直接进压缩对照
     await app.command("/events");
     expect(app.inspector.isOpen()).toBe(true);
     expect(app.inspector.lines(100).map(stripAnsi).join("\n")).toContain("事件日志");
+    app.inspector.close();
+    await app.command("/compactions");
+    expect(app.inspector.lines(100).map(stripAnsi).join("\n")).toContain("压缩对照");
     app.inspector.close();
     app.stop();
   });

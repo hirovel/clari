@@ -238,6 +238,8 @@ describe("请求检视器(Q49)", () => {
     expect(text()).toContain("事件 #1");
     insp.handleInput("\x1b");
     expect(insp.currentMode).toBe("events");
+    insp.handleInput("\t"); // 事件视图 → 压缩对照 → 请求视图
+    expect(insp.currentMode).toBe("compactions");
     insp.handleInput("\t");
     expect(insp.currentMode).toBe("list");
   });

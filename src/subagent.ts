@@ -87,6 +87,19 @@ export type SubagentRequest = {
   sessionPath?: string;
   slots?: TurnDeps["slots"];
   compaction?: CompactionConfig;
+  /** 子日志一创建就交出去(界面据此实时订阅)。runner 实现应在开跑前调用。 */
+  onLog?: (log: EventLog) => void;
+};
+
+/** 交给界面的子 agent 信息(Q62):子只是另一个数组,界面拿到日志即可订阅。 */
+export type ChildInfo = {
+  log: EventLog;
+  task: string;
+  scope: string;
+  /** 父会话里 task 工具调用的 id,用来把子块挂到那一行下面。 */
+  callId?: string;
+  /** 从 1 起的序号。 */
+  index: number;
 };
 
 /** 返回契约(Q41):最终文本 + 完成状态 + 深挖句柄。所有 runner 实现必须产出同一形态。 */
@@ -102,6 +115,7 @@ export type SubagentRunner = (req: SubagentRequest) => Promise<SubagentResult>;
 export const inProcessRunner: SubagentRunner = async (req) => {
   const log = new EventLog(req.sessionPath);
   for (const e of req.startEvents) log.append(e);
+  req.onLog?.(log);
   if (req.signal.aborted)
     return { text: "", status: "partial", ...(log.path && { sessionPath: log.path }) };
 
@@ -149,6 +163,8 @@ export type TaskToolOptions = {
   allowNested?: boolean;
   slots?: TurnDeps["slots"];
   compaction?: CompactionConfig;
+  /** 子 agent 一开跑就通知(Q62):界面订阅子日志,实时显示。 */
+  onChild?: (child: ChildInfo) => void;
 };
 
 export function createTaskTool(opts: TaskToolOptions) {
@@ -203,12 +219,24 @@ export function createTaskTool(opts: TaskToolOptions) {
         ? `${args.task}\n\n完成后,最后以一个 \`\`\`json 代码块给出符合以下 JSON Schema 的结果:\n${JSON.stringify(opts.outputSchema)}`
         : args.task;
 
+      const index = counter;
+      const scopeName = args.scope ?? defaultScope;
       const res = await runner({
         task,
         startEvents,
         provider: opts.provider,
         tools: childTools,
         signal: ctx.signal,
+        ...(opts.onChild && {
+          onLog: (log: EventLog) =>
+            opts.onChild?.({
+              log,
+              task: args.task,
+              scope: scopeName,
+              index,
+              ...(ctx.callId && { callId: ctx.callId }),
+            }),
+        }),
         ...(sessionPath && { sessionPath }),
         ...(opts.slots && { slots: opts.slots }),
         ...(opts.compaction && { compaction: opts.compaction }),

@@ -57,10 +57,12 @@ try {
   console.error((err as Error).message);
   process.exit(1);
 }
-const tools = buildTools(log, first, compaction, args.subagent);
+// 子 agent 只会在用户输入之后出现,此时 app 已经建好;先声明后赋值即可。
+let app: ReturnType<typeof createTuiApp> | undefined;
+const tools = buildTools(log, first, compaction, args.subagent, (child) => app?.attachChild(child));
 const traceFile = sessionFile.replace(/\.jsonl$/, ".trace.jsonl");
 
-createTuiApp({
+app = createTuiApp({
   terminal: new ProcessTerminal(),
   log,
   provider: first.provider,

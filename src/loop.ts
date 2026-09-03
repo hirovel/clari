@@ -348,7 +348,7 @@ async function executeCalls(
     const startedAt = Date.now();
     try {
       const signal = ctx.signal ?? new AbortController().signal;
-      const content = await tool.execute(checked.value as never, { signal });
+      const content = await tool.execute(checked.value as never, { signal, callId: call.id });
       appendResult(ctx.log, call, content, false, Date.now() - startedAt);
     } catch (err) {
       // Q9:执行失败也是结果。打断导致的失败同样如实记录。

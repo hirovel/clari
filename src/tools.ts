@@ -6,7 +6,11 @@ import { Value } from "@sinclair/typebox/value";
  * 契约(Q18):返回纯文本;失败一律 throw,由循环捕获转成 tool/result{isError:true}。
  * ctx.signal 必须被长任务工具响应,否则即时打断(Q11)到不了子进程。
  */
-export type ToolContext = { signal: AbortSignal };
+export type ToolContext = {
+  signal: AbortSignal;
+  /** 本次调用在模型响应里的 id;工具据此把自己派生的东西(如子 agent 会话)关联回调用行。 */
+  callId?: string;
+};
 
 export type Tool<S extends TSchema = TSchema> = {
   name: string;

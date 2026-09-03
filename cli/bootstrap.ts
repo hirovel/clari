@@ -24,7 +24,7 @@ import { now } from "../src/events.js";
 import { EventLog } from "../src/log.js";
 import type { CompactionConfig } from "../src/loop.js";
 import { EFFORT_LEVELS, type EffortLevel, parseEffort } from "../src/provider.js";
-import { createTaskTool } from "../src/subagent.js";
+import { type ChildInfo, createTaskTool } from "../src/subagent.js";
 import type { Tool } from "../src/tools.js";
 import { buildSystemPrompt } from "./prompt.js";
 import { bashTool } from "./tools/bash.js";
@@ -213,12 +213,19 @@ export function buildTools(
   choice: ModelChoice,
   compaction: CompactionConfig,
   subagent: boolean,
+  onChild?: (child: ChildInfo) => void,
 ): Tool[] {
   const base: Tool[] = [readTool, writeTool, editTool, bashTool, grepTool, globTool, lsTool];
   if (!subagent) return base;
   return [
     ...base,
-    createTaskTool({ parent: log, provider: choice.provider, tools: base, compaction }),
+    createTaskTool({
+      parent: log,
+      provider: choice.provider,
+      tools: base,
+      compaction,
+      ...(onChild && { onChild }),
+    }),
   ];
 }
 

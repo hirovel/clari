@@ -27,8 +27,9 @@ import {
   parseEffort,
   type ToolDef,
 } from "../src/provider.js";
+import type { ChildInfo } from "../src/subagent.js";
 import type { Tool } from "../src/tools.js";
-import { fmtMs, fmtTok, RequestInspector } from "./inspector.js";
+import { fmtMs, fmtTok, RequestInspector, type SessionSource } from "./inspector.js";
 import { c, editorTheme, markdownTheme } from "./theme.js";
 import { diffLines, hunks } from "./tools/diff.js";
 
@@ -87,11 +88,16 @@ export type TuiApp = {
     open(): void;
     /** 直接进入事件视图。 */
     openEvents(): void;
+    /** 直接进入压缩对照。 */
+    openCompactions(): void;
     close(): void;
     isOpen(): boolean;
     key(data: string): void;
     lines(width?: number): string[];
   };
+  /** 子 agent 开跑时由 task 工具通知(Q62):挂到对应调用行下面并实时订阅。 */
+  attachChild(child: ChildInfo): void;
+  children(): ChildInfo[];
   toggleFold(): void;
   toggleReasoning(): void;
   stop(): void;
@@ -99,10 +105,15 @@ export type TuiApp = {
 
 /** 折叠时保留的行数。 */
 const FOLD_HEAD = 3;
+/** 子 agent 尾窗保留的行数。 */
+const CHILD_TAIL = 3;
+/** 子 agent 视图的三态:尾窗(缺省)→ 全部 → 仅进度。 */
+type ChildMode = "tail" | "all" | "progress";
 
 const COMMANDS = [
   { name: "inspect", description: "请求检视器:每次 API 请求的发送、接收、决策与写入(Ctrl+R)" },
   { name: "events", description: "事件视图:内核维护的全部事件数组,逐条原样 JSON(检视器内 Tab)" },
+  { name: "compactions", description: "压缩对照:每次压缩把哪一大段原文变成了什么摘要" },
   { name: "context", description: "上下文构成:各部分 token 与占比" },
   { name: "compact", description: "手动压缩,可附指示:/compact 保留报错" },
   { name: "model", description: "切换模型:/model 供应商/模型;不带参数列出可选" },
@@ -114,6 +125,9 @@ const COMMANDS = [
   { name: "help", description: "命令列表" },
   { name: "quit", description: "退出" },
 ];
+
+/** 引导线:子 agent 的每一行都带它,一眼分清层级;不是框线(Q45)。 */
+const GUIDE = `  ${c.faint("┆")} `;
 
 export function createTuiApp(deps: TuiAppDeps): TuiApp {
   const { log, tools, compaction } = deps;
@@ -155,6 +169,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
   // 显示状态(Q49):折叠/隐藏只改屏幕,不改日志;切换键重绘已有节点。
   let foldResults = deps.fold ?? false;
   let showReasoning = true;
+  let childMode: ChildMode = "tail";
   type ResultRecord = { name: string; content: string; isError: boolean; durationMs?: number };
   const resultNodes: ({ node: Text } & ResultRecord)[] = [];
   const reasoningNodes: { node: Text; text: string }[] = [];
@@ -165,6 +180,10 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
   let requestCount = 0;
   let lastRequestIndex = -1;
   let lastRequest: Extract<AgentEvent, { type: "request" }> | undefined;
+
+  // 子 agent(Q62):每个子一个视图块,挂在父会话里对应 task 调用行的下面。
+  const childViews: ChildView[] = [];
+  const childSlots = new Map<string, Container>();
 
   // 推理内容不隐藏(Q34):thinking 模型的思考过程以淡字实时呈现。
   const renderReasoning = (s: string) =>
@@ -231,7 +250,9 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     }
     const queued = agent.queued > 0 ? c.faint(` · 留言 ${agent.queued}`) : "";
     const effort = agent.effort ? c.faint(` · 强度 ${agent.effort}`) : "";
-    status.setText(`${state}  ${tokens}${effort}${queued}`);
+    const runningChildren = childViews.filter((v) => v.running).length;
+    const kids = runningChildren > 0 ? c.faint(` · 子 ${runningChildren} 运行中`) : "";
+    status.setText(`${state}  ${tokens}${effort}${queued}${kids}`);
     tui.requestRender();
   }
 
@@ -258,10 +279,18 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     return `${mark} ${c.soft(r.name)}${meta}\n${r.isError ? c.soft(body) : c.faint(body)}`;
   }
 
+  /** Ctrl+O:父的工具结果折叠/展开;子 agent 块在 尾窗 → 全部 → 仅进度 间轮换。 */
   function toggleFold(): void {
     foldResults = !foldResults;
     for (const r of resultNodes) r.node.setText(resultText(r));
-    note(c.faint(foldResults ? "· 工具结果已折叠(Ctrl+O 展开)" : "· 工具结果已展开"));
+    const order: ChildMode[] = ["tail", "all", "progress"];
+    childMode = order[(order.indexOf(childMode) + 1) % order.length] as ChildMode;
+    for (const v of childViews) v.refresh();
+    const kids =
+      childViews.length > 0
+        ? `;子 agent ${childMode === "tail" ? "尾窗" : childMode === "all" ? "全部" : "仅进度"}`
+        : "";
+    note(c.faint(`· 工具结果已${foldResults ? "折叠(Ctrl+O 展开)" : "展开"}${kids}`));
   }
 
   function toggleReasoning(): void {
@@ -283,13 +312,116 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     );
   }
 
+  // ---------- 子 agent 视图(Q62) ----------
+
+  class ChildView {
+    readonly block = new Container();
+    private readonly progress = new Text("", 1, 0);
+    private readonly body = new Text("", 1, 0);
+    private readonly lines: string[] = [];
+    private steps = 0;
+    private toolsUsed = 0;
+    private tokens = 0;
+    private readonly startedAt = Date.now();
+    private finishedAt: number | undefined;
+    private ok = true;
+    private timer: ReturnType<typeof setInterval> | undefined;
+
+    constructor(readonly info: ChildInfo) {
+      this.block.addChild(this.progress);
+      this.block.addChild(this.body);
+      // 起始事件(继承的父上下文、任务简报)不重画:父屏幕上已经有它们;只画子自己产生的。
+      const skip = info.log.events.length;
+      info.log.subscribe((e) => {
+        this.absorb(e);
+        this.refresh();
+      });
+      void skip;
+      this.timer = setInterval(() => this.refresh(), 1000);
+      this.refresh();
+    }
+
+    get running(): boolean {
+      return this.finishedAt === undefined;
+    }
+
+    private absorb(e: AgentEvent): void {
+      if (e.type === "assistant/message") {
+        this.steps += 1;
+        if (e.usage) this.tokens = e.usage.inputTokens;
+      }
+      if (e.type === "tool/result") this.toolsUsed += 1;
+      this.lines.push(...childEventLines(e).map((l) => GUIDE + l));
+    }
+
+    finish(ok: boolean): void {
+      this.ok = ok;
+      this.finishedAt = Date.now();
+      if (this.timer) clearInterval(this.timer);
+      this.timer = undefined;
+      this.refresh();
+    }
+
+    dispose(): void {
+      if (this.timer) clearInterval(this.timer);
+      this.timer = undefined;
+    }
+
+    refresh(): void {
+      const elapsed = fmtMs((this.finishedAt ?? Date.now()) - this.startedAt);
+      const stats = `第 ${this.steps} 步 · ${this.toolsUsed} 次工具 · ${elapsed}${this.tokens ? ` · ${fmtTok(this.tokens)} tok` : ""}`;
+      const head = this.running
+        ? `${c.zhu("●")} ${c.soft(`运行中 · ${stats}`)}`
+        : this.ok
+          ? `${c.green("✓")} ${c.soft(`完成 · ${stats}`)}`
+          : `${c.zhu("✗")} ${c.soft(`部分完成 · ${stats}`)}`;
+      this.progress.setText(GUIDE + head);
+      let body: string;
+      if (childMode === "progress" || (!this.running && childMode !== "all")) {
+        body =
+          GUIDE +
+          c.faint(
+            `子会话 ${this.lines.length} 行 · Ctrl+O 展开${this.info.log.path ? ` · ${this.info.log.path}` : ""}`,
+          );
+      } else if (childMode === "all") {
+        body = this.lines.length > 0 ? this.lines.join("\n") : GUIDE + c.faint("(尚无输出)");
+      } else {
+        const tail = this.lines.slice(-CHILD_TAIL);
+        const more =
+          this.lines.length > CHILD_TAIL
+            ? [GUIDE + c.faint(`… 子会话共 ${this.lines.length} 行,Ctrl+O 展开全部`)]
+            : [];
+        body = [...tail, ...more].join("\n") || GUIDE + c.faint("(尚无输出)");
+      }
+      this.body.setText(body);
+      tui.requestRender();
+    }
+  }
+
+  function attachChild(child: ChildInfo): void {
+    const view = new ChildView(child);
+    childViews.push(view);
+    const slot = child.callId ? childSlots.get(child.callId) : undefined;
+    if (slot) slot.addChild(view.block);
+    else transcript.addChild(view.block);
+    updateStatus();
+  }
+
   // ---------- 请求检视器(Q49) ----------
 
   const defs = (): ToolDef[] =>
     tools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters }));
   let overlay: OverlayHandle | undefined;
+  const sessions = (): SessionSource[] => [
+    { name: "主会话", events: log.events },
+    ...childViews.map((v) => ({
+      name: `子 #${v.info.index} ${brief(v.info.task)}`,
+      events: v.info.log.events,
+    })),
+  ];
   const inspector = new RequestInspector({
     events: () => log.events,
+    sessions,
     // 恢复的会话拿不到当时的 provider 对象;模型名相同就用当前的重建线路正文,否则如实缺省。
     providerFor: (i) => {
       const known = providersAt.get(i);
@@ -297,6 +429,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       const e = log.events[i];
       return e?.type === "request" && e.model === agent.provider.model ? agent.provider : undefined;
     },
+    currentProvider: () => agent.provider,
     tools: defs,
     rows: () => deps.terminal.rows,
     ...(deps.trace && { rawFor: (i: number) => rawAt.get(i) }),
@@ -379,6 +512,12 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
           // edit/write 的改动内容直接可见(Q58):diff 从参数算出,不进日志。
           const detail = toolCallDetail(tc.name, tc.args);
           if (detail) transcript.addChild(new Text(detail, 1, 0));
+          // task 调用行下面留一个槽,子 agent 开跑时把它的块挂进来(Q62)。
+          if (tc.name === "task") {
+            const slot = new Container();
+            childSlots.set(tc.id, slot);
+            transcript.addChild(slot);
+          }
         }
         if (e.stopReason === "aborted") note(c.faint("— 已打断 —"));
         if (e.stopReason === "length") note(c.jin("◇ 输出被截断,已要求模型重发"));
@@ -395,6 +534,8 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
         const node = new Text(resultText(rec), 1, 0);
         resultNodes.push({ node, ...rec });
         transcript.addChild(node);
+        const child = childViews.find((v) => v.info.callId === e.callId && v.running);
+        if (child) child.finish(!e.isError);
         break;
       }
       case "request":
@@ -426,7 +567,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
           : "";
         const who = e.strategy ? `(${e.strategy})` : "";
         note(
-          `${c.jin(`◇ 已压缩${who}:${parts.join(",")}`)}${c.faint(`${cost}  /context 查看新构成`)}`,
+          `${c.jin(`◇ 已压缩${who}:${parts.join(",")}`)}${c.faint(`${cost}  /compactions 看原文与摘要对照`)}`,
         );
         break;
       }
@@ -489,7 +630,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     switch (cmd) {
       case "help":
         note(
-          COMMANDS.map((x) => `${c.jin(`/${x.name}`.padEnd(10))} ${c.soft(x.description)}`).join(
+          COMMANDS.map((x) => `${c.jin(`/${x.name}`.padEnd(12))} ${c.soft(x.description)}`).join(
             "\n",
           ),
         );
@@ -507,6 +648,11 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       case "events":
         openInspector();
         inspector.showEvents();
+        tui.requestRender();
+        break;
+      case "compactions":
+        openInspector();
+        inspector.showCompactions();
         tui.requestRender();
         break;
       case "context":
@@ -755,6 +901,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
 
   function stop(): void {
     hideLoader();
+    for (const v of childViews) v.dispose();
     tui.stop();
   }
 
@@ -773,15 +920,77 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
         openInspector();
         inspector.showEvents();
       },
+      openCompactions: () => {
+        openInspector();
+        inspector.showCompactions();
+      },
       close: closeInspector,
       isOpen: () => overlay !== undefined,
       key: (data) => inspector.handleInput(data),
       lines: (width = deps.terminal.columns) => (overlay ? inspector.render(width) : []),
     },
+    attachChild,
+    children: () => childViews.map((v) => v.info),
     toggleFold,
     toggleReasoning,
     stop,
   };
+}
+
+/** 子 agent 事件的屏幕行(不含引导线),与主屏同一套记号:› ⚙ ✓ ✗ ◇。 */
+export function childEventLines(e: AgentEvent): string[] {
+  switch (e.type) {
+    case "user/message":
+      return [`${c.zhu("›")} ${c.ink(e.text)}`];
+    case "assistant/message": {
+      const lines: string[] = [];
+      if (e.reasoning)
+        lines.push(
+          ...e.reasoning
+            .trim()
+            .split("\n")
+            .map((l) => c.faint(c.italic(l))),
+        );
+      if (e.text)
+        lines.push(
+          ...e.text
+            .trim()
+            .split("\n")
+            .map((l) => c.ink(l)),
+        );
+      for (const tc of e.toolCalls) {
+        lines.push(`${c.zhu("⚙")} ${c.bold(c.ink(tc.name))}  ${c.soft(formatArgs(tc.args))}`);
+      }
+      if (e.stopReason === "aborted") lines.push(c.faint("— 已打断 —"));
+      return lines;
+    }
+    case "tool/result": {
+      const mark = e.isError ? c.zhu("✗") : c.green("✓");
+      const body = e.content.trim().split("\n");
+      const meta = [
+        ...(body.length > 1 ? [`${body.length} 行`] : []),
+        ...(e.durationMs !== undefined ? [fmtMs(e.durationMs)] : []),
+      ];
+      return [
+        `${mark} ${c.soft(e.name)}${meta.length ? c.faint(`  ${meta.join(" · ")}`) : ""}`,
+        ...body.map((l) => (e.isError ? c.soft(`  ${l}`) : c.faint(`  ${l}`))),
+      ];
+    }
+    case "retry":
+      return [c.faint(`· 重试 ${e.attempt}:${e.status ?? ""} ${e.error.split("\n")[0]}`)];
+    case "request/error":
+      return [c.zhu(`✗ 请求失败:${e.error.split("\n")[0]}`)];
+    case "compaction":
+      return [c.jin(`◇ 已压缩${e.strategy ? `(${e.strategy})` : ""}`)];
+    default:
+      return [];
+  }
+}
+
+/** 任务简报的一句话形态,给会话选择器与标题用。 */
+function brief(task: string): string {
+  const first = task.split("\n")[0]?.trim() ?? "";
+  return first.length > 24 ? `${first.slice(0, 24)}…` : first;
 }
 
 /** 工具参数的人读形态:命令与路径直接展示,其余压成紧凑 JSON。 */
@@ -795,6 +1004,8 @@ function formatArgs(args: unknown): string {
         ? `  第 ${a.offset ?? 1} 行起${typeof a.limit === "number" ? `,${a.limit} 行` : ""}`
         : "";
     s = `${a.path}${range}`;
+  } else if (typeof a.task === "string") {
+    s = `${a.scope ? `scope=${a.scope}  ` : ""}${brief(a.task)}`;
   } else s = JSON.stringify(args) ?? "";
   return s.length > 160 ? `${s.slice(0, 160)}…` : s;
 }
