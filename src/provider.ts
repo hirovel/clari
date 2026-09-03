@@ -283,6 +283,8 @@ export type OpenAICompatOptions = {
   extraHeaders?: Record<string, string>;
   /** 流停滞判定:连续这么久没有字节就断开重试;0 = 不限。缺省 90 秒。 */
   stallTimeoutMs?: number;
+  /** 输出 token 上限;缺省不传,用服务端默认。openai 方言发 max_completion_tokens,其余发 max_tokens。 */
+  maxTokens?: number;
 };
 
 /**
@@ -325,6 +327,10 @@ export function openaiCompat(opts: OpenAICompatOptions): Provider {
     }),
     stream: true,
     stream_options: { include_usage: true },
+    ...(opts.maxTokens !== undefined &&
+      (dialect === "openai"
+        ? { max_completion_tokens: opts.maxTokens }
+        : { max_tokens: opts.maxTokens })),
     ...openaiEffortParams(w.effort && clampEffort(w.effort, opts.effortLevels), dialect),
     ...opts.extraBody,
   });

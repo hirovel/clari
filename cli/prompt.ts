@@ -3,9 +3,9 @@
 // 检视器与 /context 按段读取。
 // 调查共识直接采用:项目指令文件按目录层级根在前、cwd 在后拼接;向上搜索止于 git 根;总预算加降级;替换与追加并存。
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir, release, type } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import type { PromptSectionName } from "../src/config.js";
 import { splitMemory } from "./tools/memory.js";
 
@@ -22,6 +22,7 @@ export const DEFAULT_SECTION_ORDER: PromptSectionName[] = [
   "env",
   "instructions",
   "memory",
+  "skills",
   "append",
 ];
 
@@ -30,8 +31,51 @@ export const SECTION_LABELS: Record<PromptSectionName, string> = {
   env: "环境",
   instructions: "项目指令",
   memory: "记忆",
+  skills: "技能",
   append: "追加",
 };
+
+export type Skill = { name: string; description: string; path: string };
+
+/** 解析 SKILL.md 的 frontmatter;没有 name 就用目录名。 */
+export function parseSkill(path: string, raw: string): Skill {
+  const dirName = basename(dirname(path));
+  const m = raw.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  const field = (k: string) => m?.[1]?.match(new RegExp(`^${k}:\\s*(.+)$`, "m"))?.[1]?.trim();
+  return { name: field("name") || dirName, description: field("description") || "", path };
+}
+
+/**
+ * 技能发现(通用 SKILL.md 约定):用户级 ~/.agent-kernel/skills/<名>/SKILL.md,
+ * 项目级 <git 根>/.agents/skills/<名>/SKILL.md;同名以先发现的为准。
+ * 系统提示词里只放名字、一句描述与路径,正文由模型需要时用 read 读取,不预先占上下文。
+ */
+export function discoverSkills(cwd: string, opts: { home?: string; root?: string } = {}): Skill[] {
+  const home = opts.home ?? join(homedir(), ".agent-kernel");
+  const root = opts.root ?? findGitRoot(cwd) ?? resolve(cwd);
+  const dirs = [join(home, "skills"), join(root, ".agents", "skills")];
+  const byName = new Map<string, Skill>();
+  for (const dir of dirs) {
+    if (!existsSync(dir) || !statSync(dir).isDirectory()) continue;
+    for (const name of readdirSync(dir).sort()) {
+      const file = join(dir, name, "SKILL.md");
+      if (!existsSync(file) || !statSync(file).isFile()) continue;
+      const s = parseSkill(file, readFileSync(file, "utf8"));
+      if (!byName.has(s.name)) byName.set(s.name, s);
+    }
+  }
+  return [...byName.values()];
+}
+
+export function skillsSection(skills: Skill[]): PromptSection | undefined {
+  if (skills.length === 0) return undefined;
+  const lines = skills.map((s) => `- ${s.name}:${s.description || "(无描述)"}  ${s.path}`);
+  return {
+    name: SECTION_LABELS.skills,
+    text: `# 可用技能\n以下技能按需使用:先用 read 读取对应的 SKILL.md,再按其中步骤执行;文件里的相对路径相对于该技能目录。\n${lines.join("\n")}`,
+    source: skills.map((s) => s.path).join(", "),
+  };
+}
 
 /** 非空段以空行相接;段内文本原样。 */
 export function composeSystemPrompt(sections: PromptSection[]): string {
@@ -239,11 +283,21 @@ export function buildSystemPrompt(opts: BuildPromptOptions): BuiltPrompt {
   }
   const order = opts.sections ?? DEFAULT_SECTION_ORDER;
   const project = discoverProjectInstructions(opts.cwd, opts.discover);
+  // 技能段只在被点名时才去扫目录,不点名连磁盘都不碰。
+  const skills = order.includes("skills")
+    ? skillsSection(
+        discoverSkills(opts.cwd, {
+          ...(opts.discover?.home && { home: opts.discover.home }),
+          ...(opts.discover?.root && { root: opts.discover.root }),
+        }),
+      )
+    : undefined;
   const available: Partial<Record<PromptSectionName, PromptSection>> = {
     role: { name: SECTION_LABELS.role, text: opts.base },
     env: environmentSection(opts.cwd, opts.env),
     ...(project.section && { instructions: project.section }),
     ...(opts.memory && project.memory && { memory: project.memory }),
+    ...(skills && { skills }),
     ...(opts.append && { append: { name: SECTION_LABELS.append, text: opts.append } }),
   };
   const toUser = opts.instructionsAs === "user";

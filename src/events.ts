@@ -124,6 +124,8 @@ export type AgentEvent =
       injected: number;
     }
   | { type: "decision"; at: string; slot: "termination"; steps: number; reason: string }
+  /** 执行槽把一批工具调用并行跑了(只在并行策略下、且批内多于一个调用时记)。 */
+  | { type: "decision"; at: string; slot: "execution"; parallel: number; tools: string[] }
   | {
       /**
        * 压缩(Q31):追加事件,永不改写历史。投影读取它决定跳过什么、注入什么。

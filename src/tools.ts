@@ -18,6 +18,11 @@ export type Tool<S extends TSchema = TSchema> = {
   /** TypeBox schema,本身就是 JSON Schema 对象,原样进 wire 请求(Q19)。 */
   parameters: S;
   execute(args: Static<S>, ctx: ToolContext): Promise<string>;
+  /**
+   * 并行安全声明:parallel = 与同批其它并行安全的调用可同时跑(只读工具);
+   * 缺省 sequential = 必须独占(写文件、跑命令)。只在执行槽选了并行策略时有意义。
+   */
+  concurrency?: "parallel" | "sequential";
 };
 
 /** 定义处获得 Static<S> 的参数类型推导;运行期原样返回。 */

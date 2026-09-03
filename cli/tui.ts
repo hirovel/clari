@@ -15,11 +15,14 @@ import {
   buildCompaction,
   buildTools,
   DEFAULT_CONFIG_PATH,
+  loadExtensions,
   memoryFiles,
   parseCommonArgs,
   RESERVE,
+  sessionsDir,
   USAGE,
 } from "./bootstrap.js";
+import { discoverTemplates } from "./templates.js";
 import { createTuiApp, type ModelChoice } from "./tui-app.js";
 
 let args: ReturnType<typeof parseCommonArgs>;
@@ -56,9 +59,10 @@ try {
   process.exit(1);
 }
 
+const sessionDir = sessionsDir(boot.config);
 let session: ReturnType<typeof beginSession>;
 try {
-  session = beginSession(args, first);
+  session = beginSession(args, first, process.cwd(), sessionDir);
 } catch (err) {
   console.error((err as Error).message);
   process.exit(1);
@@ -89,7 +93,14 @@ const crash = (kind: string) => (err: unknown) => {
 process.on("uncaughtException", crash("未捕获异常"));
 process.on("unhandledRejection", crash("未处理的 Promise 拒绝"));
 const memory = args.memory ? memoryFiles() : undefined;
-const tools = buildTools(
+let ext: Awaited<ReturnType<typeof loadExtensions>>;
+try {
+  ext = await loadExtensions(args.extensions, { cwd: process.cwd(), log });
+} catch (err) {
+  console.error((err as Error).message);
+  process.exit(1);
+}
+const baseTools = buildTools(
   log,
   first,
   compaction,
@@ -97,6 +108,11 @@ const tools = buildTools(
   (child) => app?.attachChild(child),
   memory,
 );
+// 扩展模块的工具重名时覆盖内置的。
+const tools = [
+  ...baseTools.filter((t) => !ext.tools?.some((x) => x.name === t.name)),
+  ...(ext.tools ?? []),
+];
 const traceFile = sessionFile.replace(/\.jsonl$/, ".trace.jsonl");
 
 app = createTuiApp({
@@ -111,6 +127,9 @@ app = createTuiApp({
   fold: args.fold,
   trace: args.trace,
   approve: args.approve,
+  slots: { ...ext.slots, ...(args.execution && { execution: args.execution }) },
+  templates: discoverTemplates(),
+  sessionsDir: sessionDir,
   ...(memory && { memory }),
   ...(args.effort && { effort: args.effort }),
   ...(first.effortLevels && { effortLevels: first.effortLevels }),

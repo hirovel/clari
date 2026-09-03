@@ -17,12 +17,17 @@ export type AgentOptions = {
   effort?: EffortLevel;
 };
 
+/** 留言的投递方式:steer = 下一个步边界就注入(缺省);followUp = 等模型把手头的事做完再给。 */
+export type DeliverAs = "steer" | "followUp";
+
+type Queued = { text: string; deliverAs: DeliverAs };
+
 /**
  * Q22 的薄类层:持有留言队列与 AbortController,把 runTurn 串成会话。
  * 状态仍然只在事件日志里;这个类只管"正在跑的这一次"的运行时资源。
  */
 export class Agent {
-  private queue: string[] = [];
+  private queue: Queued[] = [];
   private ac: AbortController | undefined;
   private active: Promise<TurnOutcome> | undefined;
 
@@ -57,16 +62,19 @@ export class Agent {
     this.opts.log.append({ type: "session/model", at: now(), model: provider.model });
   }
 
-  /** 空闲时:入日志并开跑。运行中:进留言队列,注入时点由 steering 槽决定(Q20)。 */
-  async prompt(text: string): Promise<TurnOutcome> {
+  /**
+   * 空闲时:入日志并开跑。运行中:进留言队列,注入时点由 steering 槽与投递方式共同决定(Q20):
+   * steer 在步边界排空,followUp 只在 turn 边界(模型不再调工具时)排空。
+   */
+  async prompt(text: string, opts: { deliverAs?: DeliverAs } = {}): Promise<TurnOutcome> {
     const log = this.opts.log;
     if (this.active) {
-      this.queue.push(text);
+      this.queue.push({ text, deliverAs: opts.deliverAs ?? "steer" });
       return this.active;
     }
     // 上次被打断遗留的留言先于新输入注入(Q20 硬规矩:队列不静默丢弃)。
     for (const leftover of this.queue.splice(0)) {
-      log.append({ type: "user/message", at: now(), text: leftover });
+      log.append({ type: "user/message", at: now(), text: leftover.text });
     }
     log.append({ type: "user/message", at: now(), text });
 
@@ -76,7 +84,12 @@ export class Agent {
       provider: this.opts.provider,
       tools: this.opts.tools,
       signal: this.ac.signal,
-      drainQueue: () => this.queue.splice(0),
+      drainQueue: (boundary) => {
+        const take = (q: Queued) => boundary === "turn" || q.deliverAs === "steer";
+        const out = this.queue.filter(take).map((q) => q.text);
+        this.queue = this.queue.filter((q) => !take(q));
+        return out;
+      },
       ...(this.opts.slots && { slots: this.opts.slots }),
       ...(this.opts.compaction && { compaction: this.opts.compaction }),
       ...(this.opts.onDelta && { onDelta: this.opts.onDelta }),

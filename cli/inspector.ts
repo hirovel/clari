@@ -314,7 +314,9 @@ export function decisionLines(rec: RequestRecord): string[] {
         lines.push(
           e.slot === "steering"
             ? `${c.jin("◇")} 插话注入 ${e.injected} 条(${e.boundary} 边界)`
-            : `${c.jin("◇")} 终止策略叫停:第 ${e.steps} 步,${e.reason}`,
+            : e.slot === "execution"
+              ? `${c.jin("◇")} 并行执行 ${e.parallel} 个调用:${e.tools.join(", ")}`
+              : `${c.jin("◇")} 终止策略叫停:第 ${e.steps} 步,${e.reason}`,
         );
         break;
       case "session/interrupt":

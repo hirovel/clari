@@ -6,13 +6,16 @@ import { Agent } from "../src/agent.js";
 import { usageTotals } from "../src/cost.js";
 import type { AgentEvent } from "../src/events.js";
 import { maxSteps } from "../src/loop.js";
+import { expandFileRefs } from "./attachments.js";
 import {
   beginSession,
   bootstrap,
   buildCompaction,
   buildTools,
+  loadExtensions,
   memoryFiles,
   parseCommonArgs,
+  sessionsDir,
   USAGE,
 } from "./bootstrap.js";
 
@@ -48,15 +51,19 @@ try {
   process.exit(1);
 }
 
-const { log, sessionFile } = beginSession(args, choice);
+const { log, sessionFile } = beginSession(args, choice, process.cwd(), sessionsDir(boot.config));
+// 事件流输出(--events):每条事件一行 JSON,与会话文件逐字节相同;给外部程序订阅内核的全部状态变化。
+if (args.events) log.subscribe((e) => process.stdout.write(`${JSON.stringify(e)}\n`));
 let compaction: Awaited<ReturnType<typeof buildCompaction>>;
+let ext: Awaited<ReturnType<typeof loadExtensions>>;
 try {
   compaction = await buildCompaction(args.compaction, choice.contextWindow);
+  ext = await loadExtensions(args.extensions, { cwd: process.cwd(), log });
 } catch (err) {
   console.error((err as Error).message);
   process.exit(2);
 }
-const tools = buildTools(
+const baseTools = buildTools(
   log,
   choice,
   compaction,
@@ -64,6 +71,10 @@ const tools = buildTools(
   undefined,
   args.memory ? memoryFiles() : undefined,
 );
+const tools = [
+  ...baseTools.filter((t) => !ext.tools?.some((x) => x.name === t.name)),
+  ...(ext.tools ?? []),
+];
 
 const agent = new Agent({
   log,
@@ -72,25 +83,34 @@ const agent = new Agent({
   compaction,
   // 一次性模式没有人在旁边点头:--approve ask 等于全部拒绝,模型会收到"用户拒绝"的结果。
   slots: {
+    ...ext.slots,
     ...(args.maxSteps && { termination: maxSteps(args.maxSteps) }),
     ...(args.approve === "ask" && { approve: () => false }),
+    ...(args.execution && { execution: args.execution }),
   },
   ...(args.effort && { effort: args.effort }),
-  ...(!args.json && {
-    onDelta: (d: string) => process.stdout.write(d),
-  }),
+  ...(!args.json &&
+    !args.events && {
+      onDelta: (d: string) => process.stdout.write(d),
+    }),
 });
 
 const startIndex = log.events.length;
 try {
-  const outcome = await agent.prompt(prompt);
+  const outcome = await agent.prompt(expandFileRefs(prompt).text);
   const fresh = log.events.slice(startIndex);
   const last = [...fresh].reverse().find((e) => e.type === "assistant/message");
   const text = last?.type === "assistant/message" ? last.text : "";
   if (args.json) {
+    const summary = summarize(fresh, text, outcome, sessionFile, choice.model);
+    // 事件流模式下摘要也是一行,type 字段区分;否则缩进打印。
     console.log(
-      JSON.stringify(summarize(fresh, text, outcome, sessionFile, choice.model), null, 2),
+      args.events
+        ? JSON.stringify({ type: "summary", ...summary })
+        : JSON.stringify(summary, null, 2),
     );
+  } else if (args.events) {
+    console.error(`[会话:${sessionFile}]`);
   } else {
     if (!text.endsWith("\n")) process.stdout.write("\n");
     if (typeof outcome === "object") console.error(`[循环停止:${outcome.stopped}]`);

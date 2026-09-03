@@ -43,6 +43,7 @@ export function createReadTool(opts: { truncate?: TruncationPolicy; maxLineChars
       offset: Type.Optional(Type.Number({ description: "起始行号,从 1 开始" })),
       limit: Type.Optional(Type.Number({ description: "最多返回的行数" })),
     }),
+    concurrency: "parallel",
     async execute(args) {
       const path = resolve(args.path);
       const st = statSync(path);
@@ -85,9 +86,58 @@ export const writeTool = defineTool({
   },
 });
 
+/** 归一化一行用于宽松匹配:去行尾空白,弯引号与长破折号换成 ASCII,特殊空格换成普通空格。 */
+export function normalizeLine(line: string): string {
+  return line
+    .replace(/[‘’‚‛]/g, "'")
+    .replace(/[“”„‟]/g, '"')
+    .replace(/[–—−]/g, "-")
+    .replace(/[  -​  　]/g, " ")
+    .replace(/\s+$/, "");
+}
+
+/**
+ * 精确匹配失败后的宽松匹配:按行归一化后找唯一的连续行窗口。命中时只替换这几行,
+ * 文件其余部分一字不动。返回 undefined = 也没匹配到;抛错 = 匹配到多处。
+ */
+export function fuzzyReplace(
+  content: string,
+  oldText: string,
+  newText: string,
+): { next: string; line: number } | undefined {
+  const lines = content.split("\n");
+  const target = oldText.split("\n").map(normalizeLine);
+  // 去掉 oldText 首尾的空行,模型常多带一行。
+  while (target.length > 0 && target[0] === "") target.shift();
+  while (target.length > 0 && target.at(-1) === "") target.pop();
+  if (target.length === 0) return undefined;
+  const norm = lines.map(normalizeLine);
+  const hits: number[] = [];
+  for (let i = 0; i + target.length <= norm.length; i++) {
+    let ok = true;
+    for (let k = 0; k < target.length; k++) {
+      if (norm[i + k] !== target[k]) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) hits.push(i);
+  }
+  if (hits.length === 0) return undefined;
+  if (hits.length > 1) throw new Error(`宽松匹配到 ${hits.length} 处,不唯一。请提供更长的上下文。`);
+  const at = hits[0] as number;
+  const replacement = newText.split("\n");
+  const next = [...lines.slice(0, at), ...replacement, ...lines.slice(at + target.length)].join(
+    "\n",
+  );
+  return { next, line: at + 1 };
+}
+
 export const editTool = defineTool({
   name: "edit",
-  description: "对文件做一处精确替换。oldText 必须在文件中出现且仅出现一次,否则报错并说明原因。",
+  description:
+    "对文件做一处精确替换。oldText 必须在文件中出现且仅出现一次,否则报错并说明原因。" +
+    "精确匹配失败时会忽略行尾空白与引号样式再试一次,命中会在结果里说明。",
   parameters: Type.Object({
     path: Type.String({ description: "文件路径" }),
     oldText: Type.String({ description: "要被替换的原文,必须唯一" }),
@@ -103,12 +153,21 @@ export const editTool = defineTool({
     const newText = args.newText.replaceAll("\r\n", "\n");
     if (!oldText) throw new Error("oldText 不能为空。");
     const count = content.split(oldText).length - 1;
-    if (count === 0) throw new Error(`oldText 在 ${args.path} 中不存在,请先 read 确认原文。`);
     if (count > 1) {
       throw new Error(`oldText 在 ${args.path} 中出现 ${count} 次,不唯一。请提供更长的上下文。`);
     }
-    const next = content.replace(oldText, () => newText);
+    let next: string;
+    let note = "";
+    if (count === 1) {
+      next = content.replace(oldText, () => newText);
+    } else {
+      const fuzzy = fuzzyReplace(content, oldText, newText);
+      if (!fuzzy) throw new Error(`oldText 在 ${args.path} 中不存在,请先 read 确认原文。`);
+      next = fuzzy.next;
+      note = `(精确匹配失败,按忽略行尾空白与引号样式的宽松匹配命中第 ${fuzzy.line} 行)`;
+    }
+    if (next === content) throw new Error("替换后内容与原文相同,未写入。");
     writeFileSync(path, crlf ? next.replaceAll("\n", "\r\n") : next, "utf8");
-    return `已替换 ${args.path} 中的一处文本。`;
+    return `已替换 ${args.path} 中的一处文本。${note}`;
   },
 });

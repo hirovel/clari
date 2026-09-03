@@ -55,13 +55,15 @@ export type ProviderConfig = {
   promptCache?: boolean;
   /** 流停滞判定毫秒数,缺省 90000;0 = 不限。 */
   stallTimeoutMs?: number;
+  /** 重试参数;缺省 2 次、500ms 起、×2 退避、上限 8s(与两大官方 SDK 一致)。 */
+  retry?: { maxRetries?: number; baseDelayMs?: number; maxDelayMs?: number };
 };
 
 /** 系统提示词的段名(Q66):哪几段、什么顺序由配置或预设决定。 */
-export type PromptSectionName = "role" | "env" | "instructions" | "memory" | "append";
+export type PromptSectionName = "role" | "env" | "instructions" | "memory" | "skills" | "append";
 
 export type PromptConfig = {
-  /** 要哪几段、什么顺序;缺省 role, env, instructions, memory, append。 */
+  /** 要哪几段、什么顺序;缺省 role, env, instructions, memory, skills, append。 */
   sections?: PromptSectionName[];
   /** 项目指令与记忆放 system(缺省)还是首条 user 消息。 */
   instructionsAs?: "system" | "user";
@@ -78,6 +80,10 @@ export type Preset = {
   effort?: string;
   compaction?: string;
   approve?: "all" | "ask";
+  /** 执行槽:sequential(缺省)| parallel。 */
+  execution?: "sequential" | "parallel";
+  /** 扩展模块路径列表。 */
+  extensions?: string[];
   systemPromptFile?: string;
   appendSystemPromptFile?: string;
   subagent?: boolean;
@@ -95,6 +101,8 @@ export type KernelConfig = {
   prompt?: PromptConfig;
   /** 命名预设(Q15)。 */
   presets?: Record<string, Preset>;
+  /** 会话文件目录;缺省工作目录下的 sessions/。环境变量 KERNEL_SESSIONS 优先。 */
+  sessionsDir?: string;
 };
 
 /** 配置文件路径;环境变量 KERNEL_CONFIG 可改(多套配置、测试用)。 */
@@ -319,12 +327,13 @@ export function createProvider(r: Resolved, apiKey: string): Provider {
     ...(extraBody && { extraBody }),
     ...(r.provider.extraHeaders && { extraHeaders: r.provider.extraHeaders }),
     ...(r.provider.stallTimeoutMs !== undefined && { stallTimeoutMs: r.provider.stallTimeoutMs }),
+    ...(r.provider.retry && { retry: r.provider.retry }),
+    ...(maxTokens !== undefined && { maxTokens }),
   };
   if (r.provider.protocol === "anthropic") {
     return anthropic({
       baseUrl: r.provider.baseUrl,
       ...shared,
-      ...(maxTokens !== undefined && { maxTokens }),
       ...(thinkingMode && { thinkingMode }),
       ...(r.provider.promptCache !== undefined && { promptCache: r.provider.promptCache }),
     });

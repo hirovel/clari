@@ -17,12 +17,12 @@ import {
   type TUI,
   TuiMainScreen,
 } from "@earendil-works/pi-tui";
-import { Agent } from "../src/agent.js";
+import { Agent, type DeliverAs } from "../src/agent.js";
 import { contextBreakdown } from "../src/context.js";
 import { costOf, fmtCost, type Price, usageTotals } from "../src/cost.js";
 import { type AgentEvent, now, type ToolCall } from "../src/events.js";
 import type { EventLog } from "../src/log.js";
-import { type CompactionConfig, recordingProvider } from "../src/loop.js";
+import { type CompactionConfig, recordingProvider, type TurnDeps } from "../src/loop.js";
 import {
   EFFORT_LEVELS,
   type EffortLevel,
@@ -32,7 +32,10 @@ import {
 } from "../src/provider.js";
 import type { ChildInfo } from "../src/subagent.js";
 import type { Tool } from "../src/tools.js";
+import { expandFileRefs } from "./attachments.js";
+import { forkSession, SESSIONS_DIR } from "./bootstrap.js";
 import { fmtMs, fmtTok, RequestInspector, type SessionSource } from "./inspector.js";
+import { expandTemplate, type PromptTemplate } from "./templates.js";
 import { c, editorTheme, markdownTheme } from "./theme.js";
 import { diffLines, hunks } from "./tools/diff.js";
 import { clearMemory, forgetMemory, type MemoryFiles, memoryEntries } from "./tools/memory.js";
@@ -88,12 +91,19 @@ export type TuiAppDeps = {
   approve?: "all" | "ask";
   /** 跨会话记忆已打开时的两个文件(Q65),供 /memory 看与删。 */
   memory?: MemoryFiles;
+  /** 策略槽实现(执行策略、扩展模块换上的槽等)。approve=ask 时界面的审批实现覆盖这里的 approve。 */
+  slots?: TurnDeps["slots"];
+  /** 提示词模板:/名 参数 展开成一条用户消息。 */
+  templates?: PromptTemplate[];
+  /** 会话目录,/fork 的新文件写到这里。 */
+  sessionsDir?: string;
 };
 
 export type TuiApp = {
   tui: TUI;
   agent: Agent;
-  submit(text: string): Promise<void>;
+  /** 提交一条用户消息;运行中时 deliverAs 决定是步边界插话(缺省)还是等模型做完再给。 */
+  submit(text: string, opts?: { deliverAs?: DeliverAs }): Promise<void>;
   command(text: string): Promise<void>;
   /** 当前文档的渲染行(带 ANSI),用于离线验证与预览。 */
   lines(width?: number): string[];
@@ -137,6 +147,10 @@ const COMMANDS = [
     description: "跨会话记忆:/memory 列出;/memory forget N 删一条;/memory clear 清空",
   },
   { name: "compact", description: "手动压缩,可附指示:/compact 保留报错" },
+  {
+    name: "fork",
+    description: "分叉会话:/fork 复制到最后一条用户消息之前;/fork N 复制前 N 条事件到新文件",
+  },
   { name: "model", description: "切换模型:/model 供应商/模型;不带参数列出可选" },
   { name: "models", description: "向供应商查询当前可用模型,对照配置标出下线与新增" },
   { name: "effort", description: "强度级别:/effort off|low|medium|high|xhigh|max;auto 恢复不传" },
@@ -163,7 +177,16 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
   const live = new Container();
   const status = new Text("", 1, 0);
   const editor = new Editor(tui, editorTheme, { paddingX: 1 });
-  editor.setAutocompleteProvider(new CombinedAutocompleteProvider(COMMANDS, process.cwd()));
+  const templates = deps.templates ?? [];
+  editor.setAutocompleteProvider(
+    new CombinedAutocompleteProvider(
+      [
+        ...COMMANDS,
+        ...templates.map((t) => ({ name: t.name, description: `模板:${t.description}` })),
+      ],
+      process.cwd(),
+    ),
+  );
 
   tui.addChild(header);
   tui.addChild(
@@ -255,7 +278,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     compaction,
     onRaw,
     ...(deps.effort && { effort: deps.effort }),
-    ...(deps.approve === "ask" && { slots: { approve: askApproval } }),
+    slots: { ...deps.slots, ...(deps.approve === "ask" && { approve: askApproval }) },
     onDelta: (d) => {
       if (!streaming) {
         transcript.addChild(new Spacer(1));
@@ -365,8 +388,13 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
   function requestSummary(e: Extract<AgentEvent, { type: "assistant/message" }>): string {
     if (!lastRequest) return "";
     const u = e.usage;
+    // 缓存命中率 = 命中 / 全部输入;前缀没变就该接近 100%,骤降说明前缀被改动了。
+    const hit =
+      u?.cacheReadTokens !== undefined && u.inputTokens > 0
+        ? `(缓存 ${fmtTok(u.cacheReadTokens)} · ${Math.round((u.cacheReadTokens / u.inputTokens) * 100)}%)`
+        : "";
     const measured = u
-      ? `→ 实测 ${fmtTok(u.inputTokens)}${u.cacheReadTokens !== undefined ? `(缓存 ${fmtTok(u.cacheReadTokens)})` : ""} · +${fmtTok(u.outputTokens)}`
+      ? `→ 实测 ${fmtTok(u.inputTokens)}${hit} · +${fmtTok(u.outputTokens)}`
       : "→ 无用量";
     const price = u ? priceFor(lastRequest.model) : undefined;
     const cost = u && price ? ` · ${fmtCost(costOf(u, price))}` : "";
@@ -616,6 +644,8 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
         break;
       case "decision":
         if (e.slot === "steering") note(c.faint(`· 插话注入 ${e.injected} 条(${e.boundary} 边界)`));
+        if (e.slot === "execution")
+          note(c.faint(`· 并行执行 ${e.parallel} 个调用:${e.tools.join(", ")}`));
         break;
       case "request/error":
         // 循环随后抛出,submit 的 catch 负责呈现,这里不重复。
@@ -666,9 +696,26 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
 
   // ---------- 输入 ----------
 
-  async function submit(text: string): Promise<void> {
+  async function submit(raw: string, opts: { deliverAs?: DeliverAs } = {}): Promise<void> {
+    // @路径 展开成消息里的 <file> 块:附上的就是发出的,落盘上屏都完整。
+    const expanded = expandFileRefs(raw);
+    for (const a of expanded.attachments) {
+      note(
+        a.skipped
+          ? c.zhu(`· @${a.ref}:${a.skipped}`)
+          : c.faint(`· 附上 @${a.ref}(${a.bytes} 字节)`),
+      );
+    }
+    const text = expanded.text;
     if (agent.running) {
-      void agent.prompt(text);
+      void agent.prompt(text, opts);
+      note(
+        c.faint(
+          opts.deliverAs === "followUp"
+            ? "· 已排入后续留言:模型做完手头的事再给它"
+            : "· 已排入插话:下一个步边界注入",
+        ),
+      );
       updateStatus();
       return;
     }
@@ -693,9 +740,13 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     switch (cmd) {
       case "help":
         note(
-          COMMANDS.map((x) => `${c.jin(`/${x.name}`.padEnd(12))} ${c.soft(x.description)}`).join(
-            "\n",
-          ),
+          [
+            ...COMMANDS.map((x) => `${c.jin(`/${x.name}`.padEnd(12))} ${c.soft(x.description)}`),
+            ...templates.map(
+              (t) => `${c.jin(`/${t.name}`.padEnd(12))} ${c.soft(`模板:${t.description}`)}`,
+            ),
+            c.faint("Alt+Enter 排入后续留言(模型做完再给);@路径 把文件附进消息"),
+          ].join("\n"),
         );
         break;
       case "quit":
@@ -730,6 +781,9 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       case "compact":
         await manualCompact(arg);
         break;
+      case "fork":
+        note(forkCommand(arg));
+        break;
       case "model":
         switchModel(arg);
         break;
@@ -750,9 +804,32 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
         deps.settings.setDefault(`${info.providerName}/${info.model}`);
         note(c.jin(`◇ 缺省模型已设为 ${info.providerName}/${info.model}`));
         break;
-      default:
+      default: {
+        // 提示词模板:/名 参数 → 展开成一条普通用户消息提交。
+        const t = templates.find((x) => x.name === cmd);
+        if (t) {
+          note(c.faint(`· 模板 /${t.name}  ${t.path}`));
+          await submit(expandTemplate(t, arg));
+          break;
+        }
         note(c.zhu(`未知命令 /${cmd}`) + c.faint("  /help 查看命令"));
+      }
     }
+  }
+
+  /** /fork:复制事件前缀到新文件。事件即真相,分叉就是复制前缀,原文件不动。 */
+  function forkCommand(arg: string): string {
+    let upTo: number;
+    if (arg) {
+      upTo = Number(arg);
+      if (!Number.isInteger(upTo) || upTo < 1) return c.zhu("用法:/fork 或 /fork N(前 N 条事件)");
+    } else {
+      const lastUser = [...log.events].reverse().findIndex((e) => e.type === "user/message");
+      upTo = lastUser < 0 ? log.events.length : log.events.length - 1 - lastUser;
+      if (upTo < 1) return c.faint("还没有可分叉的历史");
+    }
+    const r = forkSession(log.events, upTo, deps.sessionsDir ?? SESSIONS_DIR);
+    return `${c.jin(`◇ 已分叉:前 ${r.events} 条事件 → ${r.file}`)}\n${c.faint(`  pnpm tui -- --resume ${r.file}   从那个时点继续;当前会话不受影响`)}`;
   }
 
   function switchModel(arg: string): void {
@@ -1022,6 +1099,16 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       return { consume: true };
     }
     if (overlay || approval) return undefined; // 检视器或审批提示打开时,其余按键归它们
+    if (matchesKey(data, Key.alt("enter"))) {
+      // 后续留言:不打断当前步,等模型不再调工具时才给它。空闲时与普通提交等价。
+      const text = editor.getText().trim();
+      if (!text) return { consume: true };
+      editor.setText("");
+      editor.addToHistory(text);
+      if (text.startsWith("/")) void command(text);
+      else void submit(text, { deliverAs: "followUp" });
+      return { consume: true };
+    }
     if (matchesKey(data, Key.ctrl("o"))) {
       toggleFold();
       return { consume: true };

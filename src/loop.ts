@@ -1,4 +1,9 @@
-import { type CompactionStrategy, estimateAfter, type PreservationPolicy } from "./compaction.js";
+import {
+  type CompactionStrategy,
+  contextTokens,
+  estimateAfter,
+  type PreservationPolicy,
+} from "./compaction.js";
 import { type AgentEvent, now, type ToolCall } from "./events.js";
 import type { EventLog } from "./log.js";
 import { deriveMessages, type Message } from "./messages.js";
@@ -34,6 +39,13 @@ export type ApprovePolicy = (call: ToolCall) => boolean | Promise<boolean>;
 /** pi 立场:不弹确认,要隔离就跑容器(默认)。 */
 export const allowAll: ApprovePolicy = () => true;
 
+/**
+ * 执行策略(Q10):sequential = 一批调用逐个跑(默认,行为最可预测);
+ * parallel = 声明了并行安全的相邻调用同时跑(只读工具批量读取时省时间),其余仍逐个。
+ * 结果按调用顺序落盘,两种策略下模型看到的序列一致。
+ */
+export type ExecutionPolicy = "sequential" | "parallel";
+
 // ---------- runTurn(Q22 的纯函数层;Q13:换循环形态 = 用同一批原语另写一个函数) ----------
 
 export type TurnOutcome = "idle" | "aborted" | { stopped: string };
@@ -46,9 +58,10 @@ export type TurnDeps = {
     termination?: TerminationPolicy;
     steering?: SteeringPolicy;
     approve?: ApprovePolicy;
+    execution?: ExecutionPolicy;
   };
-  /** 排空留言队列,返回待注入的用户消息。注入时点由 steering 决定(Q20)。 */
-  drainQueue?: () => string[];
+  /** 排空留言队列,返回待注入的用户消息。注入时点由 steering 决定(Q20);边界告诉队列该放哪些。 */
+  drainQueue?: (boundary: "step" | "turn") => string[];
   signal?: AbortSignal;
   onDelta?: (textDelta: string) => void;
   onReasoning?: (reasoningDelta: string) => void;
@@ -98,7 +111,7 @@ export function recordingProvider(
         model: provider.model,
         messages: messages.length,
         tools: tools.map((t) => t.name),
-        estimatedTokens: estimateAfter(log.events),
+        estimatedTokens: contextTokens(log.events),
         ...(opts.threshold !== undefined && { threshold: opts.threshold }),
         reason: "compaction",
         body: describeRequestBody(log.events, messages),
@@ -127,8 +140,9 @@ async function compactIfNeeded(
   force: boolean,
 ): Promise<boolean> {
   const threshold = cfg.window - (cfg.reserveTokens ?? DEFAULT_RESERVE);
+  // 触发用实测优先的口径;进展门两边都用估算,口径一致才可比。
+  if (!force && contextTokens(deps.log.events) <= threshold) return false;
   const before = estimateAfter(deps.log.events);
-  if (!force && before <= threshold) return false;
   const payload = await cfg.strategy({
     events: deps.log.events,
     window: cfg.window,
@@ -158,6 +172,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   const termination = deps.slots?.termination ?? untilIdle;
   const steering = deps.slots?.steering ?? steer;
   const approve = deps.slots?.approve ?? allowAll;
+  const execution = deps.slots?.execution ?? "sequential";
   const drainQueue = deps.drainQueue ?? (() => []);
   const defs: ToolDef[] = tools.map((t) => ({
     name: t.name,
@@ -183,7 +198,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
       model: provider.model,
       messages: messages.length,
       tools: defs.map((d) => d.name),
-      estimatedTokens: estimateAfter(log.events),
+      estimatedTokens: contextTokens(log.events),
       ...(cfg && { threshold: cfg.window - (cfg.reserveTokens ?? DEFAULT_RESERVE) }),
       reason: overflowRecovered ? "overflow-retry" : "turn",
       ...(effort && { effort }),
@@ -224,15 +239,21 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
       // Q26:截断响应的调用一个都不执行,逐个补错误应答(协议要求每个 call 有应答)。
       for (const call of turn.toolCalls) appendResult(log, call, LENGTH_NOTICE, true);
     } else if (turn.stopReason === "tool") {
-      await executeCalls(turn.toolCalls, { log, tools, approve, ...(signal && { signal }) });
+      await executeCalls(turn.toolCalls, {
+        log,
+        tools,
+        approve,
+        execution,
+        ...(signal && { signal }),
+      });
       if (signal?.aborted) return "aborted";
     }
 
     // step 边界。审批等待发生在上面的执行阶段,此处才排队列 —— 留言永不落进确认窗口(Q20 硬规矩)。
-    let injected = steering("step") ? inject(log, "step", drainQueue()) : 0;
+    let injected = steering("step") ? inject(log, "step", drainQueue("step")) : 0;
 
     if (turn.stopReason === "end") {
-      if (injected === 0 && steering("turn")) injected = inject(log, "turn", drainQueue());
+      if (injected === 0 && steering("turn")) injected = inject(log, "turn", drainQueue("turn"));
       if (injected === 0) return "idle"; // 无事可欠,turn 结束
     }
 
@@ -316,43 +337,87 @@ function appendResult(
   });
 }
 
+type Prepared =
+  | { call: ToolCall; immediate: string }
+  | { call: ToolCall; tool: Tool; args: unknown };
+
+type Executed = { content: string; isError: boolean; durationMs: number };
+
+async function runOne(
+  p: Extract<Prepared, { tool: Tool }>,
+  signal: AbortSignal,
+): Promise<Executed> {
+  const startedAt = Date.now();
+  try {
+    const content = await p.tool.execute(p.args as never, { signal, callId: p.call.id });
+    return { content, isError: false, durationMs: Date.now() - startedAt };
+  } catch (err) {
+    // Q9:执行失败也是结果。打断导致的失败同样如实记录。
+    return { content: (err as Error).message, isError: true, durationMs: Date.now() - startedAt };
+  }
+}
+
 async function executeCalls(
   calls: ToolCall[],
   ctx: {
     log: EventLog;
     tools: Tool[];
     approve: ApprovePolicy;
+    execution: ExecutionPolicy;
     signal?: AbortSignal;
   },
 ): Promise<void> {
-  // 串行执行(Q10)。打断后剩余调用不再执行,但必须逐个补应答(Q21)。
+  const signal = ctx.signal ?? new AbortController().signal;
+
+  // 准备阶段永远按顺序:找工具、审批、校验。审批是人的决定,不能并发弹出。
+  const prepare = async (call: ToolCall): Promise<Prepared> => {
+    const tool = ctx.tools.find((t) => t.name === call.name);
+    if (!tool) return { call, immediate: `未知工具 "${call.name}"。` };
+    if (!(await ctx.approve(call))) return { call, immediate: "用户拒绝执行此调用。" };
+    const checked = validateArgs(tool.parameters, call.args);
+    if (!checked.ok) return { call, immediate: checked.error };
+    return { call, tool, args: checked.value };
+  };
+
+  // 并行批:相邻的、都声明了并行安全的调用。结果等整批完成后按顺序落盘。
+  let batch: Extract<Prepared, { tool: Tool }>[] = [];
+  const flush = async () => {
+    if (batch.length === 0) return;
+    const items = batch;
+    batch = [];
+    if (items.length > 1) {
+      ctx.log.append({
+        type: "decision",
+        at: now(),
+        slot: "execution",
+        parallel: items.length,
+        tools: items.map((p) => p.call.name),
+      });
+    }
+    const results = await Promise.all(items.map((p) => runOne(p, signal)));
+    items.forEach((p, i) => {
+      const r = results[i] as Executed;
+      appendResult(ctx.log, p.call, r.content, r.isError, r.durationMs);
+    });
+  };
+
   for (const call of calls) {
-    if (ctx.signal?.aborted) {
+    // 打断后剩余调用不再执行,但必须逐个补应答(Q21)。
+    if (signal.aborted) {
+      await flush();
       appendResult(ctx.log, call, "已被用户打断,未执行。", true);
       continue;
     }
-    const tool = ctx.tools.find((t) => t.name === call.name);
-    if (!tool) {
-      appendResult(ctx.log, call, `未知工具 "${call.name}"。`, true);
+    const p = await prepare(call);
+    if ("immediate" in p) {
+      await flush();
+      appendResult(ctx.log, call, p.immediate, true);
       continue;
     }
-    if (!(await ctx.approve(call))) {
-      appendResult(ctx.log, call, "用户拒绝执行此调用。", true);
-      continue;
-    }
-    const checked = validateArgs(tool.parameters, call.args);
-    if (!checked.ok) {
-      appendResult(ctx.log, call, checked.error, true);
-      continue;
-    }
-    const startedAt = Date.now();
-    try {
-      const signal = ctx.signal ?? new AbortController().signal;
-      const content = await tool.execute(checked.value as never, { signal, callId: call.id });
-      appendResult(ctx.log, call, content, false, Date.now() - startedAt);
-    } catch (err) {
-      // Q9:执行失败也是结果。打断导致的失败同样如实记录。
-      appendResult(ctx.log, call, (err as Error).message, true, Date.now() - startedAt);
-    }
+    const parallelSafe = ctx.execution === "parallel" && p.tool.concurrency === "parallel";
+    if (!parallelSafe) await flush();
+    batch.push(p);
+    if (!parallelSafe) await flush();
   }
+  await flush();
 }

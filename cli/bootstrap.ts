@@ -22,9 +22,9 @@ import {
   setApiKey,
   setDefaultModel,
 } from "../src/config.js";
-import { now } from "../src/events.js";
+import { type AgentEvent, now } from "../src/events.js";
 import { EventLog } from "../src/log.js";
-import type { CompactionConfig } from "../src/loop.js";
+import type { CompactionConfig, ExecutionPolicy, TurnDeps } from "../src/loop.js";
 import { EFFORT_LEVELS, type EffortLevel, parseEffort } from "../src/provider.js";
 import { type ChildInfo, createTaskTool } from "../src/subagent.js";
 import type { Tool } from "../src/tools.js";
@@ -45,6 +45,7 @@ export const PROMPT_SECTION_NAMES: PromptSectionName[] = [
   "env",
   "instructions",
   "memory",
+  "skills",
   "append",
 ];
 
@@ -75,6 +76,12 @@ export type CommonArgs = {
   promptSections?: PromptSectionName[];
   /** 项目指令与记忆放 system 还是首条 user 消息(Q66)。 */
   instructionsAs?: "system" | "user";
+  /** 执行槽(Q10):sequential 缺省;parallel = 并行安全的相邻只读调用同时跑。 */
+  execution?: ExecutionPolicy;
+  /** 扩展模块路径(可多个):default 导出一个函数,返回要加的工具与槽实现。 */
+  extensions: string[];
+  /** 一次性模式:把每条事件以 JSON 行写到 stdout(事件流输出)。 */
+  events: boolean;
   /** 非选项参数(一次性模式的任务文本)。 */
   rest: string[];
   /** 这几项有内置缺省值,记下是否显式给过,预设才知道能不能覆盖。 */
@@ -93,6 +100,8 @@ export function parseCommonArgs(argv: string[]): CommonArgs {
     json: false,
     help: false,
     approve: "all",
+    extensions: [],
+    events: false,
     rest: [],
   };
   const takeValue = (i: number, name: string): string => {
@@ -186,6 +195,19 @@ export function parseCommonArgs(argv: string[]): CommonArgs {
         out.instructionsAs = v;
         break;
       }
+      case "--execution": {
+        const v = takeValue(i++, a);
+        if (v !== "sequential" && v !== "parallel")
+          throw new Error(`--execution 只接受 sequential 或 parallel,收到 "${v}"`);
+        out.execution = v;
+        break;
+      }
+      case "--extension":
+        out.extensions.push(takeValue(i++, a));
+        break;
+      case "--events":
+        out.events = true;
+        break;
       case "-p":
       case "--prompt":
         out.rest.push(takeValue(i++, a));
@@ -212,18 +234,24 @@ export const USAGE = `用法
   --approve all|ask              ask = 每个工具调用弹一行确认(仅界面);缺省 all
   --preset 名                    用配置里 presets.名 的一组参数;显式参数仍优先
   --memory | --no-memory         跨会话记忆(AGENTS.md 里的记忆节 + remember 工具);缺省关
-  --prompt-sections role,env,instructions,memory,append   系统提示词要哪几段、什么顺序
+  --prompt-sections role,env,instructions,memory,skills,append   系统提示词要哪几段、什么顺序
   --instructions-as system|user  项目指令与记忆放 system(缺省)还是首条 user 消息
+  --execution sequential|parallel  工具执行槽:缺省逐个;parallel = 相邻只读调用同时跑
+  --extension <模块.mjs>         装载扩展模块(可多次):加工具、换槽实现
   --max-steps N                  终止保底(缺省不设上限)
   --subagent                     装上 task 工具(子 agent)
   --trace                        逐行记录原始流,并写 <会话>.trace.jsonl
   --fold                         工具结果初始折叠(Ctrl+O 切换)
   --json                         一次性模式输出结构化结果
+  --events                       一次性模式把每条事件以 JSON 行写到 stdout
   -h, --help
 
 配置
   ${DEFAULT_CONFIG_PATH}
-  环境变量 KERNEL_CONFIG 可改路径;key 走 apiKeyEnv 指向的环境变量,或界面里 /key 供应商 密钥`;
+  环境变量 KERNEL_CONFIG 可改路径;key 走 apiKeyEnv 指向的环境变量,或界面里 /key 供应商 密钥
+  会话文件缺省在 ./sessions/;配置 sessionsDir 或环境变量 KERNEL_SESSIONS 可改
+  提示词模板 ~/.agent-kernel/prompts/*.md 与 <git 根>/.agent-kernel/prompts/*.md,界面里 /名 参数
+  技能 ~/.agent-kernel/skills/<名>/SKILL.md 与 <git 根>/.agents/skills/<名>/SKILL.md,进系统提示词的技能段`;
 
 export type Bootstrap = {
   config: KernelConfig;
@@ -259,6 +287,8 @@ export function applyPreset(args: CommonArgs, config: KernelConfig): CommonArgs 
     }
     if (!args.subagentExplicit && preset.subagent !== undefined) out.subagent = preset.subagent;
     if (out.maxSteps === undefined && preset.maxSteps !== undefined) out.maxSteps = preset.maxSteps;
+    if (out.execution === undefined && preset.execution) out.execution = preset.execution;
+    if (out.extensions.length === 0 && preset.extensions) out.extensions = [...preset.extensions];
   }
   const prompt = { ...config.prompt, ...preset?.prompt };
   if (out.memory === undefined && prompt.memory !== undefined) out.memory = prompt.memory;
@@ -383,6 +413,11 @@ export function buildTools(
   ];
 }
 
+/** 会话目录:环境变量 KERNEL_SESSIONS > 配置 sessionsDir > ./sessions。 */
+export function sessionsDir(config?: Pick<KernelConfig, "sessionsDir">): string {
+  return process.env.KERNEL_SESSIONS?.trim() || config?.sessionsDir || SESSIONS_DIR;
+}
+
 /** 最近一次会话文件(按文件名排序,文件名即时间戳)。 */
 export function latestSession(dir = SESSIONS_DIR): string | undefined {
   if (!existsSync(dir)) return undefined;
@@ -393,23 +428,81 @@ export function latestSession(dir = SESSIONS_DIR): string | undefined {
   return last ? join(dir, last) : undefined;
 }
 
+export function newSessionPath(dir = SESSIONS_DIR, suffix = ""): string {
+  return join(dir, `${new Date().toISOString().replace(/[:.]/g, "-")}${suffix}.jsonl`);
+}
+
 /**
  * 打开会话(Q54):新建,或恢复并沿用同一文件继续追加。
  * 恢复时不重算系统提示词,日志里那份是唯一真相。
  */
-export function openSession(args: Pick<CommonArgs, "resume" | "continue">): {
+export function openSession(
+  args: Pick<CommonArgs, "resume" | "continue">,
+  dir = SESSIONS_DIR,
+): {
   log: EventLog;
   sessionFile: string;
   resumed: boolean;
 } {
-  const target = args.resume ?? (args.continue ? latestSession() : undefined);
+  const target = args.resume ?? (args.continue ? latestSession(dir) : undefined);
   if (target) {
     if (!existsSync(target)) throw new Error(`会话文件不存在:${target}`);
     return { log: EventLog.load(target, { attach: true }), sessionFile: target, resumed: true };
   }
-  if (args.continue) throw new Error(`${SESSIONS_DIR}/ 下没有可恢复的会话`);
-  const sessionFile = `${SESSIONS_DIR}/${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`;
+  if (args.continue) throw new Error(`${dir}/ 下没有可恢复的会话`);
+  const sessionFile = newSessionPath(dir);
   return { log: new EventLog(sessionFile), sessionFile, resumed: false };
+}
+
+/**
+ * 分叉会话:把前 upTo 条事件复制成一个新文件。事件即真相,分叉就是复制前缀;
+ * 原文件一字不动,新文件用 --resume 打开就从那个时点继续。
+ */
+export function forkSession(
+  events: readonly AgentEvent[],
+  upTo: number,
+  dir = SESSIONS_DIR,
+): { file: string; events: number } {
+  const n = Math.max(1, Math.min(upTo, events.length));
+  const file = newSessionPath(dir, "-fork");
+  const log = new EventLog(file);
+  for (const e of events.slice(0, n)) log.append(e);
+  return { file, events: n };
+}
+
+/** 扩展模块的返回形态:要加的工具、要换的槽实现、要订阅事件的回调。都可选。 */
+export type Extension = {
+  tools?: Tool[];
+  slots?: TurnDeps["slots"];
+  onEvent?: (e: AgentEvent) => void;
+};
+
+/**
+ * 装载扩展模块(Q27 的外部注入):default 导出 `(ctx) => Extension`,ctx 里有工作目录与事件日志。
+ * 多个模块按顺序合并,后者的槽覆盖前者;工具重名以后者为准。
+ */
+export async function loadExtensions(
+  paths: string[],
+  ctx: { cwd: string; log: EventLog },
+): Promise<Extension> {
+  const merged: Extension = { tools: [], slots: {} };
+  for (const p of paths) {
+    const mod = (await import(pathToFileURL(resolve(p)).href)) as { default?: unknown };
+    if (typeof mod.default !== "function") {
+      throw new Error(
+        `扩展模块 ${p} 必须 default 导出一个函数 (ctx) => ({ tools?, slots?, onEvent? })`,
+      );
+    }
+    const ext = (await (mod.default as (c: typeof ctx) => Extension | Promise<Extension>)(
+      ctx,
+    )) as Extension;
+    for (const t of ext.tools ?? []) {
+      merged.tools = [...(merged.tools ?? []).filter((x) => x.name !== t.name), t];
+    }
+    merged.slots = { ...merged.slots, ...ext.slots };
+    if (ext.onEvent) ctx.log.subscribe(ext.onEvent);
+  }
+  return merged;
 }
 
 /** 系统提示词(Q51):--system-prompt 整段替换,--append-system-prompt 追加;否则 角色 → 环境 → 项目指令。 */
@@ -460,8 +553,9 @@ export function beginSession(
   args: Pick<CommonArgs, "resume" | "continue"> & PromptArgs,
   choice: Pick<ModelChoice, "model">,
   cwd = process.cwd(),
+  dir = SESSIONS_DIR,
 ): { log: EventLog; sessionFile: string; resumed: boolean } {
-  const s = openSession(args);
+  const s = openSession(args, dir);
   if (!s.resumed) {
     const p = systemPromptFor(args, cwd);
     s.log.append({

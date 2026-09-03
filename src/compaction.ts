@@ -111,6 +111,22 @@ export type CompactionInput = {
 /** 返回 null = 本策略认为无事可做或未取得足够进展。 */
 export type CompactionStrategy = (input: CompactionInput) => Promise<CompactionPayload | null>;
 
+/**
+ * 当前上下文占用,实测优先:最近一次带用量的 assistant 响应之后没有压缩,就用它的实测输入+输出,
+ * 加上此后新增事件(工具结果、用户消息)的估算;否则退回纯估算。触发自动压缩与 request 事件都用这个口径。
+ */
+export function contextTokens(events: readonly AgentEvent[]): number {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (!e) continue;
+    if (e.type === "compaction") break;
+    if (e.type === "assistant/message" && e.usage) {
+      return e.usage.inputTokens + e.usage.outputTokens + estimateAfter(events.slice(i + 1));
+    }
+  }
+  return estimateAfter(events);
+}
+
 /** 估算一份日志(可叠加未落盘的压缩载荷)投影后的 token 量。 */
 export function estimateAfter(
   events: readonly AgentEvent[],

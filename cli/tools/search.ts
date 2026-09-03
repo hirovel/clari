@@ -112,6 +112,7 @@ export function createGrepTool(opts: { useRipgrep?: boolean; maxResults?: number
       glob: Type.Optional(Type.String({ description: "只搜匹配的文件名,如 *.ts 或 src/**/*.ts" })),
       ignoreCase: Type.Optional(Type.Boolean({ description: "忽略大小写" })),
     }),
+    concurrency: "parallel",
     async execute(args) {
       const root = resolve(args.path ?? ".");
       const rootIsFile = statSync(root).isFile();
@@ -185,6 +186,7 @@ export const globTool = defineTool({
     pattern: Type.String({ description: "通配模式:** 任意层级,* 单段,? 单字符" }),
     path: Type.Optional(Type.String({ description: "起始目录,缺省当前目录" })),
   }),
+  concurrency: "parallel",
   async execute(args) {
     const root = resolve(args.path ?? ".");
     const re = globToRegExp(args.pattern);
@@ -201,6 +203,7 @@ export const lsTool = defineTool({
   parameters: Type.Object({
     path: Type.Optional(Type.String({ description: "目录,缺省当前目录" })),
   }),
+  concurrency: "parallel",
   async execute(args) {
     const dir = resolve(args.path ?? ".");
     const entries = readdirSync(dir)
