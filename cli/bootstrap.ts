@@ -54,6 +54,7 @@ export type CommonArgs = {
   appendSystemPromptFile?: string;
   maxSteps?: number;
   json: boolean;
+  help: boolean;
   /** 审批槽(Q23/Q64):all = 不弹确认(缺省,pi 立场);ask = 每个工具调用在界面里问一次。 */
   approve: "all" | "ask";
   /** 非选项参数(一次性模式的任务文本)。 */
@@ -68,6 +69,7 @@ export function parseCommonArgs(argv: string[]): CommonArgs {
     fold: false,
     continue: false,
     json: false,
+    help: false,
     approve: "all",
     rest: [],
   };
@@ -125,6 +127,10 @@ export function parseCommonArgs(argv: string[]): CommonArgs {
         out.approve = v;
         break;
       }
+      case "--help":
+      case "-h":
+        out.help = true;
+        break;
       case "-p":
       case "--prompt":
         out.rest.push(takeValue(i++, a));
@@ -136,6 +142,29 @@ export function parseCommonArgs(argv: string[]): CommonArgs {
   }
   return out;
 }
+
+export const USAGE = `用法
+  pnpm tui  [-- 选项]                  交互界面
+  pnpm once -- "任务" [选项]           一次性模式:跑一个 turn 就退出,stdout 是回复
+  pnpm replay <会话.jsonl> [--request N] [--compaction N [--json]] [--messages]
+
+选项
+  --model 供应商/模型            缺省用配置里的 default
+  --effort off|low|medium|high|xhigh|max   缺省不传,用供应商默认
+  --compaction llm|clear|pipeline|./策略.mjs   缺省 llm
+  --resume <会话文件> | --continue   恢复会话并沿用同一文件
+  --system-prompt <文件> | --append-system-prompt <文件>
+  --approve all|ask              ask = 每个工具调用弹一行确认(仅界面);缺省 all
+  --max-steps N                  终止保底(缺省不设上限)
+  --subagent                     装上 task 工具(子 agent)
+  --trace                        逐行记录原始流,并写 <会话>.trace.jsonl
+  --fold                         工具结果初始折叠(Ctrl+O 切换)
+  --json                         一次性模式输出结构化结果
+  -h, --help
+
+配置
+  ${DEFAULT_CONFIG_PATH}
+  环境变量 KERNEL_CONFIG 可改路径;key 走 apiKeyEnv 指向的环境变量,或界面里 /key 供应商 密钥`;
 
 export type Bootstrap = {
   config: KernelConfig;

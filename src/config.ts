@@ -51,7 +51,9 @@ export type KernelConfig = {
   providers: Record<string, ProviderConfig>;
 };
 
-export const DEFAULT_CONFIG_PATH = join(homedir(), ".agent-kernel", "config.json");
+/** 配置文件路径;环境变量 KERNEL_CONFIG 可改(多套配置、测试用)。 */
+export const DEFAULT_CONFIG_PATH =
+  process.env.KERNEL_CONFIG?.trim() || join(homedir(), ".agent-kernel", "config.json");
 
 export const CONFIG_TEMPLATE: KernelConfig = {
   default: "deepseek-v4-pro",
@@ -74,7 +76,8 @@ export const CONFIG_TEMPLATE: KernelConfig = {
       baseUrl: "https://api.anthropic.com",
       apiKeyEnv: "ANTHROPIC_API_KEY",
       contextWindow: 200000,
-      maxTokens: 8192,
+      // 思考与正文共用这个上限;5 系模型思考常开,给足。
+      maxTokens: 16384,
       models: [
         { name: "claude-opus-5", effortLevels: ["off", "low", "medium", "high", "xhigh", "max"] },
         { name: "claude-sonnet-5", effortLevels: ["off", "low", "medium", "high", "xhigh", "max"] },

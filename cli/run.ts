@@ -11,6 +11,7 @@ import {
   buildCompaction,
   buildTools,
   parseCommonArgs,
+  USAGE,
 } from "./bootstrap.js";
 
 let args: ReturnType<typeof parseCommonArgs>;
@@ -20,9 +21,13 @@ try {
   console.error((err as Error).message);
   process.exit(2);
 }
+if (args.help) {
+  console.log(USAGE);
+  process.exit(0);
+}
 const prompt = args.rest.join(" ").trim();
 if (!prompt) {
-  console.error('用法:pnpm once -- "任务" [--json] [--model X] [--effort L] [--max-steps N]');
+  console.error(USAGE);
   process.exit(2);
 }
 

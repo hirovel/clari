@@ -26,7 +26,7 @@ pnpm install
 pnpm tui
 ```
 
-首次运行会生成 `~/.agent-kernel/config.json`。填入任一供应商的 API key(推荐环境变量 `DEEPSEEK_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`),或在界面里 `/key 供应商 密钥`。
+首次运行会生成 `~/.agent-kernel/config.json`(环境变量 `KERNEL_CONFIG` 可改路径)。填入任一供应商的 API key(推荐环境变量 `DEEPSEEK_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`),或在界面里 `/key 供应商 密钥`。`pnpm tui -- --help` 列出全部选项。
 
 常用:
 

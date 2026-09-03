@@ -132,7 +132,7 @@ describe("按模型的能力数据(Q57)与强度映射(Q52)", () => {
   it("模型对象:窗口与强度集合取模型级,缺省回落到供应商级", () => {
     const r = resolveModel(CONFIG_TEMPLATE, "claude-haiku-4-5-20251001");
     expect(r.contextWindow).toBe(200000);
-    expect(r.maxTokens).toBe(8192);
+    expect(r.maxTokens).toBe(16384);
     expect(r.thinkingMode).toBe("budget");
     expect(r.effortLevels).toEqual(["off", "low", "medium", "high"]);
     const d = resolveModel(CONFIG_TEMPLATE, "deepseek-v4-flash");

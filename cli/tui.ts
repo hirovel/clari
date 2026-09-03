@@ -17,6 +17,7 @@ import {
   DEFAULT_CONFIG_PATH,
   parseCommonArgs,
   RESERVE,
+  USAGE,
 } from "./bootstrap.js";
 import { createTuiApp, type ModelChoice } from "./tui-app.js";
 
@@ -26,6 +27,11 @@ try {
 } catch (err) {
   console.error((err as Error).message);
   process.exit(2);
+}
+
+if (args.help) {
+  console.log(USAGE);
+  process.exit(0);
 }
 
 const boot = bootstrap();
