@@ -1,0 +1,16 @@
+{
+  "default": "fake-agent",
+  "verifiedAt": "2026-09-03",
+  "providers": {
+    "local-fake": {
+      "protocol": "openai",
+      "baseUrl": "http://127.0.0.1:4111",
+      "apiKey": "demo-no-real-key",
+      "contextWindow": 8000,
+      "models": [
+        { "name": "fake-agent", "price": { "input": 1, "output": 5, "cacheRead": 0.1 } },
+        "fake-agent-mini"
+      ]
+    }
+  }
+}

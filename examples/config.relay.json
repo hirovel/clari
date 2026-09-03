@@ -1,0 +1,27 @@
+{
+  "default": "relay/claude-sonnet-5",
+  "verifiedAt": "2026-09-03",
+  "providers": {
+    "relay": {
+      "protocol": "openai",
+      "baseUrl": "https://你的中转站域名/v1",
+      "apiKeyEnv": "RELAY_API_KEY",
+      "contextWindow": 200000,
+      "maxTokens": 16384,
+      "models": [
+        { "name": "claude-sonnet-5", "contextWindow": 200000 },
+        { "name": "gpt-5.5", "effortLevels": ["off", "low", "medium", "high"] },
+        "deepseek-v4-pro"
+      ]
+    },
+    "relay-anthropic": {
+      "protocol": "anthropic",
+      "baseUrl": "https://你的中转站域名",
+      "apiKeyEnv": "RELAY_API_KEY",
+      "contextWindow": 200000,
+      "maxTokens": 16384,
+      "promptCache": false,
+      "models": ["claude-sonnet-5", "claude-opus-5"]
+    }
+  }
+}

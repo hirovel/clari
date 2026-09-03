@@ -89,6 +89,14 @@ export type CompactionConfig = {
 
 const DEFAULT_RESERVE = 32000;
 
+/**
+ * 自动压缩阈值 = window − reserve,但余量不许吃掉超过一半窗口:小窗口(或演示用的假窗口)下
+ * 阈值否则会变成负数,每一步都触发压缩。
+ */
+export function compactionThreshold(window: number, reserveTokens = DEFAULT_RESERVE): number {
+  return Math.max(Math.floor(window / 2), window - reserveTokens);
+}
+
 const defaultIsOverflow = (err: Error): boolean => isContextOverflow(err);
 
 /**
@@ -139,7 +147,7 @@ async function compactIfNeeded(
   cfg: CompactionConfig,
   force: boolean,
 ): Promise<boolean> {
-  const threshold = cfg.window - (cfg.reserveTokens ?? DEFAULT_RESERVE);
+  const threshold = compactionThreshold(cfg.window, cfg.reserveTokens);
   // 触发用实测优先的口径;进展门两边都用估算,口径一致才可比。
   if (!force && contextTokens(deps.log.events) <= threshold) return false;
   const before = estimateAfter(deps.log.events);
@@ -199,7 +207,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
       messages: messages.length,
       tools: defs.map((d) => d.name),
       estimatedTokens: contextTokens(log.events),
-      ...(cfg && { threshold: cfg.window - (cfg.reserveTokens ?? DEFAULT_RESERVE) }),
+      ...(cfg && { threshold: compactionThreshold(cfg.window, cfg.reserveTokens) }),
       reason: overflowRecovered ? "overflow-retry" : "turn",
       ...(effort && { effort }),
     });

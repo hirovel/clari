@@ -215,7 +215,9 @@ export function llmSummarize(
     if (!provider) return null;
     const { events } = input;
     const state = compactionState(events);
-    const preservation = input.preservation ?? keepRecentTokens();
+    // 缺省保留尾部 20000 tok,但不超过窗口的四分之一:小窗口下否则整段都在保留区,永远无可覆盖。
+    const preservation =
+      input.preservation ?? keepRecentTokens(Math.min(20000, Math.floor(input.window / 4)));
     const cut = legalizeCut(events, preservation(events));
 
     const firstUser = events.findIndex((e) => e.type === "user/message");

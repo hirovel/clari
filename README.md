@@ -33,7 +33,39 @@ pnpm install
 pnpm tui
 ```
 
-首次运行会生成 `~/.agent-kernel/config.json`(环境变量 `KERNEL_CONFIG` 可改路径)。填入任一供应商的 API key(推荐环境变量 `DEEPSEEK_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`),或在界面里 `/key 供应商 密钥`。`pnpm tui -- --help` 列出全部选项。
+首次运行会生成 `~/.agent-kernel/config.json`(环境变量 `KERNEL_CONFIG` 可改路径)。`pnpm tui -- --help` 列出全部选项。
+
+### 没有 key 先看效果
+
+```bash
+pnpm demo          # 起本机假模型,一次性模式跑一个任务,stdout 是每条事件的 JSON
+pnpm demo tui      # 同一个假模型,打开界面;Ctrl+R 看检视器
+```
+
+假模型不联网、不要 key,但内核、工具、落盘、界面、检视器都是真的。
+
+### 提供 key
+
+三种方式,任选其一,优先级从高到低:
+
+1. 配置文件里该供应商的 `apiKey` 字段(界面里 `/key deepseek sk-xxx` 会写到这里)。
+2. `apiKeyEnv` 指向的环境变量,模板里是 `DEEPSEEK_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`。PowerShell 里 `$env:DEEPSEEK_API_KEY = "sk-xxx"` 只对当前窗口有效;要长期生效用 `setx DEEPSEEK_API_KEY sk-xxx` 再开新窗口。
+3. 换一套配置:`KERNEL_CONFIG=路径` 指向另一个 config.json。
+
+key 从不进日志、不进请求正文、不进检视器;线路 JSON 分区看到的是不含鉴权头的正文。
+
+### 接中转站
+
+中转站就是一个"协议相同、地址不同"的供应商,在 `providers` 里加一条即可,见 `examples/config.relay.json`:
+
+- OpenAI 兼容型(最常见,`/v1/chat/completions`):`protocol: "openai"`,`baseUrl` 填到 `/v1` 为止,`models` 列出你要用的模型名(中转站的名字,不是官方的)。
+- Anthropic 协议型(`/v1/messages`):`protocol: "anthropic"`,`baseUrl` 填域名;中转站不认缓存断点时加 `"promptCache": false`。
+- 中转站的 key 用 `apiKeyEnv` 指向自己的环境变量,或界面里 `/key 供应商名 密钥`。
+- 启动后先 `/models`:它会向中转站查当前可用模型,对照你配置里写的,标出不存在的。
+- 中转站要求的额外参数或头,用 `extraBody` / `extraHeaders` 逐字透传,不必等代码改。
+- 有些中转站流式响应会长时间没字节,`stallTimeoutMs` 调大或设 0。
+
+用法:`pnpm tui -- --model relay/claude-sonnet-5`,或把 `default` 改成它。
 
 常用:
 

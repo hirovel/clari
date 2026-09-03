@@ -22,7 +22,12 @@ import { contextBreakdown } from "../src/context.js";
 import { costOf, fmtCost, type Price, usageTotals } from "../src/cost.js";
 import { type AgentEvent, now, type ToolCall } from "../src/events.js";
 import type { EventLog } from "../src/log.js";
-import { type CompactionConfig, recordingProvider, type TurnDeps } from "../src/loop.js";
+import {
+  type CompactionConfig,
+  compactionThreshold,
+  recordingProvider,
+  type TurnDeps,
+} from "../src/loop.js";
 import {
   EFFORT_LEVELS,
   type EffortLevel,
@@ -169,7 +174,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
   let info = deps.info;
   let effortLevels = deps.effortLevels;
   let contextWindow = compaction.window;
-  const threshold = () => contextWindow - deps.reserveTokens;
+  const threshold = () => compactionThreshold(contextWindow, deps.reserveTokens);
 
   const tui = new TuiMainScreen(deps.terminal);
   const header = new Text("", 1, 0);

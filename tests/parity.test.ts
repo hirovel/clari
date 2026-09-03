@@ -384,3 +384,12 @@ it("分叉文件是 JSONL", () => {
   const r = forkSession([{ type: "session/start", at: "", model: "m", system: "s" }], 1, dir);
   expect(readFileSync(r.file, "utf8").trim().split("\n")).toHaveLength(1);
 });
+
+describe("自动压缩阈值", () => {
+  it("余量不许吃掉超过一半窗口:小窗口下阈值不为负", async () => {
+    const { compactionThreshold } = await import("../src/loop.js");
+    expect(compactionThreshold(131072, 32000)).toBe(99072);
+    expect(compactionThreshold(8000, 32000)).toBe(4000);
+    expect(compactionThreshold(50000)).toBe(25000);
+  });
+});
