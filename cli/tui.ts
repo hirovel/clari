@@ -6,6 +6,7 @@
 //   --resume   恢复会话并沿用同一文件继续;--continue 取 sessions/ 下最近一次
 //   --trace    逐行记录收到的原始流:检视器"接收"分区可看,并写入 <会话>.trace.jsonl
 //   --fold     工具结果初始折叠(Ctrl+O 随时切换;缺省完整显示)
+//   --approve ask  每个工具调用在界面里问一次(y 允许 / n 拒绝 / a 本会话总是允许该工具);缺省 all 不问
 import { appendFileSync } from "node:fs";
 import { ProcessTerminal } from "@earendil-works/pi-tui";
 import {
@@ -73,6 +74,7 @@ app = createTuiApp({
   settings: boot.settings,
   fold: args.fold,
   trace: args.trace,
+  approve: args.approve,
   ...(args.effort && { effort: args.effort }),
   ...(first.effortLevels && { effortLevels: first.effortLevels }),
   ...(args.trace && {

@@ -2,6 +2,7 @@
 // pi-tui 只当渲染引擎(Q45):差分渲染、编辑器、宽度计算;视觉层全部是这里的自有组合。
 import {
   CombinedAutocompleteProvider,
+  type Component,
   Container,
   Editor,
   Key,
@@ -17,7 +18,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { Agent } from "../src/agent.js";
 import { contextBreakdown } from "../src/context.js";
-import { type AgentEvent, now } from "../src/events.js";
+import { type AgentEvent, now, type ToolCall } from "../src/events.js";
 import type { EventLog } from "../src/log.js";
 import { type CompactionConfig, recordingProvider } from "../src/loop.js";
 import {
@@ -74,6 +75,8 @@ export type TuiAppDeps = {
   /** 初始强度级别(Q52);缺省不传。 */
   effort?: EffortLevel;
   effortLevels?: EffortLevel[];
+  /** 审批槽的界面实现(Q64):ask = 每个工具调用弹一行确认;缺省 all 不问。 */
+  approve?: "all" | "ask";
 };
 
 export type TuiApp = {
@@ -98,6 +101,8 @@ export type TuiApp = {
   /** 子 agent 开跑时由 task 工具通知(Q62):挂到对应调用行下面并实时订阅。 */
   attachChild(child: ChildInfo): void;
   children(): ChildInfo[];
+  /** 正在等待回答的审批提示的渲染行;没有时为空。离线验证用(覆盖层不在 lines() 里)。 */
+  approvalLines(): string[];
   toggleFold(): void;
   toggleReasoning(): void;
   stop(): void;
@@ -200,6 +205,33 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     deps.onRaw?.(lastRequestIndex, line);
   };
 
+  // 审批(Q64):问一次就是一次;a 把该工具加进本会话的放行名单。拒绝以错误结果回喂模型(Q23)。
+  const alwaysAllow = new Set<string>();
+  let approval: OverlayHandle | undefined;
+  let approvalPrompt: ApprovalPrompt | undefined;
+  const askApproval = (call: ToolCall): Promise<boolean> => {
+    if (alwaysAllow.has(call.name)) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      const prompt = new ApprovalPrompt(call, (decision) => {
+        approval?.hide();
+        approval = undefined;
+        approvalPrompt = undefined;
+        tui.setFocus(editor);
+        if (decision === "a") alwaysAllow.add(call.name);
+        const allowed = decision !== "n";
+        note(
+          allowed
+            ? c.faint(`· 审批:允许 ${call.name}${decision === "a" ? "(本会话不再问)" : ""}`)
+            : c.zhu(`· 审批:拒绝 ${call.name}`),
+        );
+        resolve(allowed);
+      });
+      approvalPrompt = prompt;
+      approval = tui.showOverlay(prompt, { width: "100%", anchor: "bottom-left" });
+      tui.requestRender();
+    });
+  };
+
   const agent = new Agent({
     log,
     provider: deps.provider,
@@ -207,6 +239,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     compaction,
     onRaw,
     ...(deps.effort && { effort: deps.effort }),
+    ...(deps.approve === "ask" && { slots: { approve: askApproval } }),
     onDelta: (d) => {
       if (!streaming) {
         transcript.addChild(new Spacer(1));
@@ -883,7 +916,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       else openInspector();
       return { consume: true };
     }
-    if (overlay) return undefined; // 检视器打开时,其余按键归它
+    if (overlay || approval) return undefined; // 检视器或审批提示打开时,其余按键归它们
     if (matchesKey(data, Key.ctrl("o"))) {
       toggleFold();
       return { consume: true };
@@ -931,10 +964,34 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     },
     attachChild,
     children: () => childViews.map((v) => v.info),
+    approvalLines: () => approvalPrompt?.render() ?? [],
     toggleFold,
     toggleReasoning,
     stop,
   };
+}
+
+/** 审批提示(Q64):一行问题、一行按键说明;y / n / a,Esc 视为拒绝。 */
+class ApprovalPrompt implements Component {
+  constructor(
+    private readonly call: ToolCall,
+    private readonly onDecide: (d: "y" | "n" | "a") => void,
+  ) {}
+
+  render(): string[] {
+    return [
+      `${c.zhu("?")} ${c.bold(c.ink("执行"))} ${c.bold(c.ink(this.call.name))}  ${c.soft(formatArgs(this.call.args))}`,
+      c.faint(`  y 允许 · n 拒绝 · a 本会话总是允许 ${this.call.name} · Esc 拒绝`),
+    ];
+  }
+
+  handleInput(data: string): void {
+    if (data === "y" || data === "Y") this.onDecide("y");
+    else if (data === "a" || data === "A") this.onDecide("a");
+    else if (data === "n" || data === "N" || matchesKey(data, Key.escape)) this.onDecide("n");
+  }
+
+  invalidate(): void {}
 }
 
 /** 子 agent 事件的屏幕行(不含引导线),与主屏同一套记号:› ⚙ ✓ ✗ ◇。 */

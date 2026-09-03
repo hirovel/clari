@@ -54,6 +54,8 @@ export type CommonArgs = {
   appendSystemPromptFile?: string;
   maxSteps?: number;
   json: boolean;
+  /** 审批槽(Q23/Q64):all = 不弹确认(缺省,pi 立场);ask = 每个工具调用在界面里问一次。 */
+  approve: "all" | "ask";
   /** 非选项参数(一次性模式的任务文本)。 */
   rest: string[];
 };
@@ -66,6 +68,7 @@ export function parseCommonArgs(argv: string[]): CommonArgs {
     fold: false,
     continue: false,
     json: false,
+    approve: "all",
     rest: [],
   };
   const takeValue = (i: number, name: string): string => {
@@ -116,6 +119,12 @@ export function parseCommonArgs(argv: string[]): CommonArgs {
       case "--json":
         out.json = true;
         break;
+      case "--approve": {
+        const v = takeValue(i++, a);
+        if (v !== "all" && v !== "ask") throw new Error(`--approve 只接受 all 或 ask,收到 "${v}"`);
+        out.approve = v;
+        break;
+      }
       case "-p":
       case "--prompt":
         out.rest.push(takeValue(i++, a));

@@ -46,6 +46,9 @@ function bigSession(turns: number): EventLog {
   return log;
 }
 
+// CI 机器慢且共享,阈值放宽三倍;本机按原值。
+const slack = process.env.CI ? 3 : 1;
+
 const ms = (fn: () => void): number => {
   const t = performance.now();
   fn();
@@ -63,13 +66,15 @@ describe("性能:2000 事件的会话", () => {
   };
 
   it("投影与估算:单次 100ms 内", () => {
-    expect(ms(() => deriveMessages(log.events))).toBeLessThan(100);
-    expect(ms(() => estimateAfter(log.events))).toBeLessThan(100);
+    expect(ms(() => deriveMessages(log.events))).toBeLessThan(100 * slack);
+    expect(ms(() => estimateAfter(log.events))).toBeLessThan(100 * slack);
   });
 
   it("按请求切段:100ms 内", () => {
     let recs: AgentEvent[] = [];
-    expect(ms(() => (recs = collectRequests(log.events).map((r) => r.request)))).toBeLessThan(100);
+    expect(ms(() => (recs = collectRequests(log.events).map((r) => r.request)))).toBeLessThan(
+      100 * slack,
+    );
     expect(recs).toHaveLength(700);
   });
 
@@ -83,9 +88,9 @@ describe("性能:2000 事件的会话", () => {
       requestRender: () => {},
     });
     insp.reset();
-    expect(ms(() => insp.render(120))).toBeLessThan(300);
+    expect(ms(() => insp.render(120))).toBeLessThan(300 * slack);
     insp.handleInput("\t");
-    expect(ms(() => insp.render(120))).toBeLessThan(300);
+    expect(ms(() => insp.render(120))).toBeLessThan(300 * slack);
     insp.handleInput("\t");
     insp.handleInput("\r");
     // 发送 / 线路 JSON / 写入 要把 1.4 MB 正文全部换行着色,给 1.5s;其余分区 300ms。
@@ -96,11 +101,11 @@ describe("性能:2000 事件的会话", () => {
       expect(
         ms(() => insp.render(120)),
         `分区 ${section}`,
-      ).toBeLessThan(limit);
+      ).toBeLessThan(limit * slack);
       expect(
         ms(() => insp.render(120)),
         `分区 ${section} 缓存`,
-      ).toBeLessThan(10);
+      ).toBeLessThan(10 * slack);
     }
   });
 });

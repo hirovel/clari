@@ -371,6 +371,73 @@ describe("TUI 壳", () => {
     app.stop();
   });
 
+  it("--approve ask:每个调用弹一行确认;y 执行、n 以拒绝结果回喂、a 本会话不再问(Q64)", async () => {
+    const term = new VirtualTerminal(100, 40);
+    const log = new EventLog();
+    const app = createTuiApp({
+      terminal: term,
+      log,
+      provider: scripted([
+        {
+          text: "",
+          toolCalls: [{ id: "c1", name: "echo", args: { text: "one" } }],
+          stopReason: "tool",
+        },
+        {
+          text: "",
+          toolCalls: [{ id: "c2", name: "echo", args: { text: "two" } }],
+          stopReason: "tool",
+        },
+        {
+          text: "",
+          toolCalls: [{ id: "c3", name: "echo", args: { text: "three" } }],
+          stopReason: "tool",
+        },
+        {
+          text: "",
+          toolCalls: [{ id: "c4", name: "echo", args: { text: "four" } }],
+          stopReason: "tool",
+        },
+        { text: "完事", toolCalls: [], stopReason: "end" },
+      ]),
+      tools: [echo],
+      compaction: { strategy: async () => null, window: 100000, reserveTokens: 32000 },
+      reserveTokens: 32000,
+      info: { model: "fake-model", providerName: "fake", sessionFile: "s" },
+      systemPrompt: "sys",
+      onExit: () => {},
+      approve: "ask",
+    });
+    const tick = () => new Promise((r) => setImmediate(r));
+    const running = app.submit("跑");
+    await tick();
+    const prompt = app.approvalLines().map(stripAnsi).join("\n");
+    expect(prompt).toContain("? 执行 echo");
+    expect(prompt).toContain("y 允许 · n 拒绝 · a 本会话总是允许 echo");
+    term.feed("y");
+    await tick();
+    await tick();
+    term.feed("n");
+    await tick();
+    await tick();
+    term.feed("a");
+    await running;
+    const doc = text(app);
+    expect(app.approvalLines()).toEqual([]);
+    expect(doc).toContain("· 审批:允许 echo");
+    expect(doc).toContain("· 审批:拒绝 echo");
+    expect(doc).toContain("· 审批:允许 echo(本会话不再问)");
+    const results = log.events.filter((e) => e.type === "tool/result");
+    expect(results.map((r) => r.type === "tool/result" && r.content)).toEqual([
+      "echo:one",
+      "用户拒绝执行此调用。",
+      "echo:three",
+      "echo:four", // a 之后同名工具直接放行
+    ]);
+    expect(doc).toContain("完事");
+    app.stop();
+  });
+
   it("请求失败不崩:错误以朱标行呈现,状态回到空闲", async () => {
     const provider: Provider = {
       model: "fake-model",
