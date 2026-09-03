@@ -43,12 +43,44 @@ export type ProviderConfig = {
   extraHeaders?: Record<string, string>;
 };
 
+/** 系统提示词的段名(Q66):哪几段、什么顺序由配置或预设决定。 */
+export type PromptSectionName = "role" | "env" | "instructions" | "memory" | "append";
+
+export type PromptConfig = {
+  /** 要哪几段、什么顺序;缺省 role, env, instructions, memory, append。 */
+  sections?: PromptSectionName[];
+  /** 项目指令与记忆放 system(缺省)还是首条 user 消息。 */
+  instructionsAs?: "system" | "user";
+  /** 跨会话记忆(Q65):缺省关。开了才读 AGENTS.md 里的记忆节并装上 remember 工具。 */
+  memory?: boolean;
+};
+
+/**
+ * 预设(Q15):一组命名好的启动参数,`--preset 名`。命令行显式给的参数仍然优先。
+ * 指令文件在这里当"预设指令器":不同预设指向不同的 system-prompt / append 文件与段组合。
+ */
+export type Preset = {
+  model?: string;
+  effort?: string;
+  compaction?: string;
+  approve?: "all" | "ask";
+  systemPromptFile?: string;
+  appendSystemPromptFile?: string;
+  subagent?: boolean;
+  maxSteps?: number;
+  prompt?: PromptConfig;
+};
+
 export type KernelConfig = {
   /** 缺省模型;命令行 --model 可覆盖。 */
   default: string;
   /** 模板里的能力数据核对日期。过期是常态,发现靠 /models。 */
   verifiedAt?: string;
   providers: Record<string, ProviderConfig>;
+  /** 系统提示词组装的全局缺省(Q66)。 */
+  prompt?: PromptConfig;
+  /** 命名预设(Q15)。 */
+  presets?: Record<string, Preset>;
 };
 
 /** 配置文件路径;环境变量 KERNEL_CONFIG 可改(多套配置、测试用)。 */

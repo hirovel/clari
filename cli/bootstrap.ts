@@ -1,6 +1,7 @@
 // 两个入口(tui.ts 交互、run.ts 一次性)共用的组装:参数、配置、模型、工具、压缩、会话文件、系统提示词。
 // 只做拼装,不含界面。
 import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
@@ -15,6 +16,7 @@ import {
   type KernelConfig,
   loadConfig,
   modelNames,
+  type PromptSectionName,
   resolveApiKey,
   resolveModel,
   setApiKey,
@@ -26,9 +28,10 @@ import type { CompactionConfig } from "../src/loop.js";
 import { EFFORT_LEVELS, type EffortLevel, parseEffort } from "../src/provider.js";
 import { type ChildInfo, createTaskTool } from "../src/subagent.js";
 import type { Tool } from "../src/tools.js";
-import { buildSystemPrompt } from "./prompt.js";
+import { buildSystemPrompt, findGitRoot, type PromptSection } from "./prompt.js";
 import { bashTool } from "./tools/bash.js";
 import { editTool, readTool, writeTool } from "./tools/fs.js";
+import { createRememberTool, type MemoryFiles } from "./tools/memory.js";
 import { globTool, grepTool, lsTool } from "./tools/search.js";
 import type { ModelChoice, TuiSettings } from "./tui-app.js";
 
@@ -37,6 +40,13 @@ export const BASE_PROMPT =
   "优先用 grep/glob 定位、read 读取、edit 做精确修改,用 bash 执行命令。回答简洁。";
 export const RESERVE = 32000;
 export const SESSIONS_DIR = "sessions";
+export const PROMPT_SECTION_NAMES: PromptSectionName[] = [
+  "role",
+  "env",
+  "instructions",
+  "memory",
+  "append",
+];
 
 export type CommonArgs = {
   model?: string;
@@ -57,8 +67,20 @@ export type CommonArgs = {
   help: boolean;
   /** 审批槽(Q23/Q64):all = 不弹确认(缺省,pi 立场);ask = 每个工具调用在界面里问一次。 */
   approve: "all" | "ask";
+  /** 预设名(Q15):从配置 presets 取缺省参数;显式给的参数优先。 */
+  preset?: string;
+  /** 跨会话记忆(Q65):缺省关。 */
+  memory?: boolean;
+  /** 系统提示词的段与顺序(Q66)。 */
+  promptSections?: PromptSectionName[];
+  /** 项目指令与记忆放 system 还是首条 user 消息(Q66)。 */
+  instructionsAs?: "system" | "user";
   /** 非选项参数(一次性模式的任务文本)。 */
   rest: string[];
+  /** 这几项有内置缺省值,记下是否显式给过,预设才知道能不能覆盖。 */
+  compactionExplicit?: boolean;
+  approveExplicit?: boolean;
+  subagentExplicit?: boolean;
 };
 
 export function parseCommonArgs(argv: string[]): CommonArgs {
@@ -93,6 +115,7 @@ export function parseCommonArgs(argv: string[]): CommonArgs {
       }
       case "--compaction":
         out.compaction = takeValue(i++, a);
+        out.compactionExplicit = true;
         break;
       case "--resume":
         out.resume = takeValue(i++, a);
@@ -111,6 +134,7 @@ export function parseCommonArgs(argv: string[]): CommonArgs {
         break;
       case "--subagent":
         out.subagent = true;
+        out.subagentExplicit = true;
         break;
       case "--trace":
         out.trace = true;
@@ -125,12 +149,43 @@ export function parseCommonArgs(argv: string[]): CommonArgs {
         const v = takeValue(i++, a);
         if (v !== "all" && v !== "ask") throw new Error(`--approve 只接受 all 或 ask,收到 "${v}"`);
         out.approve = v;
+        out.approveExplicit = true;
         break;
       }
       case "--help":
       case "-h":
         out.help = true;
         break;
+      case "--preset":
+        out.preset = takeValue(i++, a);
+        break;
+      case "--memory":
+        out.memory = true;
+        break;
+      case "--no-memory":
+        out.memory = false;
+        break;
+      case "--prompt-sections": {
+        const v = takeValue(i++, a);
+        const names = v
+          .split(",")
+          .map((x) => x.trim())
+          .filter(Boolean);
+        for (const n of names) {
+          if (!PROMPT_SECTION_NAMES.includes(n as PromptSectionName)) {
+            throw new Error(`未知提示词段 "${n}",可选:${PROMPT_SECTION_NAMES.join(" ")}`);
+          }
+        }
+        out.promptSections = names as PromptSectionName[];
+        break;
+      }
+      case "--instructions-as": {
+        const v = takeValue(i++, a);
+        if (v !== "system" && v !== "user")
+          throw new Error(`--instructions-as 只接受 system 或 user`);
+        out.instructionsAs = v;
+        break;
+      }
       case "-p":
       case "--prompt":
         out.rest.push(takeValue(i++, a));
@@ -155,6 +210,10 @@ export const USAGE = `用法
   --resume <会话文件> | --continue   恢复会话并沿用同一文件
   --system-prompt <文件> | --append-system-prompt <文件>
   --approve all|ask              ask = 每个工具调用弹一行确认(仅界面);缺省 all
+  --preset 名                    用配置里 presets.名 的一组参数;显式参数仍优先
+  --memory | --no-memory         跨会话记忆(AGENTS.md 里的记忆节 + remember 工具);缺省关
+  --prompt-sections role,env,instructions,memory,append   系统提示词要哪几段、什么顺序
+  --instructions-as system|user  项目指令与记忆放 system(缺省)还是首条 user 消息
   --max-steps N                  终止保底(缺省不设上限)
   --subagent                     装上 task 工具(子 agent)
   --trace                        逐行记录原始流,并写 <会话>.trace.jsonl
@@ -171,7 +230,44 @@ export type Bootstrap = {
   configCreated: boolean;
   choose(name?: string): ModelChoice;
   settings: TuiSettings;
+  /** 把预设与配置缺省并进参数(Q15/Q66):显式参数 > 预设 > 配置 prompt 缺省 > 内置缺省。 */
+  resolve(args: CommonArgs): CommonArgs;
 };
+
+export function applyPreset(args: CommonArgs, config: KernelConfig): CommonArgs {
+  const out: CommonArgs = { ...args };
+  const preset = args.preset ? config.presets?.[args.preset] : undefined;
+  if (args.preset && !preset) {
+    throw new Error(
+      `配置里没有预设 "${args.preset}",可选:${Object.keys(config.presets ?? {}).join(" ") || "(无)"}`,
+    );
+  }
+  if (preset) {
+    if (out.model === undefined && preset.model) out.model = preset.model;
+    if (out.effort === undefined && preset.effort) {
+      const level = parseEffort(preset.effort);
+      if (!level) throw new Error(`预设 ${args.preset} 的 effort "${preset.effort}" 不合法`);
+      out.effort = level;
+    }
+    if (!args.compactionExplicit && preset.compaction) out.compaction = preset.compaction;
+    if (!args.approveExplicit && preset.approve) out.approve = preset.approve;
+    if (out.systemPromptFile === undefined && preset.systemPromptFile) {
+      out.systemPromptFile = preset.systemPromptFile;
+    }
+    if (out.appendSystemPromptFile === undefined && preset.appendSystemPromptFile) {
+      out.appendSystemPromptFile = preset.appendSystemPromptFile;
+    }
+    if (!args.subagentExplicit && preset.subagent !== undefined) out.subagent = preset.subagent;
+    if (out.maxSteps === undefined && preset.maxSteps !== undefined) out.maxSteps = preset.maxSteps;
+  }
+  const prompt = { ...config.prompt, ...preset?.prompt };
+  if (out.memory === undefined && prompt.memory !== undefined) out.memory = prompt.memory;
+  if (out.promptSections === undefined && prompt.sections) out.promptSections = prompt.sections;
+  if (out.instructionsAs === undefined && prompt.instructionsAs) {
+    out.instructionsAs = prompt.instructionsAs;
+  }
+  return out;
+}
 
 export function bootstrap(): Bootstrap {
   const loaded = loadConfig();
@@ -205,6 +301,7 @@ export function bootstrap(): Bootstrap {
     configCreated: loaded.created,
     choose,
     settings,
+    resolve: (args) => applyPreset(args, config),
   };
 }
 
@@ -246,14 +343,25 @@ export async function buildCompaction(
   return { strategy: await loadCompactionStrategy(name), window, reserveTokens };
 }
 
+/** 记忆文件(Q65):项目级 = git 根(或 cwd)的 AGENTS.md;用户级 = ~/.agent-kernel/AGENTS.md。 */
+export function memoryFiles(
+  cwd = process.cwd(),
+  home = join(homedir(), ".agent-kernel"),
+): MemoryFiles {
+  const projectRoot = findGitRoot(cwd) ?? resolve(cwd);
+  return { project: join(projectRoot, "AGENTS.md"), user: join(home, "AGENTS.md") };
+}
+
 export function buildTools(
   log: EventLog,
   choice: ModelChoice,
   compaction: CompactionConfig,
   subagent: boolean,
   onChild?: (child: ChildInfo) => void,
+  memory?: MemoryFiles,
 ): Tool[] {
   const base: Tool[] = [readTool, writeTool, editTool, bashTool, grepTool, globTool, lsTool];
+  if (memory) base.push(createRememberTool(memory));
   if (!subagent) return base;
   return [
     ...base,
@@ -297,10 +405,26 @@ export function openSession(args: Pick<CommonArgs, "resume" | "continue">): {
 }
 
 /** 系统提示词(Q51):--system-prompt 整段替换,--append-system-prompt 追加;否则 角色 → 环境 → 项目指令。 */
+type PromptArgs = Pick<
+  CommonArgs,
+  "systemPromptFile" | "appendSystemPromptFile" | "memory" | "promptSections" | "instructionsAs"
+>;
+
+const meta = (s: PromptSection) => ({
+  name: s.name,
+  ...(s.source && { source: s.source }),
+  chars: s.text.length,
+});
+
 export function systemPromptFor(
-  args: Pick<CommonArgs, "systemPromptFile" | "appendSystemPromptFile">,
+  args: PromptArgs,
   cwd = process.cwd(),
-): { text: string; sections: { name: string; source?: string; chars: number }[] } {
+): {
+  text: string;
+  sections: { name: string; source?: string; chars: number }[];
+  /** 改放首条 user 消息的段(--instructions-as user)。 */
+  preamble: { name: string; text: string }[];
+} {
   const read = (p: string | undefined) => (p ? readFileSync(p, "utf8") : undefined);
   const replace = read(args.systemPromptFile);
   const append = read(args.appendSystemPromptFile);
@@ -309,14 +433,14 @@ export function systemPromptFor(
     cwd,
     ...(replace !== undefined && { replace }),
     ...(append !== undefined && { append }),
+    ...(args.promptSections && { sections: args.promptSections }),
+    memory: args.memory ?? false,
+    ...(args.instructionsAs && { instructionsAs: args.instructionsAs }),
   });
   return {
     text: built.text,
-    sections: built.sections.map((s) => ({
-      name: s.name,
-      ...(s.source && { source: s.source }),
-      chars: s.text.length,
-    })),
+    sections: built.sections.map(meta),
+    preamble: built.preamble.map((s) => ({ name: s.name, text: s.text })),
   };
 }
 
@@ -325,7 +449,7 @@ export function systemPromptFor(
  * 只在当前模型与日志最后记录的不同时追加 session/model。两个入口共用,界面层不再碰 session/start。
  */
 export function beginSession(
-  args: Pick<CommonArgs, "resume" | "continue" | "systemPromptFile" | "appendSystemPromptFile">,
+  args: Pick<CommonArgs, "resume" | "continue"> & PromptArgs,
   choice: Pick<ModelChoice, "model">,
   cwd = process.cwd(),
 ): { log: EventLog; sessionFile: string; resumed: boolean } {
@@ -339,6 +463,15 @@ export function beginSession(
       system: p.text,
       sections: p.sections,
     });
+    // instructionsAs = user:项目指令与记忆作为首条 user 消息进日志(Q66)。
+    // 它是一条用户没打过的用户消息,所以必须像其它用户消息一样落盘、上屏,不做任何隐藏。
+    if (p.preamble.length > 0) {
+      s.log.append({
+        type: "user/message",
+        at: now(),
+        text: p.preamble.map((x) => x.text).join("\n\n"),
+      });
+    }
     return s;
   }
   const last = [...s.log.events]

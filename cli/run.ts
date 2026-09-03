@@ -10,6 +10,7 @@ import {
   bootstrap,
   buildCompaction,
   buildTools,
+  memoryFiles,
   parseCommonArgs,
   USAGE,
 } from "./bootstrap.js";
@@ -32,6 +33,12 @@ if (!prompt) {
 }
 
 const boot = bootstrap();
+try {
+  args = boot.resolve(args);
+} catch (err) {
+  console.error((err as Error).message);
+  process.exit(2);
+}
 let choice: ReturnType<typeof boot.choose>;
 try {
   choice = boot.choose(args.model);
@@ -48,7 +55,14 @@ try {
   console.error((err as Error).message);
   process.exit(2);
 }
-const tools = buildTools(log, choice, compaction, args.subagent);
+const tools = buildTools(
+  log,
+  choice,
+  compaction,
+  args.subagent,
+  undefined,
+  args.memory ? memoryFiles() : undefined,
+);
 
 const agent = new Agent({
   log,

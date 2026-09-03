@@ -15,6 +15,7 @@ import {
   buildCompaction,
   buildTools,
   DEFAULT_CONFIG_PATH,
+  memoryFiles,
   parseCommonArgs,
   RESERVE,
   USAGE,
@@ -35,6 +36,12 @@ if (args.help) {
 }
 
 const boot = bootstrap();
+try {
+  args = boot.resolve(args);
+} catch (err) {
+  console.error((err as Error).message);
+  process.exit(2);
+}
 if (boot.configCreated) {
   console.log(`已生成配置模板:${DEFAULT_CONFIG_PATH}`);
   console.log("填入各家的 API key(推荐环境变量),或启动后用 /key 供应商 密钥 写入配置。\n");
@@ -66,7 +73,15 @@ try {
 }
 // 子 agent 只会在用户输入之后出现,此时 app 已经建好;先声明后赋值即可。
 let app: ReturnType<typeof createTuiApp> | undefined;
-const tools = buildTools(log, first, compaction, args.subagent, (child) => app?.attachChild(child));
+const memory = args.memory ? memoryFiles() : undefined;
+const tools = buildTools(
+  log,
+  first,
+  compaction,
+  args.subagent,
+  (child) => app?.attachChild(child),
+  memory,
+);
 const traceFile = sessionFile.replace(/\.jsonl$/, ".trace.jsonl");
 
 app = createTuiApp({
@@ -81,6 +96,7 @@ app = createTuiApp({
   fold: args.fold,
   trace: args.trace,
   approve: args.approve,
+  ...(memory && { memory }),
   ...(args.effort && { effort: args.effort }),
   ...(first.effortLevels && { effortLevels: first.effortLevels }),
   ...(args.trace && {

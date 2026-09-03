@@ -1,5 +1,6 @@
 // TUI 应用:与终端实现解耦,便于用虚拟终端离线验证。cli/tui.ts 负责配置与真实终端,本文件负责界面。
 // pi-tui 只当渲染引擎(Q45):差分渲染、编辑器、宽度计算;视觉层全部是这里的自有组合。
+import { existsSync, readFileSync } from "node:fs";
 import {
   CombinedAutocompleteProvider,
   type Component,
@@ -33,6 +34,7 @@ import type { Tool } from "../src/tools.js";
 import { fmtMs, fmtTok, RequestInspector, type SessionSource } from "./inspector.js";
 import { c, editorTheme, markdownTheme } from "./theme.js";
 import { diffLines, hunks } from "./tools/diff.js";
+import { clearMemory, forgetMemory, type MemoryFiles, memoryEntries } from "./tools/memory.js";
 
 export type ModelChoice = {
   provider: Provider;
@@ -77,6 +79,8 @@ export type TuiAppDeps = {
   effortLevels?: EffortLevel[];
   /** 审批槽的界面实现(Q64):ask = 每个工具调用弹一行确认;缺省 all 不问。 */
   approve?: "all" | "ask";
+  /** 跨会话记忆已打开时的两个文件(Q65),供 /memory 看与删。 */
+  memory?: MemoryFiles;
 };
 
 export type TuiApp = {
@@ -120,6 +124,11 @@ const COMMANDS = [
   { name: "events", description: "事件视图:内核维护的全部事件数组,逐条原样 JSON(检视器内 Tab)" },
   { name: "compactions", description: "压缩对照:每次压缩把哪一大段原文变成了什么摘要" },
   { name: "context", description: "上下文构成:各部分 token 与占比" },
+  { name: "prompt", description: "系统提示词由哪几段组成、各占多少、放在哪(Q66)" },
+  {
+    name: "memory",
+    description: "跨会话记忆:/memory 列出;/memory forget N 删一条;/memory clear 清空",
+  },
   { name: "compact", description: "手动压缩,可附指示:/compact 保留报错" },
   { name: "model", description: "切换模型:/model 供应商/模型;不带参数列出可选" },
   { name: "models", description: "向供应商查询当前可用模型,对照配置标出下线与新增" },
@@ -691,6 +700,12 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       case "context":
         note(renderContext());
         break;
+      case "prompt":
+        note(renderPrompt());
+        break;
+      case "memory":
+        note(memoryCommand(arg));
+        break;
       case "compact":
         await manualCompact(arg);
         break;
@@ -863,6 +878,67 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       hideLoader();
       updateStatus();
     }
+  }
+
+  /** /prompt:系统提示词的段构成与位置(Q66)。数据来自 session/start,与模型看到的同源。 */
+  function renderPrompt(): string {
+    const start = log.events.find((e) => e.type === "session/start");
+    if (start?.type !== "session/start") return c.faint("尚无会话");
+    const sections = start.sections ?? [];
+    const total = sections.reduce((n, s) => n + s.chars, 0);
+    const lines = [
+      `${c.soft("系统提示词")}  ${c.ink(`${sections.length} 段 · 约 ${Math.ceil(start.system.length / 4)} tok`)}`,
+    ];
+    for (const s of sections) {
+      lines.push(
+        `  ${c.jin(s.name.padEnd(8))} ${c.soft(`${String(Math.ceil(s.chars / 4)).padStart(6)} tok · ${pct(total > 0 ? s.chars / total : 0).padStart(4)}`)}${s.source ? c.faint(`  ${s.source}`) : ""}`,
+      );
+    }
+    const preamble = log.events[1];
+    if (preamble?.type === "user/message" && start.sections?.every((s) => s.name !== "项目指令")) {
+      lines.push(
+        c.faint("  项目指令与记忆放在首条 user 消息里(--instructions-as user),见上方第一条 › 行"),
+      );
+    }
+    lines.push(
+      c.faint(
+        `  记忆:${deps.memory ? "已打开(remember 工具可用)" : "关(--memory 打开;AGENTS.md 里的记忆节不会注入)"}  · 全文见 Ctrl+R → 发送分区`,
+      ),
+    );
+    return lines.join("\n");
+  }
+
+  /** /memory:列出、删一条、清空。记忆就是 AGENTS.md 里的一节,这里只是它的编辑入口。 */
+  function memoryCommand(arg: string): string {
+    if (!deps.memory) return c.faint("记忆未打开。启动加 --memory,或配置 prompt.memory: true");
+    const files = [deps.memory.project, deps.memory.user].filter((f): f is string => !!f);
+    const all = files.flatMap((file) =>
+      (existsSync(file) ? memoryEntries(readFileSync(file, "utf8")) : []).map((text, i) => ({
+        file,
+        i: i + 1,
+        text,
+      })),
+    );
+    const [sub, ...restArgs] = arg.split(/\s+/).filter(Boolean);
+    if (sub === "clear") {
+      const n = files.reduce((acc, f) => acc + clearMemory(f), 0);
+      return c.jin(`◇ 已清空 ${n} 条记忆`);
+    }
+    if (sub === "forget") {
+      const idx = Number(restArgs[0]);
+      const target = all[idx - 1];
+      if (!target) return c.zhu(`没有第 ${restArgs[0] ?? "?"} 条(共 ${all.length} 条)`);
+      const removed = forgetMemory(target.file, target.i);
+      return c.jin(`◇ 已删除:${removed}`);
+    }
+    if (all.length === 0) return c.faint(`没有记忆。文件:${files.join(", ")}`);
+    const lines = [
+      `${c.soft("记忆")} ${c.ink(`${all.length} 条`)}  ${c.faint("下次会话开始时注入;/memory forget N 删除")}`,
+    ];
+    all.forEach((m, k) => {
+      lines.push(`  ${c.jin(String(k + 1).padStart(2))} ${c.ink(m.text)}  ${c.faint(m.file)}`);
+    });
+    return lines.join("\n");
   }
 
   function renderContext(): string {
