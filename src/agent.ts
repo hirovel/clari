@@ -1,6 +1,7 @@
 import { now } from "./events.js";
 import type { EventLog } from "./log.js";
 import { runTurn, type TurnDeps, type TurnOutcome } from "./loop.js";
+import { editState } from "./messages.js";
 import type { EffortLevel, Provider } from "./provider.js";
 import type { Tool } from "./tools.js";
 
@@ -77,7 +78,31 @@ export class Agent {
       log.append({ type: "user/message", at: now(), text: leftover.text });
     }
     log.append({ type: "user/message", at: now(), text });
+    return this.run();
+  }
 
+  /**
+   * 重跑一步(Q76):丢掉最后一条(仍在投影里的)助手消息及其工具结果,不加新用户消息,
+   * 从当前投影再发一次请求。编辑上下文之后立刻看效果的入口。丢弃以 context/drop 事件落盘,原文不动。
+   */
+  async retry(): Promise<TurnOutcome> {
+    if (this.active) throw new Error("运行中不能重跑,先打断");
+    const events = this.opts.log.events;
+    const dropped = editState(events).dropped;
+    let target = -1;
+    for (let i = events.length - 1; i >= 0; i--) {
+      if (events[i]?.type === "assistant/message" && !dropped.has(i)) {
+        target = i;
+        break;
+      }
+    }
+    if (target < 0) throw new Error("没有可重跑的助手消息");
+    this.opts.log.append({ type: "context/drop", at: now(), target, note: "retry" });
+    return this.run();
+  }
+
+  private async run(): Promise<TurnOutcome> {
+    const log = this.opts.log;
     this.ac = new AbortController();
     this.active = runTurn({
       log,

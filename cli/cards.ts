@@ -71,7 +71,15 @@ export type SendCardInput = {
   sections?: { name: string; source?: string; chars: number }[];
   /** 工具集与上次相同。 */
   toolsUnchanged: boolean;
+  /** 该 provider 在编辑点之后丢弃思考块(Anthropic)。 */
+  dropsThinking?: boolean;
 };
+
+/** 发送卡算出的、给接收卡对照用的预计值。 */
+export function predictedCache(previous: Message[] | undefined, messages: Message[]): number {
+  const keep = unchangedPrefix(previous, messages);
+  return messages.slice(0, keep).reduce((s, m) => s + messageTokens(m), 0);
+}
 
 export function sendCardLines(input: SendCardInput): string[] {
   const { n, request: r, messages, defs } = input;
@@ -120,7 +128,24 @@ export function sendCardLines(input: SendCardInput): string[] {
     lines.push(
       row(
         "未变",
-        `前 ${kept.length} 条 ${fmtTok(tok)} tok,与上次逐字节相同(已在屏幕上;缓存命中的上限)`,
+        `前 ${keep} 条 ${fmtTok(tok)} tok,与上次逐字节相同 → 预计缓存命中上限 ${fmtTok(tok)}`,
+      ),
+    );
+  }
+  // 编辑点(Q76):第一条改过的消息(编辑、丢弃后的摘要、清除占位)。之后的全部重算;Anthropic 还丢思考块。
+  const firstEdited = messages.findIndex((m) => m.edited);
+  if (firstEdited >= 0) {
+    const after = messages.slice(firstEdited);
+    const tok = after.reduce((s, m) => s + messageTokens(m), 0);
+    const thinking = messages
+      .slice(firstEdited)
+      .filter((m) => m.role === "assistant" && m.opaque !== undefined).length;
+    const what = messages[firstEdited];
+    const label = what?.role === "tool" ? `tool ${what.name}` : (what?.role ?? "");
+    lines.push(
+      row(
+        "编辑点",
+        `[${firstEdited + 1}] ${label} 改过 → 从这里起 ${after.length} 条 ${fmtTok(tok)} tok 重算${input.dropsThinking && thinking > 0 ? `;之后 ${thinking} 条消息的思考块不再回传` : ""}`,
       ),
     );
   }
@@ -166,6 +191,8 @@ export type ReceiveHeadInput = {
   /** 压缩摘要请求的结果。 */
   compaction?: Extract<AgentEvent, { type: "compaction" }>;
   error?: string;
+  /** 发送卡预计的缓存命中上限;有它就与实测并排。 */
+  predictedCache?: number;
 };
 
 /** 接收卡的头行:一眼看到停止原因、耗时、实测用量、缓存命中率、费用。 */
@@ -175,9 +202,14 @@ export function receiveHead(input: ReceiveHeadInput): string {
     return `${c.zhu(BAR)} ${c.bold(c.zhu(`接收 #${n}  ✗ ${firstLine(input.error, 80)}`))}`;
   const usageText = (u: AssistantEvent["usage"]) => {
     if (!u) return "无用量";
+    // 预计与实测并排:实测明显低于预计,说明有别的东西在破坏前缀。
+    const predicted =
+      input.predictedCache !== undefined && input.predictedCache > 0
+        ? `,预计≤${fmtTok(input.predictedCache)}`
+        : "";
     const hit =
       u.cacheReadTokens !== undefined && u.inputTokens > 0
-        ? `(缓存 ${fmtTok(u.cacheReadTokens)} · ${Math.round((u.cacheReadTokens / u.inputTokens) * 100)}%)`
+        ? `(缓存 ${fmtTok(u.cacheReadTokens)} · ${Math.round((u.cacheReadTokens / u.inputTokens) * 100)}%${predicted})`
         : "";
     const reasoning = u.reasoningTokens !== undefined ? ` · 推理 ${fmtTok(u.reasoningTokens)}` : "";
     const cost = input.price ? ` · ${fmtCost(costOf(u, input.price))}` : "";

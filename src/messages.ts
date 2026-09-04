@@ -96,7 +96,13 @@ export function deriveMessages(events: readonly AgentEvent[]): Message[] {
   const messages: Message[] = [];
   for (let i = 0; i < events.length; i++) {
     if (c.summary && i === c.coversFrom) {
-      messages.push({ role: "user", content: `[会话前段已压缩,以下为摘要]\n${c.summary}` });
+      // 摘要是合成的消息,它改变了此后所有消息的前缀:与编辑同等对待(Q76),
+      // Anthropic 适配器据此不再回传之后的思考块(签名绑定前缀,否则新账号 400)。
+      messages.push({
+        role: "user",
+        content: `[会话前段已压缩,以下为摘要]\n${c.summary}`,
+        edited: true,
+      });
     }
     if (c.summary && i >= c.coversFrom && i < c.coversUpTo) continue;
     if (ed.dropped.has(i)) continue;
@@ -133,16 +139,19 @@ export function deriveMessages(events: readonly AgentEvent[]): Message[] {
         });
         break;
       }
-      case "tool/result":
+      case "tool/result": {
+        // 被清除换成占位文本,同样是改了前缀。
+        const cleared = c.cleared.has(i);
         messages.push({
           role: "tool",
           callId: e.callId,
           name: e.name,
-          content: c.cleared.has(i) ? CLEARED_PLACEHOLDER : (edit?.content ?? e.content),
+          content: cleared ? CLEARED_PLACEHOLDER : (edit?.content ?? e.content),
           isError: e.isError,
-          ...(edit?.content !== undefined && { edited: true }),
+          ...((cleared || edit?.content !== undefined) && { edited: true }),
         });
         break;
+      }
       case "session/interrupt":
       case "session/model":
       case "compaction":

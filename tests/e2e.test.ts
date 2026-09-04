@@ -184,7 +184,7 @@ describe("端到端(假服务器)", () => {
     expect(doc).toContain("✓ big");
     expect(doc).toContain("◇ 已压缩(llmSummarize(structuredFull, replay)):摘要覆盖事件");
     expect(doc).toContain("完成:文件已看过");
-    expect(doc).toContain("→ 实测 900(缓存 600 · 67%)");
+    expect(doc).toContain("→ 实测 900(缓存 600 · 67%");
     expect(doc).toContain("○ 空闲");
 
     // 检视器视角:四条记录,压缩请求有自己的一行,接收分区有原始流

@@ -40,7 +40,13 @@ import type { ChildInfo } from "../src/subagent.js";
 import type { Tool } from "../src/tools.js";
 import { expandFileRefs } from "./attachments.js";
 import { forkSession, SESSIONS_DIR } from "./bootstrap.js";
-import { reasoningTitle, receiveBlockLines, receiveHead, sendCardLines } from "./cards.js";
+import {
+  predictedCache,
+  reasoningTitle,
+  receiveBlockLines,
+  receiveHead,
+  sendCardLines,
+} from "./cards.js";
 import { editInExternalEditor } from "./editor.js";
 import { fmtMs, fmtTok, messagesFor, RequestInspector, type SessionSource } from "./inspector.js";
 import { expandTemplate, type PromptTemplate } from "./templates.js";
@@ -166,6 +172,10 @@ const COMMANDS = [
   },
   { name: "drop", description: "丢弃一条消息:/drop N [备注];助手消息连同它的工具结果一起不再发送" },
   { name: "edits", description: "列出本会话的全部编辑与丢弃" },
+  {
+    name: "retry",
+    description: "重跑一步:丢掉最后一条助手消息及其工具结果,不加新消息,从当前投影再发一次请求",
+  },
   { name: "model", description: "切换模型:/model 供应商/模型;不带参数列出可选" },
   { name: "models", description: "向供应商查询当前可用模型,对照配置标出下线与新增" },
   { name: "fields", description: "当前协议往请求里放哪些字段、从响应里读哪些、明知存在但不读哪些" },
@@ -255,6 +265,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
   let lastSent: Message[] | undefined;
   let lastToolNames = "";
   const receiveHeads = new Map<number, Text>();
+  const predictedAt = new Map<number, number>();
   let lastTurnRequestIndex = -1;
   let lastCompactionRequestIndex = -1;
 
@@ -417,8 +428,15 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     const req = log.events[requestIndex];
     if (!node || req?.type !== "request") return;
     const price = priceFor(req.model);
+    const predicted = predictedAt.get(requestIndex);
     node.setText(
-      receiveHead({ n, estimated: req.estimatedTokens, ...(price && { price }), ...fill }),
+      receiveHead({
+        n,
+        estimated: req.estimatedTokens,
+        ...(price && { price }),
+        ...(predicted !== undefined && { predictedCache: predicted }),
+        ...fill,
+      }),
     );
   }
 
@@ -689,11 +707,13 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
               ...(start?.type === "session/start" &&
                 start.sections && { sections: start.sections }),
               toolsUnchanged: toolNames === lastToolNames,
+              dropsThinking: agent.provider.fields?.protocol.startsWith("anthropic") ?? false,
             }).join("\n"),
             1,
             0,
           ),
         );
+        predictedAt.set(lastRequestIndex, predictedCache(lastSent, messages));
         lastToolNames = toolNames;
         if (e.reason === "compaction") lastCompactionRequestIndex = lastRequestIndex;
         else {
@@ -872,6 +892,9 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       case "edits":
         note(editsList());
         break;
+      case "retry":
+        await retryStep();
+        break;
       case "model":
         switchModel(arg);
         break;
@@ -1008,6 +1031,26 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       c.jin(`◇ 已丢弃事件 #${target}${withResults}`),
       ...editConsequences(target).map((s) => c.faint(`  · ${s}`)),
     ].join("\n");
+  }
+
+  /** /retry:编辑之后立刻看效果。丢弃以事件落盘,发送卡会标出编辑点。 */
+  async function retryStep(): Promise<void> {
+    if (agent.running) {
+      note(c.zhu("运行中不能重跑,先 Esc 打断"));
+      return;
+    }
+    showLoader("重跑中");
+    try {
+      const pending = agent.retry();
+      updateStatus();
+      const outcome = await pending;
+      if (typeof outcome === "object") note(c.jin(`◇ 循环停止:${outcome.stopped}`));
+    } catch (err) {
+      note(c.zhu(`✗ ${(err as Error).message}`));
+    } finally {
+      hideLoader();
+      updateStatus();
+    }
   }
 
   function editsList(): string {

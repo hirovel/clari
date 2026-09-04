@@ -284,7 +284,10 @@ export function toAnthropicWire(
   const out: { role: "user" | "assistant"; content: WireBlock[] }[] = [];
   // 思考块的签名绑定它之前的整个前缀(Q74):前面任何一条消息被改过,后面的思考块就都不再回传。
   let prefixEdited = false;
+  // 第一条改过的消息之前的那条 wire 消息下标:编辑点断点挂在它上面(Q76)。
+  let editBoundary = -1;
   for (const m of messages) {
+    if (m.edited && !prefixEdited) editBoundary = out.length - 1;
     if (m.edited) prefixEdited = true;
     switch (m.role) {
       case "system":
@@ -335,18 +338,17 @@ export function toAnthropicWire(
       ...b,
       cache_control: { type: "ephemeral" },
     });
+    const markLast = (msg: { content: WireBlock[] } | undefined) => {
+      const last = msg?.content.at(-1);
+      // 思考块不能挂断点;末块是思考块的情况只会出现在打断后,跳过即可。
+      if (msg && last && last.type !== "thinking" && last.type !== "redacted_thinking") {
+        msg.content[msg.content.length - 1] = mark(last);
+      }
+    };
     if (system?.[0]) system[0] = mark(system[0]);
-    const lastMsg = out.at(-1);
-    const lastBlock = lastMsg?.content.at(-1);
-    // 思考块不能挂断点;末块是思考块的情况只会出现在打断后,跳过即可。
-    if (
-      lastMsg &&
-      lastBlock &&
-      lastBlock.type !== "thinking" &&
-      lastBlock.type !== "redacted_thinking"
-    ) {
-      lastMsg.content[lastMsg.content.length - 1] = mark(lastBlock);
-    }
+    // 编辑点断点(Q76):第一条改过的消息之前那条挂断点,编辑点之前的前缀稳定命中,只有之后重算。
+    if (editBoundary >= 0 && editBoundary < out.length - 1) markLast(out[editBoundary]);
+    markLast(out.at(-1));
   }
   return { system, messages: out };
 }
