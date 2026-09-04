@@ -36,6 +36,12 @@ export function subjectOf(call: ToolCall): string | undefined {
   const a = (call.args ?? {}) as Record<string, unknown>;
   if (call.name === "bash") return typeof a.command === "string" ? a.command : undefined;
   if (call.name === "fetch") return typeof a.url === "string" ? a.url : undefined;
+  // MCP 工具(Q87):mcp__server__tool → "server:tool",规则写 mcp:github:get_*。
+  if (call.name.startsWith("mcp__")) {
+    const rest = call.name.slice(5);
+    const i = rest.indexOf("__");
+    return i < 0 ? rest : `${rest.slice(0, i)}:${rest.slice(i + 2)}`;
+  }
   if (PATH_TOOLS.has(call.name)) return typeof a.path === "string" ? a.path : ".";
   return undefined;
 }
@@ -61,7 +67,8 @@ function normalizePath(p: string, cwd: string): string {
 export function ruleMatches(rule: string, call: ToolCall, cwd: string): boolean {
   const i = rule.indexOf(":");
   const name = i < 0 ? rule : rule.slice(0, i);
-  if (name !== call.name && name !== "*") return false;
+  const isMcp = name === "mcp" && call.name.startsWith("mcp__");
+  if (name !== call.name && name !== "*" && !isMcp) return false;
   if (i < 0) return true;
   const pattern = rule.slice(i + 1);
   const subject = subjectOf(call);

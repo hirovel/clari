@@ -20,6 +20,8 @@ import {
   sessionsDir,
   USAGE,
 } from "./bootstrap.js";
+import { connectMcpServers, type McpBridge } from "./mcp/bridge.js";
+import { loadMcpServers } from "./mcp/config.js";
 import { discoverSkills } from "./prompt.js";
 
 let args: ReturnType<typeof parseCommonArgs>;
@@ -80,6 +82,22 @@ const tools = [
   ...baseTools.filter((t) => !ext.tools?.some((x) => x.name === t.name)),
   ...(ext.tools ?? []),
 ];
+// MCP 服务器(Q87):一次性模式也连,跑完关。
+const mcpServers = loadMcpServers(boot.config.mcp, process.cwd());
+let mcp: McpBridge | undefined;
+if (mcpServers.length > 0) {
+  try {
+    mcp = await connectMcpServers(mcpServers, {
+      log,
+      tools,
+      artifactsDir: sessionFile.replace(/.jsonl$/, ".mcp"),
+      ...(boot.config.mcp && { mcp: boot.config.mcp }),
+    });
+  } catch (err) {
+    console.error((err as Error).message);
+    process.exit(2);
+  }
+}
 
 const approvalCfg = resolveApproval(args, boot.config);
 const agent = new Agent({
@@ -110,6 +128,7 @@ const agent = new Agent({
 const startIndex = log.events.length;
 try {
   const outcome = await agent.prompt(expandFileRefs(prompt).text);
+  await mcp?.close();
   const fresh = log.events.slice(startIndex);
   const last = [...fresh].reverse().find((e) => e.type === "assistant/message");
   const text = last?.type === "assistant/message" ? last.text : "";

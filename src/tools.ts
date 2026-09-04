@@ -1,4 +1,4 @@
-import type { Static, TSchema } from "@sinclair/typebox";
+import { Kind, type Static, type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
 /**
@@ -44,6 +44,8 @@ export function validateArgs(schema: TSchema, raw: unknown): ValidationResult {
       error: `参数不是合法 JSON,无法解析。收到的原文:\n${String((raw as { __unparsed: unknown }).__unparsed)}`,
     };
   }
+  // 外来的 JSON Schema(MCP 服务器给的,没有 TypeBox 的 Kind 标记)不在这里校验:服务器自己校验,协议错误会回来。
+  if (!(Kind in schema)) return { ok: true, value: raw };
   // Clone:raw 已作为事件入日志,Convert 不许碰历史。
   const converted = Value.Convert(schema, Value.Clone(raw));
   if (Value.Check(schema, converted)) return { ok: true, value: converted };

@@ -79,6 +79,8 @@ export function collectRequests(events: readonly AgentEvent[]): RequestRecord[] 
       case "decision":
       case "session/interrupt":
       case "session/recovered":
+      case "mcp/server":
+      case "mcp/tools":
       case "session/model":
       case "session/slot":
       case "context/edit":
@@ -353,6 +355,18 @@ export function decisionLines(rec: RequestRecord): string[] {
       case "session/recovered":
         lines.push(
           `${c.zhu("◇")} recovered: dropped ${e.droppedBytes} bytes of a half-written line at the end of the log`,
+        );
+        break;
+      case "mcp/server":
+        lines.push(
+          e.phase === "failed" || e.phase === "closed"
+            ? `${c.zhu("◇")} mcp ${e.server}: ${e.phase}${e.error ? ` · ${e.error}` : ""}`
+            : `${c.jin("◇")} mcp ${e.server}: ${e.phase}${e.era ? ` · ${e.era} ${e.protocolVersion ?? ""}` : ""}${e.toolCount !== undefined ? ` · ${e.toolCount} tools` : ""}${e.ms !== undefined ? ` · ${e.ms}ms` : ""}`,
+        );
+        break;
+      case "mcp/tools":
+        lines.push(
+          `${c.jin("◇")} mcp ${e.server}: tools changed · +${e.added.length} −${e.removed.length} · ${e.total} total`,
         );
         break;
       case "session/model":

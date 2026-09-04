@@ -87,6 +87,46 @@ export type AgentEvent =
    * 半行只可能在末尾;中间的坏行仍然报错,因为那不是崩溃能造成的。
    */
   | { type: "session/recovered"; at: string; droppedBytes: number; preview: string }
+  /** MCP 服务器的生命周期(Q87):启动、就绪、失败、关闭。只给人看。 */
+  | {
+      type: "mcp/server";
+      at: string;
+      server: string;
+      phase: "starting" | "ready" | "failed" | "closed";
+      transport: "stdio" | "http";
+      era?: "modern" | "legacy";
+      protocolVersion?: string;
+      serverInfo?: { name?: string; version?: string };
+      toolCount?: number;
+      /** 服务器列出的工具数(过滤前)。 */
+      listed?: number;
+      instructions?: string;
+      error?: string;
+      warning?: string;
+      ms?: number;
+    }
+  /** 与 MCP 服务器的每一次 JSON-RPC 往返,原文(Authorization 已遮蔽)。只给人看。 */
+  | {
+      type: "mcp/rpc";
+      at: string;
+      server: string;
+      direction: "send" | "receive";
+      method?: string;
+      id?: number | string;
+      bytes: number;
+      body: string;
+    }
+  /** MCP 服务器的 stderr 一行。只给人看。 */
+  | { type: "mcp/log"; at: string; server: string; line: string }
+  /** MCP 服务器的工具表变化:首次列出或 list_changed 之后。只给人看;工具定义本身随下一次 request 事件可见。 */
+  | {
+      type: "mcp/tools";
+      at: string;
+      server: string;
+      added: string[];
+      removed: string[];
+      total: number;
+    }
   /** 会话中切换模型。只给人看(不投影):此后的 assistant 消息由新模型生成。 */
   | { type: "session/model"; at: string; model: string }
   /**

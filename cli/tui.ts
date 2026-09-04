@@ -23,6 +23,8 @@ import {
   sessionsDir,
   USAGE,
 } from "./bootstrap.js";
+import { connectMcpServers, type McpBridge } from "./mcp/bridge.js";
+import { loadMcpServers } from "./mcp/config.js";
 import { discoverSkills } from "./prompt.js";
 import { discoverTemplates } from "./templates.js";
 import { createTuiApp, type ModelChoice } from "./tui-app.js";
@@ -122,7 +124,23 @@ const tools = [
   ...baseTools.filter((t) => !ext.tools?.some((x) => x.name === t.name)),
   ...(ext.tools ?? []),
 ];
-const traceFile = sessionFile.replace(/\.jsonl$/, ".trace.jsonl");
+// MCP 服务器(Q87):启动时连接,工具原地追加到 tools;required 的失败即退出。
+const mcpServers = loadMcpServers(boot.config.mcp, process.cwd());
+let mcp: McpBridge | undefined;
+if (mcpServers.length > 0) {
+  try {
+    mcp = await connectMcpServers(mcpServers, {
+      log,
+      tools,
+      artifactsDir: sessionFile.replace(/.jsonl$/, ".mcp"),
+      ...(boot.config.mcp && { mcp: boot.config.mcp }),
+    });
+  } catch (err) {
+    console.error((err as Error).message);
+    process.exit(1);
+  }
+}
+const traceFile = sessionFile.replace(/.jsonl$/, ".trace.jsonl");
 
 app = createTuiApp({
   terminal: new ProcessTerminal(),
@@ -141,6 +159,10 @@ app = createTuiApp({
   templates: discoverTemplates(),
   skills,
   sessionsDir: sessionDir,
+  ...(mcp && { mcp }),
+  onExit: () => {
+    void (mcp?.close() ?? Promise.resolve()).finally(() => process.exit(0));
+  },
   ...(memory && { memory }),
   ...(args.effort && { effort: args.effort }),
   ...(first.effortLevels && { effortLevels: first.effortLevels }),

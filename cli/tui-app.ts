@@ -80,6 +80,7 @@ import {
   RequestInspector,
   type SessionSource,
 } from "./inspector.js";
+import { describeStatus, type McpServerStatus } from "./mcp/bridge.js";
 import { expandSkill, type Skill } from "./prompt.js";
 import { expandTemplate, type PromptTemplate } from "./templates.js";
 import { c, editorTheme, markdownTheme } from "./theme.js";
@@ -150,6 +151,8 @@ export type TuiAppDeps = {
   skills?: Skill[];
   /** 会话目录,/fork 的新文件写到这里。 */
   sessionsDir?: string;
+  /** MCP 桥接(Q87):/mcp 列状态。工具本身已在 tools 里。 */
+  mcp?: { statuses(): McpServerStatus[] };
 };
 
 export type TuiApp = {
@@ -259,6 +262,7 @@ const COMMANDS = [
     description: "Tool definitions sent with every request: name, tokens, concurrency, params",
   },
   { name: "raw", description: "Raw stream of request N as received, line by line: /raw N" },
+  { name: "mcp", description: "MCP servers: transport, protocol era, tool count, last error" },
   {
     name: "skills",
     description: "List skills: source, description size, model-invocable, allowed tools",
@@ -978,6 +982,27 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
           ),
         );
         break;
+      case "mcp/server":
+        if (e.phase === "ready")
+          note(
+            c.jin(
+              `◇ mcp ${e.server}: ready · ${e.transport} · ${e.era ?? ""} ${e.protocolVersion ?? ""} · ${e.toolCount ?? 0} tools${e.listed !== undefined && e.listed !== e.toolCount ? ` of ${e.listed} listed` : ""} · ${e.ms ?? 0}ms`,
+            ),
+          );
+        else if (e.phase === "failed" || e.phase === "closed")
+          note(c.zhu(`◇ mcp ${e.server}: ${e.phase}${e.error ? ` · ${e.error}` : ""}`));
+        else if (e.warning) note(c.faint(`· mcp ${e.server}: ${e.warning}`));
+        break;
+      case "mcp/tools":
+        if (e.added.length + e.removed.length > 0 && e.total !== e.added.length)
+          note(
+            c.jin(
+              `◇ mcp ${e.server}: tools changed · +${e.added.length} −${e.removed.length} · ${e.total} total · applies from the next request`,
+            ),
+          );
+        break;
+      case "mcp/rpc":
+      case "mcp/log":
       case "session/interrupt":
       case "session/start":
         break;
@@ -1114,6 +1139,23 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       case "tools":
         note(toolsList());
         break;
+      case "mcp": {
+        const list = deps.mcp?.statuses() ?? [];
+        note(
+          list.length === 0
+            ? c.faint(
+                "No MCP servers. Configure mcp.servers in ~/.clari/config.json or mcpServers in ./.mcp.json.",
+              )
+            : [
+                `${c.soft("MCP")} ${c.ink(`${list.length} servers`)}  ${c.faint("tools are named mcp__<server>__<tool>; approval rules mcp:<server>:<tool>; every RPC is an mcp/rpc event")}`,
+                ...list.map(
+                  (s) =>
+                    `  ${s.phase === "ready" ? c.green("✓") : c.zhu("✗")} ${c.ink(describeStatus(s))}`,
+                ),
+              ].join("\n"),
+        );
+        break;
+      }
       case "context":
         note(renderContext());
         break;
