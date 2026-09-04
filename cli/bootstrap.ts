@@ -122,7 +122,7 @@ export function parseCommonArgs(argv: string[]): CommonArgs {
     continue: false,
     json: false,
     help: false,
-    approve: "policy",
+    approve: "all",
     extensions: [],
     events: false,
     rest: [],
@@ -262,7 +262,7 @@ Options
   --compaction llm|clear|pipeline|./strategy.mjs   default llm
   --resume <session file> | --continue   resume a session and keep appending to the same file
   --system-prompt <file> | --append-system-prompt <file>
-  --approve policy|ask|all       policy (default) = allow/deny rules from config, ask when no rule matches; ask = every call; all = never ask
+  --approve all|policy|ask       all (default, pi stance) = never ask; policy = allow/deny rules from config, ask when no rule matches; ask = every call
   --preset name                  apply the parameter set presets.name from config; explicit flags still win
   --memory | --no-memory         cross-session memory (memory section in AGENTS.md + remember tool); default off
   --prompt-sections role,env,instructions,memory,skills,append   which system prompt sections, in which order

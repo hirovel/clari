@@ -47,7 +47,7 @@ pnpm tui
 
 首次运行会生成 `~/.clari/config.json`(环境变量 `CLARI_CONFIG` 可改路径)。`clari --help`(源码里是 `pnpm tui -- --help`)列出全部选项。`clari once "任务"` 一次性模式,`clari replay 文件` 回放。
 
-缺省审批策略:只读工具(read / grep / glob / ls)直接执行,写文件与跑命令先问你一次,工作目录之外的路径一律问;`/approve allow bash:git *` 这类规则可以在会话里加,也可以写进配置的 `approval` 字段。
+缺省审批与 pi 一致:`all`,不弹确认。要审批就 `--approve policy`(只读工具放行、其余问、工作目录之外必问,规则如 `/approve allow bash:git *` 可在会话里加或写进配置的 `approval` 字段)或 `--approve ask`(每个调用都问)。
 
 ### 没有 key 先看效果
 
