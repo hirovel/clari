@@ -57,6 +57,25 @@ export class Agent {
     else this.opts.effort = level;
   }
 
+  /** 当前策略槽实现(界面显示用)。 */
+  get slots(): NonNullable<TurnDeps["slots"]> {
+    return this.opts.slots ?? {};
+  }
+
+  /**
+   * 会话中切换一个策略槽(Q78):runTurn 开跑时取槽实现,所以下一次 turn 起生效。
+   * undefined = 恢复内置缺省。事件(session/slot)由调用方记,因为只有调用方知道实现的名字。
+   */
+  setSlot<K extends keyof NonNullable<TurnDeps["slots"]>>(
+    name: K,
+    impl: NonNullable<TurnDeps["slots"]>[K] | undefined,
+  ): void {
+    const slots = { ...this.opts.slots };
+    if (impl === undefined) delete slots[name];
+    else slots[name] = impl;
+    this.opts.slots = slots;
+  }
+
   /** 会话中切换模型:下一次请求起生效;记一条只给人看的事件,审计时知道哪段由谁生成。 */
   setProvider(provider: Provider): void {
     this.opts.provider = provider;

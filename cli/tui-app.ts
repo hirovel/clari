@@ -18,14 +18,18 @@ import {
   TuiMainScreen,
 } from "@earendil-works/pi-tui";
 import { Agent, type DeliverAs } from "../src/agent.js";
+import { keepRatio, keepRecentTokens } from "../src/compaction.js";
 import { contextBreakdown } from "../src/context.js";
 import { fmtCost, type Price, usageTotals } from "../src/cost.js";
 import { type AgentEvent, now, type ToolCall } from "../src/events.js";
 import type { EventLog } from "../src/log.js";
 import {
+  allowAll,
   type CompactionConfig,
   compactionThreshold,
+  queueToTurnEnd,
   recordingProvider,
+  steer,
   type TurnDeps,
 } from "../src/loop.js";
 import { editState, type Message } from "../src/messages.js";
@@ -40,7 +44,7 @@ import { classifyError, type ErrorKind, hintFor } from "../src/providers/errors.
 import type { ChildInfo } from "../src/subagent.js";
 import type { Tool } from "../src/tools.js";
 import { expandFileRefs } from "./attachments.js";
-import { forkSession, SESSIONS_DIR } from "./bootstrap.js";
+import { forkSession, loadCompactionStrategy, SESSIONS_DIR } from "./bootstrap.js";
 import {
   errorCardLines,
   predictedCache,
@@ -107,6 +111,8 @@ export type TuiAppDeps = {
   approve?: "all" | "ask";
   /** 跨会话记忆已打开时的两个文件(Q65),供 /memory 看与删。 */
   memory?: MemoryFiles;
+  /** 启动时的压缩策略名(llm / clear / pipeline / 模块路径),/slots 显示用;缺省 llm。 */
+  compactionName?: string;
   /** 策略槽实现(执行策略、扩展模块换上的槽等)。approve=ask 时界面的审批实现覆盖这里的 approve。 */
   slots?: TurnDeps["slots"];
   /** 提示词模板:/名 参数 展开成一条用户消息。 */
@@ -178,6 +184,18 @@ const COMMANDS = [
     name: "retry",
     description: "重跑一步:丢掉最后一条助手消息及其工具结果,不加新消息,从当前投影再发一次请求",
   },
+  { name: "slots", description: "Show every strategy slot and its current implementation" },
+  {
+    name: "compaction",
+    description: "Switch compaction strategy: /compaction llm|clear|pipeline|./x.mjs|off",
+  },
+  {
+    name: "preservation",
+    description: "How much recent context compaction keeps: /preservation tokens N | ratio R",
+  },
+  { name: "execution", description: "Tool execution: /execution sequential|parallel" },
+  { name: "steering", description: "When queued messages are injected: /steering step|turn" },
+  { name: "approve", description: "Tool approval: /approve all|ask" },
   { name: "model", description: "切换模型:/model 供应商/模型;不带参数列出可选" },
   { name: "models", description: "向供应商查询当前可用模型,对照配置标出下线与新增" },
   { name: "fields", description: "当前协议往请求里放哪些字段、从响应里读哪些、明知存在但不读哪些" },
@@ -781,6 +799,10 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       case "session/model":
         note(c.jin(`◇ 已切换模型:${e.model}`));
         break;
+      case "session/slot":
+        // 恢复会话时把历史切换也画出来;当前会话里 slotCommand 已经打过确认行,这里只补状态。
+        slotState[e.slot] = e.value;
+        break;
       case "session/interrupt":
       case "session/start":
         break;
@@ -910,6 +932,16 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
         break;
       case "retry":
         await retryStep();
+        break;
+      case "compaction":
+      case "preservation":
+      case "execution":
+      case "steering":
+      case "approve":
+        note(await slotCommand(cmd, arg));
+        break;
+      case "slots":
+        note(slotsList());
         break;
       case "model":
         switchModel(arg);
@@ -1222,6 +1254,102 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     } catch (err) {
       note(c.zhu(`✗ ${(err as Error).message}`));
     }
+  }
+
+  // ---------- 策略槽在会话中切换(Q78):每次切换记 session/slot,下一次 turn 起生效 ----------
+
+  const slotState: Record<string, string> = {
+    compaction: deps.compactionName ?? "llm",
+    preservation: "keepRecentTokens (min(20000, window/4))",
+    execution: deps.slots?.execution ?? "sequential",
+    steering: deps.slots?.steering ? "custom" : "step",
+    approve: deps.approve ?? "all",
+  };
+  function recordSlot(slot: string, value: string): void {
+    slotState[slot] = value;
+    log.append({ type: "session/slot", at: now(), slot, value });
+  }
+
+  async function slotCommand(slot: string, arg: string): Promise<string> {
+    if (agent.running) return c.zhu("Cannot switch a slot while running; press Esc first.");
+    const v = arg.trim();
+    const done = (value: string, when = "takes effect from the next turn") =>
+      `${c.jin(`◇ ${slot} → ${value}`)}  ${c.faint(when)}`;
+    switch (slot) {
+      case "compaction": {
+        if (!v)
+          return c.faint(
+            `compaction is ${slotState.compaction}. Usage: /compaction llm|clear|pipeline|./strategy.mjs|off`,
+          );
+        if (v === "off") {
+          compaction.auto = false;
+          recordSlot("compaction", "off (auto-compaction disabled; /compact still works)");
+          return done("off", "auto-compaction disabled");
+        }
+        try {
+          compaction.strategy = await loadCompactionStrategy(v);
+        } catch (err) {
+          return c.zhu(`✗ ${(err as Error).message}`);
+        }
+        compaction.auto = true;
+        recordSlot("compaction", v);
+        return done(v, "used by the next auto or manual compaction");
+      }
+      case "preservation": {
+        const m = v.match(/^(tokens|ratio)\s+([\d.]+)$/);
+        if (!m)
+          return c.faint(
+            `preservation is ${slotState.preservation}. Usage: /preservation tokens 20000 | ratio 0.3`,
+          );
+        const n = Number(m[2]);
+        if (m[1] === "tokens") compaction.preservation = keepRecentTokens(n);
+        else {
+          if (n <= 0 || n >= 1) return c.zhu("ratio must be between 0 and 1");
+          compaction.preservation = keepRatio(n);
+        }
+        recordSlot("preservation", `${m[1] === "tokens" ? "keepRecentTokens" : "keepRatio"}(${n})`);
+        return done(`${m[1]} ${n}`, "used by the next compaction");
+      }
+      case "execution": {
+        if (v !== "sequential" && v !== "parallel")
+          return c.faint(
+            `execution is ${slotState.execution}. Usage: /execution sequential|parallel`,
+          );
+        agent.setSlot("execution", v);
+        recordSlot("execution", v);
+        return done(v);
+      }
+      case "steering": {
+        if (v !== "step" && v !== "turn")
+          return c.faint(
+            `steering is ${slotState.steering}. Usage: /steering step|turn  (step = inject queued messages at the next step; turn = only when the model stops calling tools)`,
+          );
+        agent.setSlot("steering", v === "step" ? steer : queueToTurnEnd);
+        recordSlot("steering", v);
+        return done(v);
+      }
+      case "approve": {
+        if (v !== "all" && v !== "ask")
+          return c.faint(`approve is ${slotState.approve}. Usage: /approve all|ask`);
+        agent.setSlot("approve", v === "ask" ? askApproval : allowAll);
+        recordSlot("approve", v);
+        return done(v);
+      }
+      default:
+        return c.zhu(`unknown slot ${slot}`);
+    }
+  }
+
+  /** /slots:当前每个槽的实现。全部是可切换的;切换记事件。 */
+  function slotsList(): string {
+    const rows = Object.entries(slotState).map(
+      ([k, val]) => `  ${c.jin(k.padEnd(13))} ${c.ink(val)}`,
+    );
+    return [
+      `${c.soft("Slots")}  ${c.faint("switch with /compaction /preservation /execution /steering /approve; each switch is a session/slot event")}`,
+      ...rows,
+      `  ${c.jin("termination".padEnd(13))} ${c.ink(deps.slots?.termination ? "custom" : "untilIdle")}  ${c.faint("(--max-steps N at startup)")}`,
+    ].join("\n");
   }
 
   async function manualCompact(instructions: string): Promise<void> {

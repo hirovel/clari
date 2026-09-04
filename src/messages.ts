@@ -154,6 +154,7 @@ export function deriveMessages(events: readonly AgentEvent[]): Message[] {
       }
       case "session/interrupt":
       case "session/model":
+      case "session/slot":
       case "compaction":
       case "context/edit":
       case "context/drop":

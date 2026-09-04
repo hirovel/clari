@@ -127,6 +127,7 @@ app = createTuiApp({
   fold: args.fold,
   trace: args.trace,
   approve: args.approve,
+  compactionName: args.compaction,
   slots: { ...ext.slots, ...(args.execution && { execution: args.execution }) },
   templates: discoverTemplates(),
   sessionsDir: sessionDir,

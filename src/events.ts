@@ -80,6 +80,11 @@ export type AgentEvent =
   /** 会话中切换模型。只给人看(不投影):此后的 assistant 消息由新模型生成。 */
   | { type: "session/model"; at: string; model: string }
   /**
+   * 会话中切换了某个策略槽(Q78)。只给人看:此后的步按新策略走。
+   * slot 是槽名(compaction / preservation / execution / steering / approve),value 是新实现的名字与参数。
+   */
+  | { type: "session/slot"; at: string; slot: string; value: string }
+  /**
    * 一次模型请求即将发出。只给人看。紧随其后的 assistant/message 就是它的响应
    * (中间可能夹 retry 事件;失败则以 request/error 收尾)。
    * 请求正文不重复落盘:它等于 deriveMessages(此事件之前的全部事件),投影是纯函数,随时可以原样重建。

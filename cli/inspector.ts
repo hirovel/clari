@@ -72,6 +72,7 @@ export function collectRequests(events: readonly AgentEvent[]): RequestRecord[] 
       case "decision":
       case "session/interrupt":
       case "session/model":
+      case "session/slot":
       case "context/edit":
       case "context/drop":
         pending.push(e);
@@ -326,6 +327,9 @@ export function decisionLines(rec: RequestRecord): string[] {
         break;
       case "session/model":
         lines.push(`${c.jin("◇")} 切换模型:${e.model}`);
+        break;
+      case "session/slot":
+        lines.push(`${c.jin("◇")} slot ${e.slot} → ${e.value}`);
         break;
       case "context/edit":
         lines.push(
