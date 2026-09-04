@@ -14,7 +14,14 @@ import {
 } from "@earendil-works/pi-tui";
 import { estimateTokens } from "../src/context.js";
 import type { AgentEvent } from "../src/events.js";
-import { compactionState, deriveMessages, editState, type Message } from "../src/messages.js";
+import {
+  type Composition,
+  compactionState,
+  composeContext,
+  deriveMessages,
+  editState,
+  type Message,
+} from "../src/messages.js";
 import { type Provider, parseEffort, type ToolDef } from "../src/provider.js";
 import { c } from "./theme.js";
 
@@ -818,9 +825,95 @@ export function compactionLines(
   }
 }
 
+// ---------- 组装视图(Q81):模型下一步会看到的每条消息从哪来、经过了什么、落在线路的第几条 ----------
+
+export type CompositionRow = {
+  /** 投影下标(从 1 起,与发送卡、/edit N 的编号不同:那是事件下标)。 */
+  i: number;
+  /** 来源事件下标。 */
+  event: number;
+  /** 线路正文里的下标;-1 = 不在数组里(顶层 system);undefined = provider 未实现映射。 */
+  wire: number | undefined;
+  message: Message;
+  stages: string[];
+};
+
+export function compositionRows(
+  events: readonly AgentEvent[],
+  provider?: Provider,
+): { rows: CompositionRow[]; omitted: Composition["omitted"] } {
+  const comp = composeContext(events);
+  const map = provider?.wireMap?.(comp.messages);
+  const rows = comp.messages.map((message, k) => ({
+    i: k + 1,
+    event: comp.provenance[k]?.event ?? -1,
+    wire: map ? map[k] : undefined,
+    message,
+    stages: comp.provenance[k]?.stages ?? [],
+  }));
+  return { rows, omitted: comp.omitted };
+}
+
+export function compositionRow(r: CompositionRow, selected: boolean): string {
+  const m = r.message;
+  const tok = messageTokens(m);
+  const brief =
+    m.role === "assistant" && !m.content && m.toolCalls.length > 0
+      ? `⚙ ${m.toolCalls.map((t) => t.name).join(" ")}`
+      : firstLine(m.content);
+  const wire = r.wire === undefined ? "  ?" : r.wire < 0 ? "top" : String(r.wire).padStart(3);
+  const stages = r.stages.length > 0 ? r.stages.join(" ") : "";
+  const body = `${String(r.i).padStart(3)}  ${`#${r.event}`.padEnd(5)} ${wire}  ${roleLabel(m).padEnd(14)} ${String(tok).padStart(6)}  ${stages.padEnd(22)} ${truncateToWidth(brief, 60, "…")}`;
+  const mark = selected ? c.zhu("▸") : " ";
+  const tone = selected ? c.bold(c.ink(body)) : r.stages.length > 0 ? c.jin(body) : c.soft(body);
+  return `${mark} ${tone}`;
+}
+
+/** 组装视图里一条消息的全文与来历。 */
+export function compositionLines(events: readonly AgentEvent[], r: CompositionRow): string[] {
+  const m = r.message;
+  const src = events[r.event];
+  const lines = [
+    `${c.soft("projection".padEnd(12))} ${c.ink(`#${r.i} of ${composeContext(events).messages.length}`)}`,
+    `${c.soft("source".padEnd(12))} ${c.ink(`event #${r.event} ${src?.type ?? ""}`)}`,
+    `${c.soft("wire".padEnd(12))} ${c.ink(r.wire === undefined ? "provider has no wireMap" : r.wire < 0 ? "top-level field (system)" : `messages[${r.wire}]`)}`,
+    `${c.soft("stages".padEnd(12))} ${c.ink(r.stages.length > 0 ? r.stages.join(" → ") : "projection only (verbatim from the event)")}`,
+    `${c.soft("tokens".padEnd(12))} ${c.ink(`≈${messageTokens(m)}`)}`,
+    "",
+  ];
+  if (m.role === "assistant" && m.reasoning) {
+    lines.push(c.jin(`reasoning (${m.reasoningKind ?? "?"})`));
+    lines.push(...indent(m.reasoning).map((l) => c.faint(c.italic(l))));
+    lines.push("");
+  }
+  lines.push(c.jin("content"));
+  lines.push(...(m.content ? indent(m.content).map((l) => c.ink(l)) : [c.faint("    (empty)")]));
+  if (m.role === "assistant" && m.toolCalls.length > 0) {
+    lines.push("");
+    lines.push(c.jin(`tool calls ${m.toolCalls.length}`));
+    for (const tc of m.toolCalls)
+      lines.push(c.soft(`    ⚙ ${tc.name} ${JSON.stringify(tc.args)}  ${c.faint(tc.id)}`));
+  }
+  if (m.role === "assistant" && m.opaque !== undefined) {
+    lines.push("");
+    lines.push(
+      c.faint(`opaque: ${(m.opaque as { kind?: string }).kind ?? "?"} · echoed back verbatim`),
+    );
+  }
+  return lines;
+}
+
 // ---------- 组件 ----------
 
-type Mode = "list" | "detail" | "events" | "event" | "compactions" | "compaction";
+type Mode =
+  | "list"
+  | "detail"
+  | "events"
+  | "event"
+  | "compactions"
+  | "compaction"
+  | "composition"
+  | "message";
 
 export class RequestInspector implements Component {
   private mode: Mode = "list";
@@ -861,6 +954,19 @@ export class RequestInspector implements Component {
     this.mode = "compactions";
     this.scroll = 0;
     this.compactionSelected = Math.max(0, this.compactions().length - 1);
+  }
+
+  private messageSelected = 0;
+
+  /** 直接进入组装视图(Ctrl+E / /context)。 */
+  showComposition(): void {
+    this.mode = "composition";
+    this.scroll = 0;
+    this.messageSelected = Math.max(0, this.composition().rows.length - 1);
+  }
+
+  composition(): ReturnType<typeof compositionRows> {
+    return compositionRows(this.events(), this.deps.currentProvider?.());
   }
 
   get isDetail(): boolean {
@@ -1000,12 +1106,50 @@ export class RequestInspector implements Component {
           this.scroll = 0;
         }
         break;
-      case "compactions":
+      case "composition": {
+        const rows = this.composition().rows;
         if (matchesKey(data, Key.escape) || data === "q") this.deps.onClose();
         else if (tab) {
           this.mode = "list";
           this.scroll = 0;
         } else if (data === "s") this.switchSession();
+        else if (matchesKey(data, Key.up) || data === "k")
+          this.messageSelected = clampSel(this.messageSelected - 1, rows.length);
+        else if (matchesKey(data, Key.down) || data === "j")
+          this.messageSelected = clampSel(this.messageSelected + 1, rows.length);
+        else if (matchesKey(data, Key.pageUp))
+          this.messageSelected = clampSel(this.messageSelected - page, rows.length);
+        else if (matchesKey(data, Key.pageDown))
+          this.messageSelected = clampSel(this.messageSelected + page, rows.length);
+        else if (matchesKey(data, Key.home) || data === "g") this.messageSelected = 0;
+        else if (matchesKey(data, Key.end) || data === "G")
+          this.messageSelected = Math.max(0, rows.length - 1);
+        else if (matchesKey(data, Key.enter) && rows.length > 0) {
+          this.mode = "message";
+          this.scroll = 0;
+        }
+        break;
+      }
+      case "message": {
+        const rows = this.composition().rows;
+        if (matchesKey(data, Key.escape) || data === "q") {
+          this.mode = "composition";
+          this.scroll = 0;
+        } else if (scrollKeys()) {
+          // 已处理
+        } else if (data === "[" || data === "]") {
+          this.messageSelected = clampSel(
+            this.messageSelected + (data === "]" ? 1 : -1),
+            rows.length,
+          );
+          this.scroll = 0;
+        }
+        break;
+      }
+      case "compactions":
+        if (matchesKey(data, Key.escape) || data === "q") this.deps.onClose();
+        else if (tab) this.showComposition();
+        else if (data === "s") this.switchSession();
         else if (matchesKey(data, Key.up) || data === "k")
           this.compactionSelected = clampSel(this.compactionSelected - 1, comps.length);
         else if (matchesKey(data, Key.down) || data === "j")
@@ -1201,7 +1345,7 @@ export class RequestInspector implements Component {
       const head = withSession([pad(title), pad(columns), pad(rule)]);
       const foot = [
         pad(rule),
-        pad(c.faint("↑↓ 选择 · Enter 对照详情 · Tab 请求视图 · s 切会话 · Esc 关闭")),
+        pad(c.faint("↑↓ 选择 · Enter 对照详情 · Tab 组装视图 · s 切会话 · Esc 关闭")),
       ];
       const viewport = rows - head.length - foot.length;
       this.lastViewport = viewport;
@@ -1215,6 +1359,60 @@ export class RequestInspector implements Component {
           .map((r, i) => pad(compactionRow(r, start + i === this.compactionSelected)));
       }
       return [...head, ...fill(body, viewport), ...foot];
+    }
+
+    if (this.mode === "composition") {
+      const { rows: crows, omitted } = this.composition();
+      const total = crows.reduce((s, r) => s + messageTokens(r.message), 0);
+      const title = `${c.bold(c.jin("Context"))}  ${c.soft(`${crows.length} messages · ≈${total} tok`)}  ${c.faint("what the model sees on the next request · event # is what /edit and /drop take · Tab: requests")}`;
+      const columns = c.faint(
+        "    #  event wire  role            tokens  stages                 preview",
+      );
+      const om =
+        omitted.length > 0
+          ? c.faint(
+              `  omitted: ${omitted.filter((o) => o.reason === "covered").length} covered by the summary · ${omitted.filter((o) => o.reason === "dropped").length} dropped`,
+            )
+          : c.faint("  nothing omitted");
+      const head = withSession([pad(title), pad(columns), pad(rule)]);
+      const foot = [
+        pad(rule),
+        pad(om),
+        pad(c.faint("↑↓ select · Enter message · Tab requests · s session · Esc close")),
+      ];
+      const viewport = rows - head.length - foot.length;
+      this.lastViewport = viewport;
+      let body: string[];
+      if (crows.length === 0) body = [pad(c.faint("no messages yet"))];
+      else {
+        const start = windowStart(this.messageSelected, crows.length, viewport);
+        body = crows
+          .slice(start, start + viewport)
+          .map((r, i) => pad(compositionRow(r, start + i === this.messageSelected)));
+      }
+      return [...head, ...fill(body, viewport), ...foot];
+    }
+
+    if (this.mode === "message") {
+      const { rows: crows } = this.composition();
+      const r = crows[this.messageSelected];
+      if (!r) {
+        this.mode = "composition";
+        return this.render(width);
+      }
+      const title = `${c.bold(c.jin(`Message #${r.i}`))}  ${c.ink(roleLabel(r.message))}  ${c.faint(`event #${r.event}`)}  ${c.faint(`(${this.messageSelected + 1}/${crows.length})`)}`;
+      const head = [pad(title), pad(rule)];
+      const content = this.cached(cacheKey(`message:${r.event}:${r.i}`), () =>
+        compositionLines(events, r).flatMap((l) => wrapTextWithAnsi(l, inner)),
+      );
+      return this.scrollable(
+        head,
+        content,
+        "↑↓ scroll · PgUp/PgDn page · [ ] prev/next message · Esc back",
+        rows,
+        pad,
+        rule,
+      );
     }
 
     if (this.mode === "compaction") {

@@ -241,6 +241,8 @@ describe("请求检视器(Q49)", () => {
     insp.handleInput("\t"); // 事件视图 → 压缩对照 → 请求视图
     expect(insp.currentMode).toBe("compactions");
     insp.handleInput("\t");
+    expect(insp.currentMode).toBe("composition"); // 第四视图:组装(Q81)
+    insp.handleInput("	");
     expect(insp.currentMode).toBe("list");
   });
 

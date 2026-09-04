@@ -91,65 +91,125 @@ export function compactionState(events: readonly AgentEvent[]): {
  * 被清除的工具结果换成占位文本(Q31/Q32)。
  */
 export function deriveMessages(events: readonly AgentEvent[]): Message[] {
+  return composeContext(events).messages;
+}
+
+/**
+ * 一条消息的来历(Q81):它来自哪个事件,经过了哪些组装阶段。
+ * stages 用固定词:summary(压缩摘要合成)、covered(原文被摘要取代,不出现)、cleared(工具结果换占位)、
+ * edited:<字段>(context/edit 改过)、dropped(context/drop 丢弃,不出现)。
+ */
+export type Provenance = {
+  /** 来源事件下标;摘要消息指向 compaction 事件。 */
+  event: number;
+  stages: string[];
+};
+
+export type Composition = {
+  messages: Message[];
+  /** 与 messages 一一对应。 */
+  provenance: Provenance[];
+  /** 没进投影的事件下标与原因(covered / dropped),给组装视图列"少了什么"。 */
+  omitted: { event: number; reason: "covered" | "dropped" }[];
+};
+
+/**
+ * 上下文组装(Q81):事件数组 → 模型可见的消息序列,带每条的来历。
+ * 阶段固定且逐条可见:投影(事件→消息)→ 压缩(覆盖区跳过、切点注入摘要、清除占位)→ 编辑(换字段、丢弃)。
+ * 纯函数,同一日志永远同一结果;deriveMessages 只是它的 messages 一列。
+ */
+export function composeContext(events: readonly AgentEvent[]): Composition {
   const c = compactionState(events);
   const ed = editState(events);
   const messages: Message[] = [];
+  const provenance: Provenance[] = [];
+  const omitted: Composition["omitted"] = [];
+  const summaryEvent = events.findIndex(
+    (e) => e.type === "compaction" && e.summary !== undefined && e.coversUpTo === c.coversUpTo,
+  );
+  const push = (m: Message, event: number, stages: string[]) => {
+    messages.push(m);
+    provenance.push({ event, stages });
+  };
   for (let i = 0; i < events.length; i++) {
     if (c.summary && i === c.coversFrom) {
       // 摘要是合成的消息,它改变了此后所有消息的前缀:与编辑同等对待(Q76),
       // Anthropic 适配器据此不再回传之后的思考块(签名绑定前缀,否则新账号 400)。
-      messages.push({
-        role: "user",
-        content: `[会话前段已压缩,以下为摘要]\n${c.summary}`,
-        edited: true,
-      });
+      push(
+        { role: "user", content: `[会话前段已压缩,以下为摘要]\n${c.summary}`, edited: true },
+        summaryEvent,
+        [`summary(covers #${c.coversFrom}–#${c.coversUpTo - 1})`],
+      );
     }
-    if (c.summary && i >= c.coversFrom && i < c.coversUpTo) continue;
-    if (ed.dropped.has(i)) continue;
     const e = events[i];
     if (!e) continue;
+    if (c.summary && i >= c.coversFrom && i < c.coversUpTo) {
+      if (isProjected(e)) omitted.push({ event: i, reason: "covered" });
+      continue;
+    }
+    if (ed.dropped.has(i)) {
+      if (isProjected(e)) omitted.push({ event: i, reason: "dropped" });
+      continue;
+    }
     const edit = ed.edits.get(i);
+    const editedStages = Object.keys(edit ?? {}).map((f) => `edited:${f}`);
     switch (e.type) {
       case "session/start":
-        messages.push({
-          role: "system",
-          content: edit?.system ?? e.system,
-          ...(edit?.system !== undefined && { edited: true }),
-        });
+        push(
+          {
+            role: "system",
+            content: edit?.system ?? e.system,
+            ...(edit?.system !== undefined && { edited: true }),
+          },
+          i,
+          editedStages,
+        );
         break;
       case "user/message":
-        messages.push({
-          role: "user",
-          content: edit?.content ?? e.text,
-          ...(edit?.content !== undefined && { edited: true }),
-        });
+        push(
+          {
+            role: "user",
+            content: edit?.content ?? e.text,
+            ...(edit?.content !== undefined && { edited: true }),
+          },
+          i,
+          editedStages,
+        );
         break;
       case "assistant/message": {
         const edited = edit?.text !== undefined || edit?.reasoning !== undefined;
         const reasoning = edit?.reasoning ?? e.reasoning;
-        messages.push({
-          role: "assistant",
-          content: edit?.text ?? e.text,
-          toolCalls: e.toolCalls,
-          ...(reasoning && { reasoning }),
-          ...(e.reasoningKind && { reasoningKind: e.reasoningKind }),
-          // 改过的消息不带回传物:签名或密文与改后的内容不再对应,发回去只会被拒。
-          ...(!edited && e.opaque !== undefined && { opaque: e.opaque }),
-          ...(edited && { edited: true }),
-        });
+        push(
+          {
+            role: "assistant",
+            content: edit?.text ?? e.text,
+            toolCalls: e.toolCalls,
+            ...(reasoning && { reasoning }),
+            ...(e.reasoningKind && { reasoningKind: e.reasoningKind }),
+            // 改过的消息不带回传物:签名或密文与改后的内容不再对应,发回去只会被拒。
+            ...(!edited && e.opaque !== undefined && { opaque: e.opaque }),
+            ...(edited && { edited: true }),
+          },
+          i,
+          [...editedStages, ...(edited && e.opaque !== undefined ? ["opaque-dropped"] : [])],
+        );
         break;
       }
       case "tool/result": {
         // 被清除换成占位文本,同样是改了前缀。
         const cleared = c.cleared.has(i);
-        messages.push({
-          role: "tool",
-          callId: e.callId,
-          name: e.name,
-          content: cleared ? CLEARED_PLACEHOLDER : (edit?.content ?? e.content),
-          isError: e.isError,
-          ...((cleared || edit?.content !== undefined) && { edited: true }),
-        });
+        push(
+          {
+            role: "tool",
+            callId: e.callId,
+            name: e.name,
+            content: cleared ? CLEARED_PLACEHOLDER : (edit?.content ?? e.content),
+            isError: e.isError,
+            ...((cleared || edit?.content !== undefined) && { edited: true }),
+          },
+          i,
+          [...(cleared ? ["cleared"] : []), ...editedStages],
+        );
         break;
       }
       case "session/interrupt":
@@ -165,5 +225,14 @@ export function deriveMessages(events: readonly AgentEvent[]): Message[] {
         break;
     }
   }
-  return messages;
+  return { messages, provenance, omitted };
+}
+
+function isProjected(e: AgentEvent): boolean {
+  return (
+    e.type === "session/start" ||
+    e.type === "user/message" ||
+    e.type === "assistant/message" ||
+    e.type === "tool/result"
+  );
 }

@@ -279,9 +279,12 @@ export function toAnthropicWire(
 ): {
   system: WireSystem | undefined;
   messages: { role: "user" | "assistant"; content: WireBlock[] }[];
+  /** 投影下标 → wire 消息下标;system 为 -1(抽到顶层),合并进同一条 user 的工具结果共用下标。 */
+  map: number[];
 } {
   let systemText: string | undefined;
   const out: { role: "user" | "assistant"; content: WireBlock[] }[] = [];
+  const map: number[] = [];
   // 思考块的签名绑定它之前的整个前缀(Q74):前面任何一条消息被改过,后面的思考块就都不再回传。
   let prefixEdited = false;
   // 第一条改过的消息之前的那条 wire 消息下标:编辑点断点挂在它上面(Q76)。
@@ -292,11 +295,14 @@ export function toAnthropicWire(
     switch (m.role) {
       case "system":
         systemText = systemText ? `${systemText}\n\n${m.content}` : m.content;
+        map.push(-1);
         break;
       case "user":
+        map.push(out.length);
         out.push({ role: "user", content: [{ type: "text", text: m.content || "(空)" }] });
         break;
       case "assistant": {
+        map.push(out.length);
         const content: WireBlock[] = [];
         if (
           !prefixEdited &&
@@ -324,7 +330,9 @@ export function toAnthropicWire(
         const last = out.at(-1);
         if (last?.role === "user" && last.content.every((b) => b.type === "tool_result")) {
           last.content.push(block);
+          map.push(out.length - 1);
         } else {
+          map.push(out.length);
           out.push({ role: "user", content: [block] });
         }
         break;
@@ -350,7 +358,7 @@ export function toAnthropicWire(
     if (editBoundary >= 0 && editBoundary < out.length - 1) markLast(out[editBoundary]);
     markLast(out.at(-1));
   }
-  return { system, messages: out };
+  return { system, messages: out, map };
 }
 
 /** adaptive:4.7+ 与 5 系,effort 直传;budget:4.6 及更早,按级别给 budget_tokens。 */
@@ -434,6 +442,7 @@ export function anthropic(opts: AnthropicOptions): Provider {
     model: opts.model,
     fields: ANTHROPIC_FIELDS,
     wire,
+    wireMap: (messages) => toAnthropicWire(messages, { model: opts.model }).map,
     listModels: () => fetchModelIds(`${baseUrl}/v1/models`, headers),
     async complete(
       messages: Message[],

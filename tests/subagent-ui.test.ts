@@ -295,6 +295,8 @@ describe("压缩对照(Q63)", () => {
     insp.handleInput("\x1b");
     expect(insp.currentMode).toBe("compactions");
     insp.handleInput("\t");
+    expect(insp.currentMode).toBe("composition"); // 第四视图:组装(Q81)
+    insp.handleInput("	");
     expect(insp.currentMode).toBe("list");
   });
 });

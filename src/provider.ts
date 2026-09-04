@@ -92,6 +92,11 @@ export interface Provider {
    * 检视器用它把"模型到底收到了什么"展示到 wire 层;不实现的 provider 只能看到内核层的消息投影。
    */
   wire?(messages: Message[], tools: ToolDef[], opts?: WireOptions): unknown;
+  /**
+   * 投影下标 → 线路正文里的下标(Q81):第 i 条消息落在 wire 消息数组的第几条;-1 = 不在数组里(如抽到顶层的 system)。
+   * Anthropic 合并连续工具结果、Responses 把一条助手消息拆成几项,组装视图据此标每条"落在哪"。
+   */
+  wireMap?(messages: Message[]): number[];
   /** 向供应商查询当前可用的模型名(GET /models)。发现模型下线与新模型靠这个,不靠猜(Q59)。 */
   listModels?(): Promise<string[]>;
 }
@@ -382,6 +387,8 @@ export function openaiCompat(opts: OpenAICompatOptions): Provider {
     model: opts.model,
     fields: OPENAI_COMPAT_FIELDS,
     wire,
+    // chat completions 一条投影消息就是一条 wire 消息,顺序不变。
+    wireMap: (messages) => messages.map((_, i) => i),
     listModels: () => fetchModelIds(`${baseUrl}/models`, headers),
     async complete(messages, tools, { onDelta, onReasoning, signal, onRetry, onRaw, effort } = {}) {
       const body = wire(messages, tools, effort ? { effort } : {});

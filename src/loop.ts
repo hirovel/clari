@@ -64,6 +64,11 @@ export type TurnDeps = {
     steering?: SteeringPolicy;
     approve?: ApprovePolicy;
     execution?: ExecutionPolicy;
+    /**
+     * 组装槽(Q81):事件数组 → 发给模型的消息。缺省就是 deriveMessages;给了就用它的结果发请求,
+     * 差异部分记进 request.body(前缀投影 + 尾部),检视器仍能逐字节重建。扩展可在末尾追加一条提醒之类。
+     */
+    assemble?: (events: readonly AgentEvent[]) => Message[];
   };
   /** 排空留言队列,返回待注入的用户消息。注入时点由 steering 决定(Q20);边界告诉队列该放哪些。 */
   drainQueue?: (boundary: "step" | "turn") => string[];
@@ -202,7 +207,10 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
     }
 
     // 请求事件(Q48):正文不落盘,它就是此刻的投影;记下规模与口径,检视器按需原样重建。
-    const messages = deriveMessages(log.events);
+    // 组装槽换了投影时(Q81),差异部分记进 body,重建仍然逐字节。
+    const assemble = deps.slots?.assemble;
+    const messages = assemble ? assemble(log.events) : deriveMessages(log.events);
+    const body = assemble ? describeRequestBody(log.events, messages) : undefined;
     const cfg = deps.compaction;
     const effort = typeof deps.effort === "function" ? deps.effort() : deps.effort;
     log.append({
@@ -215,6 +223,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
       ...(cfg && { threshold: compactionThreshold(cfg.window, cfg.reserveTokens) }),
       reason: overflowRecovered ? "overflow-retry" : "turn",
       ...(effort && { effort }),
+      ...(body && (body.tail.length > 0 || body.prefixEvents !== log.events.length) && { body }),
     });
     const startedAt = Date.now();
 

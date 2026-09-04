@@ -252,12 +252,16 @@ type InputItem =
 export function toResponsesInput(
   messages: Message[],
   opts: { model?: string } = {},
-): { instructions: string | undefined; input: InputItem[] } {
+): { instructions: string | undefined; input: InputItem[]; map: number[] } {
   let instructions: string | undefined;
   const input: InputItem[] = [];
+  /** 投影下标 → input 项下标(助手消息指向它产出的第一项);system 为 -1(抽到 instructions)。 */
+  const map: number[] = [];
   // 模型族 = 名字里的主版本:gpt-5.5 与 gpt-5.6 同族,gpt-6 不同族。
   const family = (m: string) => m.match(/^[a-z]+-?\d+/i)?.[0].toLowerCase() ?? m;
   for (const m of messages) {
+    if (m.role === "system") map.push(-1);
+    else map.push(input.length);
     switch (m.role) {
       case "system":
         instructions = instructions ? `${instructions}\n\n${m.content}` : m.content;
@@ -298,7 +302,7 @@ export function toResponsesInput(
         break;
     }
   }
-  return { instructions, input };
+  return { instructions, input, map };
 }
 
 export type ReasoningSummary = "auto" | "concise" | "detailed";
@@ -382,6 +386,7 @@ export function openaiResponses(opts: OpenAIResponsesOptions): Provider {
     model: opts.model,
     fields: OPENAI_RESPONSES_FIELDS,
     wire,
+    wireMap: (messages) => toResponsesInput(messages, { model: opts.model }).map,
     listModels: () => fetchModelIds(`${baseUrl}/models`, headers),
     async complete(messages, tools, { onDelta, onReasoning, signal, onRetry, onRaw, effort } = {}) {
       const body = wire(messages, tools, effort ? { effort } : {});

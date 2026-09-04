@@ -139,6 +139,8 @@ export type TuiApp = {
     openEvents(): void;
     /** 直接进入压缩对照。 */
     openCompactions(): void;
+    /** 直接进入组装视图(Ctrl+E)。 */
+    openComposition(): void;
     close(): void;
     isOpen(): boolean;
     key(data: string): void;
@@ -165,6 +167,11 @@ const COMMANDS = [
   { name: "inspect", description: "请求检视器:每次 API 请求的发送、接收、决策与写入(Ctrl+R)" },
   { name: "events", description: "事件视图:内核维护的全部事件数组,逐条原样 JSON(检视器内 Tab)" },
   { name: "compactions", description: "压缩对照:每次压缩把哪一大段原文变成了什么摘要" },
+  {
+    name: "composition",
+    description:
+      "Context composition (Ctrl+E): every message the model sees next, its source event, stages, wire index",
+  },
   { name: "context", description: "上下文构成:各部分 token 与占比" },
   { name: "prompt", description: "系统提示词由哪几段组成、各占多少、放在哪(Q66)" },
   {
@@ -916,6 +923,11 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
         inspector.showCompactions();
         tui.requestRender();
         break;
+      case "composition":
+        openInspector();
+        inspector.showComposition();
+        tui.requestRender();
+        break;
       case "context":
         note(renderContext());
         break;
@@ -1560,6 +1572,13 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       else openInspector();
       return { consume: true };
     }
+    if (matchesKey(data, Key.ctrl("e"))) {
+      // Ctrl+E:组装视图(Q81),模型下一步会看到的每条消息从哪来、落在线路的第几条。
+      if (!overlay) openInspector();
+      inspector.showComposition();
+      tui.requestRender();
+      return { consume: true };
+    }
     if (overlay || approval) return undefined; // 检视器或审批提示打开时,其余按键归它们
     if (matchesKey(data, Key.alt("enter"))) {
       // 后续留言:不打断当前步,等模型不再调工具时才给它。空闲时与普通提交等价。
@@ -1610,6 +1629,10 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       openCompactions: () => {
         openInspector();
         inspector.showCompactions();
+      },
+      openComposition: () => {
+        openInspector();
+        inspector.showComposition();
       },
       close: closeInspector,
       isOpen: () => overlay !== undefined,
