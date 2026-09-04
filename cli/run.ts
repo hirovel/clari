@@ -3,6 +3,7 @@
 //                 [--max-steps N] [--resume 文件 | --continue] [--system-prompt 文件] [--append-system-prompt 文件]
 // stdout:最终回复文本;--json 时输出结构化结果。非零退出码 = 请求失败。
 import { Agent } from "../src/agent.js";
+import { policyApprove } from "../src/approval.js";
 import { usageTotals } from "../src/cost.js";
 import type { AgentEvent } from "../src/events.js";
 import { maxSteps } from "../src/loop.js";
@@ -15,6 +16,7 @@ import {
   loadExtensions,
   memoryFiles,
   parseCommonArgs,
+  resolveApproval,
   sessionsDir,
   USAGE,
 } from "./bootstrap.js";
@@ -78,6 +80,7 @@ const tools = [
   ...(ext.tools ?? []),
 ];
 
+const approvalCfg = resolveApproval(args, boot.config);
 const agent = new Agent({
   log,
   provider: choice.provider,
@@ -87,7 +90,13 @@ const agent = new Agent({
   slots: {
     ...ext.slots,
     ...(args.maxSteps && { termination: maxSteps(args.maxSteps) }),
-    ...(args.approve === "ask" && { approve: () => false }),
+    ...(args.approve === "ask" && {
+      approve: () => ({
+        allowed: false,
+        reason: "one-shot mode with --approve ask; no one to ask",
+      }),
+    }),
+    ...(typeof approvalCfg === "object" && { approve: policyApprove(approvalCfg, undefined) }),
     ...(args.execution && { execution: args.execution }),
   },
   ...(args.effort && { effort: args.effort }),

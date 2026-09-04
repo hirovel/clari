@@ -213,6 +213,7 @@ export function composeContext(events: readonly AgentEvent[]): Composition {
         break;
       }
       case "session/interrupt":
+      case "session/recovered":
       case "session/model":
       case "session/slot":
       case "compaction":

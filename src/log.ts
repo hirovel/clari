@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { AgentEvent } from "./events.js";
 
@@ -50,14 +50,33 @@ export class EventLog {
     const log = opts.attach ? new EventLog(filePath) : new EventLog();
     const raw = readFileSync(filePath, "utf8");
     const lines = raw.split("\n");
+    let lastIndex = -1;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if ((lines[i] ?? "").trim().length > 0) {
+        lastIndex = i;
+        break;
+      }
+    }
     for (let i = 0; i < lines.length; i++) {
       const trimmed = lines[i]?.trim();
       if (!trimmed) continue;
       try {
         log.events.push(JSON.parse(trimmed) as AgentEvent);
       } catch (err) {
-        // 损坏的行要能定位。历史是唯一真相,静默跳过等于篡改。
-        throw new Error(`corrupt event log ${filePath}:${i + 1}: ${(err as Error).message}`);
+        // 中间的坏行要能定位并报错:历史是唯一真相,静默跳过等于篡改。
+        if (i !== lastIndex) {
+          throw new Error(`corrupt event log ${filePath}:${i + 1}: ${(err as Error).message}`);
+        }
+        // 末尾的半行是崩溃留下的(写到一半被杀),截掉它并记一条事件,会话照常继续。
+        const good = lines.slice(0, i).join("\n");
+        if (opts.attach)
+          writeFileSync(filePath, good.endsWith("\n") || good === "" ? good : `${good}\n`);
+        log.append({
+          type: "session/recovered",
+          at: new Date().toISOString(),
+          droppedBytes: Buffer.byteLength(lines[i] ?? "", "utf8"),
+          preview: trimmed.slice(0, 80),
+        });
       }
     }
     return log;

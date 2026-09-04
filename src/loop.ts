@@ -1,3 +1,4 @@
+import type { ApproveDecision } from "./approval.js";
 import {
   type CompactionStrategy,
   contextTokens,
@@ -38,8 +39,8 @@ export const steer: SteeringPolicy = () => true;
 /** Codex 谱系:只在 turn 结束时投递。 */
 export const queueToTurnEnd: SteeringPolicy = (boundary) => boundary === "turn";
 
-/** 审批策略(Q23):执行每个工具调用前询问。false = 拒绝,以错误结果回喂。 */
-export type ApprovePolicy = (call: ToolCall) => boolean | Promise<boolean>;
+/** 审批策略(Q23/Q84):执行每个工具调用前询问。false 或 {allowed:false} = 拒绝,以错误结果回喂,理由原样带上。 */
+export type ApprovePolicy = (call: ToolCall) => ApproveDecision | Promise<ApproveDecision>;
 
 /** pi 立场:不弹确认,要隔离就跑容器(默认)。 */
 export const allowAll: ApprovePolicy = () => true;
@@ -400,7 +401,15 @@ async function executeCalls(
   const prepare = async (call: ToolCall): Promise<Prepared> => {
     const tool = ctx.tools.find((t) => t.name === call.name);
     if (!tool) return { call, immediate: `未知工具 "${call.name}"。` };
-    if (!(await ctx.approve(call))) return { call, immediate: "The user denied this call." };
+    const decision = await ctx.approve(call);
+    const allowed = typeof decision === "boolean" ? decision : decision.allowed;
+    if (!allowed) {
+      const reason = typeof decision === "object" ? decision.reason : undefined;
+      return {
+        call,
+        immediate: reason ? `The user denied this call: ${reason}` : "The user denied this call.",
+      };
+    }
     const checked = validateArgs(tool.parameters, call.args);
     if (!checked.ok) return { call, immediate: checked.error };
     return { call, tool, args: checked.value };

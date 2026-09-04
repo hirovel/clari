@@ -19,12 +19,20 @@ import {
   TuiMainScreen,
 } from "@earendil-works/pi-tui";
 import { Agent, type DeliverAs } from "../src/agent.js";
+import {
+  type ApprovalConfig,
+  type ApproveDecision,
+  DEFAULT_APPROVAL,
+  describeApproval,
+  policyApprove,
+} from "../src/approval.js";
 import { keepRatio, keepRecentTokens } from "../src/compaction.js";
 import { contextBreakdown } from "../src/context.js";
 import { fmtCost, type Price, usageTotals } from "../src/cost.js";
 import { type AgentEvent, now, type ToolCall } from "../src/events.js";
 import type { EventLog } from "../src/log.js";
 import {
+  type ApprovePolicy,
   allowAll,
   type CompactionConfig,
   compactionThreshold,
@@ -124,8 +132,11 @@ export type TuiAppDeps = {
   effortLevels?: EffortLevel[];
   /** 起始模型的价格(配置里给了才有)。 */
   price?: Price;
-  /** 审批槽的界面实现(Q64):ask = 每个工具调用弹一行确认;缺省 all 不问。 */
-  approve?: "all" | "ask";
+  /**
+   * 审批槽的界面实现(Q64/Q84):all = 不问(缺省,库调用方自己负责);ask = 每个调用都问;
+   * 规则对象 = 按规则裁决,ask 的才弹提示。入口缺省传内置规则。
+   */
+  approve?: "all" | "ask" | ApprovalConfig;
   /** 跨会话记忆已打开时的两个文件(Q65),供 /memory 看与删。 */
   memory?: MemoryFiles;
   /** 启动时的压缩策略名(llm / clear / pipeline / 模块路径),/slots 显示用;缺省 llm。 */
@@ -167,6 +178,8 @@ export type TuiApp = {
   children(): ChildInfo[];
   /** 正在等待回答的审批提示的渲染行;没有时为空。离线验证用(覆盖层不在 lines() 里)。 */
   approvalLines(): string[];
+  /** 把按键送给正在等待的审批提示(离线验证用)。 */
+  approvalInput(data: string): void;
   toggleFold(): void;
   toggleReasoning(): void;
   stop(): void;
@@ -259,7 +272,11 @@ const COMMANDS = [
   },
   { name: "execution", description: "Tool execution: /execution sequential|parallel" },
   { name: "steering", description: "When queued messages are injected: /steering step|turn" },
-  { name: "approve", description: "Tool approval: /approve all|ask" },
+  {
+    name: "approve",
+    description:
+      "Tool approval: /approve all|ask|policy · allow <rule> · deny <rule> · forget <rule> · outside ask|allow|deny",
+  },
   {
     name: "model",
     description: "Switch model: /model provider/model; without arguments lists the options",
@@ -401,30 +418,62 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
   const skills = deps.skills ?? [];
   let approval: OverlayHandle | undefined;
   let approvalPrompt: ApprovalPrompt | undefined;
-  const askApproval = (call: ToolCall): Promise<boolean> => {
+  const askApproval = (call: ToolCall, why = "asked for every call"): Promise<ApproveDecision> => {
     if (alwaysAllow.has(call.name) || skillAllow.has(call.name)) return Promise.resolve(true);
     return new Promise((resolve) => {
-      const prompt = new ApprovalPrompt(call, (decision) => {
-        approval?.hide();
-        approval = undefined;
-        approvalPrompt = undefined;
-        tui.setFocus(editor);
-        if (decision === "a") alwaysAllow.add(call.name);
-        const allowed = decision !== "n";
-        note(
-          allowed
-            ? c.faint(
-                `· approve: allowed ${call.name}${decision === "a" ? " (not asked again this session)" : ""}`,
-              )
-            : c.zhu(`· approve: denied ${call.name}`),
-        );
-        resolve(allowed);
-      });
+      const prompt = new ApprovalPrompt(
+        call,
+        why,
+        (decision) => {
+          approval?.hide();
+          approval = undefined;
+          approvalPrompt = undefined;
+          tui.setFocus(editor);
+          if (decision.kind === "a") {
+            alwaysAllow.add(call.name);
+            // 同时写进规则,/approve 能看到本会话放行了什么。
+            approvalCfg.allow = approvalCfg.allow ?? [];
+            if (!approvalCfg.allow.includes(call.name)) approvalCfg.allow.push(call.name);
+          }
+          const allowed = decision.kind !== "n";
+          note(
+            allowed
+              ? c.faint(
+                  `· approve: allowed ${call.name}${decision.kind === "a" ? " (not asked again this session)" : ""}`,
+                )
+              : c.zhu(
+                  `· approve: denied ${call.name}${decision.reason ? `: ${decision.reason}` : ""}`,
+                ),
+          );
+          resolve(
+            allowed
+              ? true
+              : { allowed: false, ...(decision.reason && { reason: decision.reason }) },
+          );
+        },
+        () => tui.requestRender(),
+      );
       approvalPrompt = prompt;
       approval = tui.showOverlay(prompt, { width: "100%", anchor: "bottom-left" });
       tui.requestRender();
     });
   };
+
+  // 审批槽的三种形态(Q84):all 不问;ask 每个调用都问;policy 按规则裁决,ask 的才问。
+  // /approve 改的是同一个规则对象,策略实现闭包引用它,改完即生效。
+  const approvalCfg: ApprovalConfig = structuredClone(
+    typeof deps.approve === "object" ? deps.approve : DEFAULT_APPROVAL,
+  );
+  let approveMode: "all" | "ask" | "policy" =
+    deps.approve === undefined ? "all" : typeof deps.approve === "string" ? deps.approve : "policy";
+  const approveImpl = (): ApprovePolicy =>
+    approveMode === "all"
+      ? allowAll
+      : approveMode === "ask"
+        ? (call) => askApproval(call)
+        : policyApprove(approvalCfg, askApproval);
+  const approveValue = (): string =>
+    approveMode === "policy" ? `policy: ${describeApproval(approvalCfg)}` : approveMode;
 
   const agent = new Agent({
     log,
@@ -433,7 +482,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     compaction,
     onRaw,
     ...(deps.effort && { effort: deps.effort }),
-    slots: { ...deps.slots, ...(deps.approve === "ask" && { approve: askApproval }) },
+    slots: { ...deps.slots, ...(approveMode !== "all" && { approve: approveImpl() }) },
     onDelta: (d) => {
       if (!streaming) {
         // 回复正文:一行 reply 标签,正文缩进到标签沟的内容列,Markdown 照常渲染。
@@ -918,6 +967,13 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       case "session/slot":
         // 恢复会话时把历史切换也画出来;当前会话里 slotCommand 已经打过确认行,这里只补状态。
         slotState[e.slot] = e.value;
+        break;
+      case "session/recovered":
+        note(
+          c.jin(
+            `◇ recovered: dropped ${e.droppedBytes} bytes of a half-written line at the end of the log (the process died mid-write)`,
+          ),
+        );
         break;
       case "session/interrupt":
       case "session/start":
@@ -1590,7 +1646,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     preservation: "keepRecentTokens (min(20000, window/4))",
     execution: deps.slots?.execution ?? "sequential",
     steering: deps.slots?.steering ? "custom" : "step",
-    approve: deps.approve ?? "all",
+    approve: approveValue(),
   };
   function recordSlot(slot: string, value: string): void {
     slotState[slot] = value;
@@ -1656,11 +1712,53 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
         return done(v);
       }
       case "approve": {
-        if (v !== "all" && v !== "ask")
-          return c.faint(`approve is ${slotState.approve}. Usage: /approve all|ask`);
-        agent.setSlot("approve", v === "ask" ? askApproval : allowAll);
-        recordSlot("approve", v);
-        return done(v);
+        const [sub = "", ...restRule] = v.split(/\s+/);
+        const rule = restRule.join(" ").trim();
+        const show = () =>
+          [
+            `${c.soft("approve")} ${c.ink(approveMode)}${approveMode === "policy" ? `  ${c.faint(describeApproval(approvalCfg))}` : ""}`,
+            c.faint(
+              "Usage: /approve all|ask|policy · /approve allow <rule> · /approve deny <rule> · /approve forget <rule> · /approve outside ask|allow|deny",
+            ),
+            c.faint(
+              "rule = tool or tool:pattern; bash patterns match the command (bash:git *), path tools match the path (edit:src/**)",
+            ),
+          ].join("\n");
+        if (!sub) return show();
+        if (sub === "all" || sub === "ask" || sub === "policy") {
+          approveMode = sub;
+          agent.setSlot("approve", approveImpl());
+          recordSlot("approve", approveValue());
+          return done(sub, "applies to the next tool call");
+        }
+        if (sub === "allow" || sub === "deny") {
+          if (!rule) return c.zhu(`Usage: /approve ${sub} <rule>`);
+          approvalCfg[sub] = approvalCfg[sub] ?? [];
+          const list = approvalCfg[sub];
+          if (!list.includes(rule)) list.push(rule);
+          approveMode = "policy";
+          agent.setSlot("approve", approveImpl());
+          recordSlot("approve", approveValue());
+          return done(`${sub} ${rule}`, "applies to the next tool call");
+        }
+        if (sub === "forget") {
+          if (!rule) return c.zhu("Usage: /approve forget <rule>");
+          approvalCfg.allow = (approvalCfg.allow ?? []).filter((r) => r !== rule);
+          approvalCfg.deny = (approvalCfg.deny ?? []).filter((r) => r !== rule);
+          alwaysAllow.delete(rule);
+          recordSlot("approve", approveValue());
+          return done(`forget ${rule}`, "applies to the next tool call");
+        }
+        if (sub === "outside") {
+          if (rule !== "ask" && rule !== "allow" && rule !== "deny")
+            return c.zhu("Usage: /approve outside ask|allow|deny");
+          approvalCfg.outsideCwd = rule;
+          approveMode = "policy";
+          agent.setSlot("approve", approveImpl());
+          recordSlot("approve", approveValue());
+          return done(`outside cwd ${rule}`, "applies to the next tool call");
+        }
+        return show();
       }
       default:
         return c.zhu(`unknown slot ${slot}`);
@@ -1958,30 +2056,77 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     attachChild,
     children: () => childViews.map((v) => v.info),
     approvalLines: () => approvalPrompt?.render() ?? [],
+    approvalInput: (data) => approvalPrompt?.handleInput(data),
     toggleFold,
     toggleReasoning,
     stop,
   };
 }
 
-/** 审批提示(Q64):一行问题、一行按键说明;y / n / a,Esc 视为拒绝。 */
+type ApprovalChoice = { kind: "y" | "n" | "a"; reason?: string };
+
+/** 审批提示里最多显示的 diff 行数。 */
+const APPROVAL_DETAIL_LINES = 20;
+
+/**
+ * 审批提示(Q64/Q84):一行问题(带为什么要问)、edit/write 的 diff、一行按键说明;
+ * y / n / a,r 进入输入理由,理由原样进工具结果喂回模型;Esc 视为拒绝。
+ */
 class ApprovalPrompt implements Component {
+  private mode: "choose" | "reason" = "choose";
+  private reason = "";
+
   constructor(
     private readonly call: ToolCall,
-    private readonly onDecide: (d: "y" | "n" | "a") => void,
+    private readonly why: string,
+    private readonly onDecide: (d: ApprovalChoice) => void,
+    private readonly onChange: () => void = () => {},
   ) {}
 
   render(): string[] {
+    const head = `${c.zhu("?")} ${c.bold(c.ink("run"))} ${c.bold(c.ink(this.call.name))}  ${c.soft(formatArgs(this.call.args))}  ${c.faint(`(${this.why})`)}`;
+    const detail = toolCallDetail(this.call.name, this.call.args);
+    const all = detail ? detail.split("\n") : [];
+    const shown = all.slice(0, APPROVAL_DETAIL_LINES).map((l) => `  ${l}`);
+    if (all.length > APPROVAL_DETAIL_LINES)
+      shown.push(c.faint(`  … ${all.length - APPROVAL_DETAIL_LINES} more lines`));
+    if (this.mode === "reason") {
+      return [
+        head,
+        ...shown,
+        `${c.soft("  reason:")} ${c.ink(this.reason)}${c.faint("▏")}`,
+        c.faint("  Enter deny with this reason · Esc back"),
+      ];
+    }
     return [
-      `${c.zhu("?")} ${c.bold(c.ink("run"))} ${c.bold(c.ink(this.call.name))}  ${c.soft(formatArgs(this.call.args))}`,
-      c.faint(`  y allow · n deny · a always allow ${this.call.name} this session · Esc deny`),
+      head,
+      ...shown,
+      c.faint(
+        `  y allow · n deny · r deny with a reason · a always allow ${this.call.name} this session · Esc deny`,
+      ),
     ];
   }
 
   handleInput(data: string): void {
-    if (data === "y" || data === "Y") this.onDecide("y");
-    else if (data === "a" || data === "A") this.onDecide("a");
-    else if (data === "n" || data === "N" || matchesKey(data, Key.escape)) this.onDecide("n");
+    if (this.mode === "reason") {
+      if (matchesKey(data, Key.enter)) {
+        const reason = this.reason.trim();
+        this.onDecide({ kind: "n", ...(reason && { reason }) });
+      } else if (matchesKey(data, Key.escape)) {
+        this.mode = "choose";
+        this.reason = "";
+      } else if (data === "\x7f" || data === "\b") this.reason = this.reason.slice(0, -1);
+      else if (data.length > 0 && !data.startsWith("\x1b") && data >= " ") this.reason += data;
+      this.onChange();
+      return;
+    }
+    if (data === "y" || data === "Y") this.onDecide({ kind: "y" });
+    else if (data === "a" || data === "A") this.onDecide({ kind: "a" });
+    else if (data === "r" || data === "R") {
+      this.mode = "reason";
+      this.onChange();
+    } else if (data === "n" || data === "N" || matchesKey(data, Key.escape))
+      this.onDecide({ kind: "n" });
   }
 
   invalidate(): void {}

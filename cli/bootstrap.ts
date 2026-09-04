@@ -3,6 +3,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { type ApprovalConfig, DEFAULT_APPROVAL } from "../src/approval.js";
 import {
   type CompactionStrategy,
   clearToolResults,
@@ -73,8 +74,10 @@ export type CommonArgs = {
   maxSteps?: number;
   json: boolean;
   help: boolean;
-  /** 审批槽(Q23/Q64):all = 不弹确认(缺省,pi 立场);ask = 每个工具调用在界面里问一次。 */
-  approve: "all" | "ask";
+  /** 审批槽(Q23/Q64/Q84):policy(缺省)= 按规则裁决,ask 的才问人;ask = 每个调用都问;all = 不问。 */
+  approve: "all" | "ask" | "policy";
+  /** 预设里的审批规则(Q84);没有就用配置的,再没有就用内置缺省。 */
+  approval?: ApprovalConfig;
   /** 预设名(Q15):从配置 presets 取缺省参数;显式给的参数优先。 */
   preset?: string;
   /** 跨会话记忆(Q65):缺省关。 */
@@ -100,6 +103,15 @@ export type CommonArgs = {
   subagentExplicit?: boolean;
 };
 
+/** 审批槽的启动形态(Q84):all / ask 原样;policy = 预设规则 → 配置规则 → 内置缺省。 */
+export function resolveApproval(
+  args: CommonArgs,
+  config: KernelConfig,
+): "all" | "ask" | ApprovalConfig {
+  if (args.approve !== "policy") return args.approve;
+  return args.approval ?? config.approval ?? DEFAULT_APPROVAL;
+}
+
 export function parseCommonArgs(argv: string[]): CommonArgs {
   const out: CommonArgs = {
     compaction: "llm",
@@ -109,7 +121,7 @@ export function parseCommonArgs(argv: string[]): CommonArgs {
     continue: false,
     json: false,
     help: false,
-    approve: "all",
+    approve: "policy",
     extensions: [],
     events: false,
     rest: [],
@@ -171,7 +183,8 @@ export function parseCommonArgs(argv: string[]): CommonArgs {
         break;
       case "--approve": {
         const v = takeValue(i++, a);
-        if (v !== "all" && v !== "ask") throw new Error(`--approve accepts all or ask, got "${v}"`);
+        if (v !== "all" && v !== "ask" && v !== "policy")
+          throw new Error(`--approve accepts all, ask or policy, got "${v}"`);
         out.approve = v;
         out.approveExplicit = true;
         break;
@@ -238,9 +251,9 @@ export function parseCommonArgs(argv: string[]): CommonArgs {
 }
 
 export const USAGE = `Usage
-  pnpm tui  [-- options]               interactive UI
-  pnpm once -- "task" [options]        one-shot mode: run one turn and exit; stdout is the reply
-  pnpm replay <session.jsonl> [--request N] [--compaction N [--json]] [--messages]
+  clari [options]                      interactive UI          (from source: pnpm tui -- [options])
+  clari once "task" [options]          one-shot mode: run one turn and exit; stdout is the reply
+  clari replay <session.jsonl> [--request N] [--compaction N [--json]] [--messages]
 
 Options
   --model provider/model         default: the config's default model
@@ -248,7 +261,7 @@ Options
   --compaction llm|clear|pipeline|./strategy.mjs   default llm
   --resume <session file> | --continue   resume a session and keep appending to the same file
   --system-prompt <file> | --append-system-prompt <file>
-  --approve all|ask              ask = one-line confirmation per tool call (UI only); default all
+  --approve policy|ask|all       policy (default) = allow/deny rules from config, ask when no rule matches; ask = every call; all = never ask
   --preset name                  apply the parameter set presets.name from config; explicit flags still win
   --memory | --no-memory         cross-session memory (memory section in AGENTS.md + remember tool); default off
   --prompt-sections role,env,instructions,memory,skills,append   which system prompt sections, in which order
@@ -296,6 +309,7 @@ export function applyPreset(args: CommonArgs, config: KernelConfig): CommonArgs 
     }
     if (!args.compactionExplicit && preset.compaction) out.compaction = preset.compaction;
     if (!args.approveExplicit && preset.approve) out.approve = preset.approve;
+    if (preset.approval) out.approval = preset.approval;
     if (out.systemPromptFile === undefined && preset.systemPromptFile) {
       out.systemPromptFile = preset.systemPromptFile;
     }

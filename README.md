@@ -31,12 +31,22 @@
 
 ## 快速开始
 
+直接运行(Node 20+):
+
+```bash
+npx github:hirovel/clari
+```
+
+或从源码:
+
 ```bash
 pnpm install
 pnpm tui
 ```
 
-首次运行会生成 `~/.clari/config.json`(环境变量 `CLARI_CONFIG` 可改路径)。`pnpm tui -- --help` 列出全部选项。
+首次运行会生成 `~/.clari/config.json`(环境变量 `CLARI_CONFIG` 可改路径)。`clari --help`(源码里是 `pnpm tui -- --help`)列出全部选项。`clari once "任务"` 一次性模式,`clari replay 文件` 回放。
+
+缺省审批策略:只读工具(read / grep / glob / ls)直接执行,写文件与跑命令先问你一次,工作目录之外的路径一律问;`/approve allow bash:git *` 这类规则可以在会话里加,也可以写进配置的 `approval` 字段。
 
 ### 没有 key 先看效果
 

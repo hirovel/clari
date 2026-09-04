@@ -426,7 +426,9 @@ describe("TUI 壳", () => {
     await tick();
     const prompt = app.approvalLines().map(stripAnsi).join("\n");
     expect(prompt).toContain("? run echo");
-    expect(prompt).toContain("y allow · n deny · a always allow echo this session");
+    expect(prompt).toContain(
+      "y allow · n deny · r deny with a reason · a always allow echo this session",
+    );
     term.feed("y");
     await tick();
     await tick();

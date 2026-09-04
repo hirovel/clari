@@ -19,6 +19,7 @@ import {
   memoryFiles,
   parseCommonArgs,
   RESERVE,
+  resolveApproval,
   sessionsDir,
   USAGE,
 } from "./bootstrap.js";
@@ -133,7 +134,7 @@ app = createTuiApp({
   settings: boot.settings,
   fold: args.fold,
   trace: args.trace,
-  approve: args.approve,
+  approve: resolveApproval(args, boot.config),
   compactionName: args.compaction,
   slots: { ...ext.slots, ...(args.execution && { execution: args.execution }) },
   templates: discoverTemplates(),

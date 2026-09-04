@@ -1,8 +1,23 @@
 {
   "name": "clari",
+  "version": "0.1.0",
+  "description": "A from-scratch agent kernel and TUI: one append-only event log; every request, decision and edit inspectable.",
   "private": true,
   "type": "module",
+  "bin": {
+    "clari": "bin/clari.js"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepare": "tsc -p tsconfig.build.json",
     "test": "vitest run",
     "lint": "biome check .",
     "check": "tsc --noEmit && biome check . && vitest run",

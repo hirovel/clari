@@ -82,6 +82,11 @@ export type AgentEvent =
       durationMs?: number;
     }
   | { type: "session/interrupt"; at: string }
+  /**
+   * 恢复会话时发现日志末尾有一行没写完(进程被杀在写入中途),截掉了它。只给人看。
+   * 半行只可能在末尾;中间的坏行仍然报错,因为那不是崩溃能造成的。
+   */
+  | { type: "session/recovered"; at: string; droppedBytes: number; preview: string }
   /** 会话中切换模型。只给人看(不投影):此后的 assistant 消息由新模型生成。 */
   | { type: "session/model"; at: string; model: string }
   /**

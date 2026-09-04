@@ -4,6 +4,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import type { ApprovalConfig } from "./approval.js";
 import type { EffortLevel, OpenAIDialect, Provider } from "./provider.js";
 import { openaiCompat } from "./provider.js";
 import { anthropic, type ThinkingMode } from "./providers/anthropic.js";
@@ -89,7 +90,10 @@ export type Preset = {
   model?: string;
   effort?: string;
   compaction?: string;
-  approve?: "all" | "ask";
+  /** all = 不问;ask = 每个调用都问;policy(缺省)= 按 approval 规则。 */
+  approve?: "all" | "ask" | "policy";
+  /** 审批规则(Q84),覆盖全局的 approval。 */
+  approval?: ApprovalConfig;
   /** 执行槽:sequential(缺省)| parallel。 */
   execution?: "sequential" | "parallel";
   /** 扩展模块路径列表。 */
@@ -113,6 +117,8 @@ export type KernelConfig = {
   presets?: Record<string, Preset>;
   /** 会话文件目录;缺省工作目录下的 sessions/。环境变量 CLARI_SESSIONS 优先。 */
   sessionsDir?: string;
+  /** 审批规则(Q84):缺省只读工具放行、其余问人、cwd 之外必问。 */
+  approval?: ApprovalConfig;
 };
 
 /** 用户目录:环境变量 CLARI_HOME 指定,否则 ~/.clari。 */

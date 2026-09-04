@@ -78,6 +78,7 @@ export function collectRequests(events: readonly AgentEvent[]): RequestRecord[] 
         break;
       case "decision":
       case "session/interrupt":
+      case "session/recovered":
       case "session/model":
       case "session/slot":
       case "context/edit":
@@ -348,6 +349,11 @@ export function decisionLines(rec: RequestRecord): string[] {
         break;
       case "session/interrupt":
         lines.push(`${c.zhu("◇")} interrupted by the user`);
+        break;
+      case "session/recovered":
+        lines.push(
+          `${c.zhu("◇")} recovered: dropped ${e.droppedBytes} bytes of a half-written line at the end of the log`,
+        );
         break;
       case "session/model":
         lines.push(`${c.jin("◇")} model switched to ${e.model}`);
