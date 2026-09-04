@@ -84,7 +84,7 @@ function build(log: EventLog, provider: Provider, rows = 30) {
     requestRender: () => {},
   });
   insp.reset();
-  const text = () => insp.render(100).map(stripAnsi).join("\n");
+  const text = (width = 100) => insp.render(width).map(stripAnsi).join("\n");
   return { insp, text, closed: () => closed };
 }
 
@@ -103,14 +103,14 @@ describe("请求检视器(Q49)", () => {
     const { insp, text } = build(log, provider, 30);
     const doc = text();
     expect(insp.render(100)).toHaveLength(30);
-    expect(doc).toContain("请求检视");
-    expect(doc).toContain("2 次请求");
+    expect(doc).toContain("Requests");
+    expect(doc).toContain("2 requests");
     expect(doc).toContain("#1");
-    expect(doc).toContain("2 条消息");
-    expect(doc).toContain("→ 1.2k(缓存 800)  +30");
+    expect(doc).toContain("2 msgs");
+    expect(doc).toContain("→ 1.2k (cache 800)  +30");
     expect(doc).toContain("tool");
     expect(doc).toContain("#2");
-    expect(doc).toContain("4 条消息");
+    expect(doc).toContain("4 msgs");
     expect(doc).toContain("end");
     expect(doc).toContain("▸ #2"); // 打开时选中最新一条
   });
@@ -122,58 +122,58 @@ describe("请求检视器(Q49)", () => {
     insp.handleInput("\r");
     let doc = text();
     expect(insp.isDetail).toBe(true);
-    expect(doc).toContain("请求 #1");
-    expect(doc).toContain("[1 概要]");
-    expect(doc).toContain("2 条消息 · 1 个工具");
-    expect(doc).toContain("阈值 80000");
-    expect(doc).toContain("实测输入");
-    expect(doc).toContain("缓存命中 800 tok");
-    expect(doc).toContain("停止原因");
+    expect(doc).toContain("Request #1");
+    expect(doc).toContain("[1 summary]");
+    expect(doc).toContain("2 messages · 1 tools");
+    expect(doc).toContain("threshold 80000");
+    expect(doc).toContain("measured in");
+    expect(doc).toContain("cache hit 800 tok");
+    expect(doc).toContain("stop reason");
 
     insp.handleInput("2");
     doc = text();
-    expect(doc).toContain("[2 决策]");
-    expect(doc).toContain("自动压缩检查");
-    expect(doc).toContain("未触发");
-    expect(doc).toContain("没列出的就没发生");
+    expect(doc).toContain("[2 decisions]");
+    expect(doc).toContain("auto-compaction check");
+    expect(doc).toContain("not triggered");
+    expect(doc).toContain("Every decision the kernel made in this step. Nothing else happened.");
 
     insp.handleInput("3");
     doc = text();
-    expect(doc).toContain("[3 发送]");
+    expect(doc).toContain("[3 sent]");
     expect(doc).toContain("[1] system");
     expect(doc).toContain("├ 角色与规则");
     expect(doc).toContain("├ 环境  15 tok · 94%");
     expect(doc).toContain("你是助手");
     expect(doc).toContain("[2] user");
     expect(doc).toContain("读一下");
-    expect(doc).toContain("完整正文");
+    expect(doc).toContain("full bodies (f to fold)");
     insp.handleInput("f");
-    expect(text()).toContain("已折叠正文");
+    expect(text()).toContain("bodies folded (f to unfold)");
 
     insp.handleInput("4");
     doc = text();
-    expect(doc).toContain("[4 工具定义]");
+    expect(doc).toContain("[4 tool defs]");
     expect(doc).toContain("echo");
     expect(doc).toContain("回显文本");
     expect(doc).toContain('"type": "object"');
 
     insp.handleInput("5");
     doc = text();
-    expect(doc).toContain("[5 线路 JSON]");
-    expect(doc).toContain("逐字节一致");
+    expect(doc).toContain("[5 wire JSON]");
+    expect(doc).toContain("byte-identical to what was sent");
     expect(doc).toContain('"model": "fake"');
     expect(doc).toContain('"stream": true');
 
     insp.handleInput("6");
     doc = text();
-    expect(doc).toContain("[6 接收]");
-    expect(doc).toContain("停止原因 tool");
-    expect(doc).toContain("思考");
+    expect(doc).toContain("[6 received]");
+    expect(doc).toContain("stop reason tool");
+    expect(doc).toContain("thinking");
     expect(doc).toContain("用户想读内容");
     expect(doc).toContain("先看看");
     expect(doc).toContain("⚙ echo");
     expect(doc).toContain('"text": "hi"');
-    expect(doc).toContain("原始流");
+    expect(doc).toContain("raw stream");
     expect(doc).toContain("data: [DONE]");
   });
 
@@ -183,16 +183,17 @@ describe("请求检视器(Q49)", () => {
     insp.handleInput("g");
     insp.handleInput("\r");
     insp.handleInput("\x1b[C"); // →
-    expect(text()).toContain("[2 决策]");
+    expect(text()).toContain("[2 decisions]");
     insp.handleInput("]");
-    expect(text()).toContain("请求 #2");
+    expect(text()).toContain("Request #2");
     insp.handleInput("5");
-    const before = text();
-    expect(before).toMatch(/第 1-\d+ 行 \/ \d+/);
+    // 位置提示在页脚提示语之后;100 列下会被截断,用宽终端看它
+    const before = text(160);
+    expect(before).toMatch(/lines 1-\d+ of \d+/);
     insp.handleInput("\x1b[B"); // ↓
-    expect(text()).toMatch(/第 2-\d+ 行/);
+    expect(text(160)).toMatch(/lines 2-\d+ of \d+/);
     insp.handleInput("G");
-    expect(text()).not.toMatch(/第 2-/);
+    expect(text(160)).not.toMatch(/lines 2-/);
     insp.handleInput("\x1b");
     expect(insp.isDetail).toBe(false);
     insp.handleInput("\x1b");
@@ -206,11 +207,11 @@ describe("请求检视器(Q49)", () => {
     insp.handleInput("\r");
     insp.handleInput("7");
     const doc = text();
-    expect(doc).toContain("[7 写入]");
+    expect(doc).toContain("[7 written]");
     expect(doc).toContain("assistant/message");
     expect(doc).toContain("tool/result");
     expect(doc).toContain('"callId": "c1"');
-    expect(doc).toContain("模型可见");
+    expect(doc).toContain("model-visible");
     expect(doc).not.toContain('"text": "完成"'); // 那是下一次请求的写入
   });
 
@@ -220,22 +221,22 @@ describe("请求检视器(Q49)", () => {
     insp.handleInput("\t");
     let doc = text();
     expect(insp.currentMode).toBe("events");
-    expect(doc).toContain("事件日志");
-    expect(doc).toContain(`${log.events.length} 条`);
+    expect(doc).toContain("Events");
+    expect(doc).toContain(`${log.events.length} events`);
     expect(doc).toContain("#0    ");
     expect(doc).toContain("session/start");
     expect(doc).toContain("request");
-    expect(doc).toContain("只给人看");
-    expect(doc).toContain("模型可见");
+    expect(doc).toContain("people only");
+    expect(doc).toContain("model-visible");
     insp.handleInput("g");
     insp.handleInput("\r");
     doc = text();
     expect(insp.currentMode).toBe("event");
-    expect(doc).toContain("事件 #0");
+    expect(doc).toContain("Event #0");
     expect(doc).toContain('"type": "session/start"');
     expect(doc).toContain('"system": "你是助手"');
     insp.handleInput("]");
-    expect(text()).toContain("事件 #1");
+    expect(text()).toContain("Event #1");
     insp.handleInput("\x1b");
     expect(insp.currentMode).toBe("events");
     insp.handleInput("\t"); // 事件视图 → 压缩对照 → 请求视图
@@ -283,14 +284,14 @@ describe("请求检视器(Q49)", () => {
     insp.handleInput("5");
     expect(text()).toContain("请压缩以上对话");
     insp.handleInput("1");
-    expect(text()).toContain("策略");
+    expect(text()).toContain("strategy");
     expect(text()).toContain("llmSummarize(structuredFull, replay)");
   });
 
   it("没有请求时给出提示而不崩", () => {
     const log = new EventLog();
     const { text } = build(log, scripted([]));
-    expect(text()).toContain("尚无请求");
+    expect(text()).toContain("No requests yet. Send a message first.");
   });
 
   it("provider 未实现 wire 时线路分区如实说明", async () => {
@@ -304,6 +305,6 @@ describe("请求检视器(Q49)", () => {
     const { insp, text } = build(log, bare);
     insp.handleInput("\r");
     insp.handleInput("5");
-    expect(text()).toContain("未实现 wire()");
+    expect(text()).toContain("This provider has no wire()");
   });
 });

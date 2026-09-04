@@ -19,13 +19,13 @@ describe("truncation policies", () => {
     const t = keepTail({ maxLines: 3 })(lines(10));
     expect(t.truncated).toBe(true);
     expect(t.text).toBe("line-8\nline-9\nline-10");
-    expect(t.note).toBe("显示第 8-10 行,共 10 行");
+    expect(t.note).toBe("showing lines 8-10 of 10");
   });
 
   it("keepHead:保留开头", () => {
     const t = keepHead({ maxLines: 3 })(lines(10));
     expect(t.text).toBe("line-1\nline-2\nline-3");
-    expect(t.note).toBe("显示第 1-3 行,共 10 行");
+    expect(t.note).toBe("showing lines 1-3 of 10");
   });
 
   it("keepBothEnds:两头保中略,标明省略行数", () => {
@@ -33,8 +33,8 @@ describe("truncation policies", () => {
     expect(t.truncated).toBe(true);
     expect(t.text).toContain("line-1\nline-2");
     expect(t.text).toContain("line-9\nline-10");
-    expect(t.text).toContain("[中略 6 行]");
-    expect(t.note).toBe("显示首 2 行与末 2 行,共 10 行");
+    expect(t.text).toContain("[6 lines omitted]");
+    expect(t.note).toBe("showing first 2 and last 2 lines of 10");
   });
 
   it("字节上限独立生效:行数达标但字节超限仍触发截断", () => {
@@ -46,7 +46,9 @@ describe("truncation policies", () => {
 
   it("capLineLength:超长行截到上限并加标记,短行不动(Q29)", () => {
     const cap = capLineLength(10);
-    expect(cap("short\n" + "y".repeat(30))).toBe(`short\n${"y".repeat(10)}…[行截断至 10 字符]`);
+    expect(cap("short\n" + "y".repeat(30))).toBe(
+      `short\n${"y".repeat(10)}…[line truncated to 10 chars]`,
+    );
   });
 });
 
@@ -63,7 +65,7 @@ describe("readTool 截断行为(Q29)", () => {
     const path = tempFile(`a\n${"z".repeat(5000)}\nb`);
     const read = createReadTool({ maxLineChars: 100 });
     const out = await read.execute({ path }, ctx);
-    expect(out).toContain("…[行截断至 100 字符]");
+    expect(out).toContain("…[line truncated to 100 chars]");
     expect(out.split("\n")[1]?.length).toBeLessThan(200);
   });
 
@@ -71,6 +73,6 @@ describe("readTool 截断行为(Q29)", () => {
     const path = tempFile(Array.from({ length: 10 }, (_, i) => `L${i + 1}`).join("\n"));
     const read = createReadTool({ truncate: keepHead({ maxLines: 3 }) });
     const out = await read.execute({ path }, ctx);
-    expect(out).toContain("用 offset=4 继续");
+    expect(out).toContain("continue with offset=4");
   });
 });

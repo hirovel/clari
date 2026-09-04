@@ -112,16 +112,16 @@ try {
         : JSON.stringify(summary, null, 2),
     );
   } else if (args.events) {
-    console.error(`[会话:${sessionFile}]`);
+    console.error(`[session: ${sessionFile}]`);
   } else {
     if (!text.endsWith("\n")) process.stdout.write("\n");
-    if (typeof outcome === "object") console.error(`[循环停止:${outcome.stopped}]`);
-    console.error(`[会话:${sessionFile}]`);
+    if (typeof outcome === "object") console.error(`[loop stopped: ${outcome.stopped}]`);
+    console.error(`[session: ${sessionFile}]`);
   }
 } catch (err) {
   if (args.json) {
     console.log(JSON.stringify({ ok: false, error: (err as Error).message, sessionFile }, null, 2));
-  } else console.error(`请求失败:${(err as Error).message}`);
+  } else console.error(`request failed: ${(err as Error).message}`);
   process.exit(1);
 }
 

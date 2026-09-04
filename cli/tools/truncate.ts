@@ -30,7 +30,7 @@ export function keepTail(limits: TruncationLimits = {}): TruncationPolicy {
     return {
       text: kept.join("\n"),
       truncated: true,
-      note: `显示第 ${from}-${lines.length} 行,共 ${lines.length} 行`,
+      note: `showing lines ${from}-${lines.length} of ${lines.length}`,
     };
   };
 }
@@ -48,7 +48,7 @@ export function keepHead(limits: TruncationLimits = {}): TruncationPolicy {
     return {
       text: kept.join("\n"),
       truncated: true,
-      note: `显示第 1-${kept.length} 行,共 ${lines.length} 行`,
+      note: `showing lines 1-${kept.length} of ${lines.length}`,
     };
   };
 }
@@ -65,14 +65,14 @@ export function keepBothEnds(
     }
     const head = lines.slice(0, headLines);
     let tail = lines.slice(-tailLines);
-    const gap = () => `\n……[中略 ${lines.length - head.length - tail.length} 行]……\n`;
+    const gap = () => `\n…[${lines.length - head.length - tail.length} lines omitted]…\n`;
     while (bytes(head.join("\n") + gap() + tail.join("\n")) > maxBytes && tail.length > 1) {
       tail = tail.slice(Math.ceil(tail.length / 10));
     }
     return {
       text: head.join("\n") + gap() + tail.join("\n"),
       truncated: true,
-      note: `显示首 ${head.length} 行与末 ${tail.length} 行,共 ${lines.length} 行`,
+      note: `showing first ${head.length} and last ${tail.length} lines of ${lines.length}`,
     };
   };
 }
@@ -85,7 +85,9 @@ export function capLineLength(maxChars: number): (text: string) => string {
   return (text) =>
     text
       .split("\n")
-      .map((l) => (l.length > maxChars ? `${l.slice(0, maxChars)}…[行截断至 ${maxChars} 字符]` : l))
+      .map((l) =>
+        l.length > maxChars ? `${l.slice(0, maxChars)}…[line truncated to ${maxChars} chars]` : l,
+      )
       .join("\n");
 }
 

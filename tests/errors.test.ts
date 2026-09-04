@@ -106,9 +106,9 @@ describe("request/error 事件与错误卡", () => {
       const doc = app.lines(110).map(plain).join("\n");
       expect(doc).toContain("Request #1 failed");
       expect(doc).toContain("auth · HTTP 401");
-      expect(doc).toContain("provider Incorrect API key provided");
+      expect(doc).toMatch(/provider\s+Incorrect API key provided/);
       expect(doc).toContain("/key deepseek");
-      expect(doc).toContain("received");
+      expect(doc).toContain("chars of response body saved · /raw 1");
       // 不重复:submit 的 catch 不再另打一行
       expect(doc.match(/Incorrect API key provided/g)?.length).toBe(1);
       app.stop();

@@ -36,25 +36,28 @@ export function createReadTool(opts: { truncate?: TruncationPolicy; maxLineChars
   return defineTool({
     name: "read",
     description:
-      "读取文本文件。返回带行号的内容。超限时按截断策略保留一部分并注明续读 offset;" +
-      "超长行截断到固定字符数。",
+      "Read a text file. Returns numbered lines. When the output exceeds the limit, a truncation policy keeps part of it and notes the offset to continue from; " +
+      "overlong lines are cut to a fixed character count.",
     parameters: Type.Object({
-      path: Type.String({ description: "文件路径,相对或绝对" }),
-      offset: Type.Optional(Type.Number({ description: "起始行号,从 1 开始" })),
-      limit: Type.Optional(Type.Number({ description: "最多返回的行数" })),
+      path: Type.String({ description: "file path, relative or absolute" }),
+      offset: Type.Optional(Type.Number({ description: "starting line number, 1-based" })),
+      limit: Type.Optional(Type.Number({ description: "maximum number of lines to return" })),
     }),
     concurrency: "parallel",
     async execute(args) {
       const path = resolve(args.path);
       const st = statSync(path);
-      if (st.isDirectory()) throw new Error(`${args.path} 是目录,用 ls 或 glob 列出内容。`);
+      if (st.isDirectory())
+        throw new Error(`${args.path} is a directory; use ls or glob to list it.`);
       if (st.size > MAX_READ_BYTES) {
         throw new Error(
-          `文件 ${Math.round(st.size / 1024 / 1024)} MB,超过单次读取上限 ${MAX_READ_BYTES / 1024 / 1024} MB。用 bash 的 head/sed/grep 取需要的部分。`,
+          `file is ${Math.round(st.size / 1024 / 1024)} MB, exceeds the single-read limit of ${MAX_READ_BYTES / 1024 / 1024} MB. Use bash head/sed/grep to take the part you need.`,
         );
       }
       if (st.size > 0 && looksBinary(path)) {
-        throw new Error(`${args.path} 是二进制文件(${st.size} 字节),read 只读文本。`);
+        throw new Error(
+          `${args.path} is a binary file (${st.size} bytes); read only handles text.`,
+        );
       }
       const lines = capLine(readFileSync(path, "utf8")).split("\n");
       const start = Math.max(1, args.offset ?? 1);
@@ -63,7 +66,7 @@ export function createReadTool(opts: { truncate?: TruncationPolicy; maxLineChars
       const t = truncate(numbered);
       if (!t.truncated) return t.text;
       const shown = t.text.split("\n").length;
-      return `${t.text}\n[${t.note ?? "已截断"};文件共 ${lines.length} 行,用 offset=${start + shown} 继续]`;
+      return `${t.text}\n[${t.note ?? "truncated"}; file has ${lines.length} lines, continue with offset=${start + shown}]`;
     },
   });
 }
@@ -73,16 +76,16 @@ export const readTool = createReadTool();
 
 export const writeTool = defineTool({
   name: "write",
-  description: "写入文本文件,整体覆盖。目录不存在时自动创建。",
+  description: "Write a text file, replacing its contents. Creates missing directories.",
   parameters: Type.Object({
-    path: Type.String({ description: "文件路径" }),
-    content: Type.String({ description: "完整的文件内容" }),
+    path: Type.String({ description: "file path" }),
+    content: Type.String({ description: "complete file content" }),
   }),
   async execute(args) {
     const path = resolve(args.path);
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, args.content, "utf8");
-    return `已写入 ${Buffer.byteLength(args.content, "utf8")} 字节到 ${args.path}`;
+    return `wrote ${Buffer.byteLength(args.content, "utf8")} bytes to ${args.path}`;
   },
 });
 
@@ -124,7 +127,9 @@ export function fuzzyReplace(
     if (ok) hits.push(i);
   }
   if (hits.length === 0) return undefined;
-  if (hits.length > 1) throw new Error(`宽松匹配到 ${hits.length} 处,不唯一。请提供更长的上下文。`);
+  if (hits.length > 1) {
+    throw new Error(`fuzzy match hit ${hits.length} places, not unique. Provide more context.`);
+  }
   const at = hits[0] as number;
   const replacement = newText.split("\n");
   const next = [...lines.slice(0, at), ...replacement, ...lines.slice(at + target.length)].join(
@@ -136,12 +141,12 @@ export function fuzzyReplace(
 export const editTool = defineTool({
   name: "edit",
   description:
-    "对文件做一处精确替换。oldText 必须在文件中出现且仅出现一次,否则报错并说明原因。" +
-    "精确匹配失败时会忽略行尾空白与引号样式再试一次,命中会在结果里说明。",
+    "Make one exact replacement in a file. oldText must occur exactly once in the file; otherwise the call fails and says why. " +
+    "If the exact match fails, it retries ignoring trailing whitespace and quote style; a fuzzy hit is noted in the result.",
   parameters: Type.Object({
-    path: Type.String({ description: "文件路径" }),
-    oldText: Type.String({ description: "要被替换的原文,必须唯一" }),
-    newText: Type.String({ description: "替换后的文本" }),
+    path: Type.String({ description: "file path" }),
+    oldText: Type.String({ description: "original text to replace; must be unique" }),
+    newText: Type.String({ description: "replacement text" }),
   }),
   async execute(args) {
     const path = resolve(args.path);
@@ -151,10 +156,12 @@ export const editTool = defineTool({
     const content = crlf ? raw.replaceAll("\r\n", "\n") : raw;
     const oldText = args.oldText.replaceAll("\r\n", "\n");
     const newText = args.newText.replaceAll("\r\n", "\n");
-    if (!oldText) throw new Error("oldText 不能为空。");
+    if (!oldText) throw new Error("oldText must not be empty.");
     const count = content.split(oldText).length - 1;
     if (count > 1) {
-      throw new Error(`oldText 在 ${args.path} 中出现 ${count} 次,不唯一。请提供更长的上下文。`);
+      throw new Error(
+        `oldText occurs ${count} times in ${args.path}, not unique. Provide more context.`,
+      );
     }
     let next: string;
     let note = "";
@@ -162,12 +169,15 @@ export const editTool = defineTool({
       next = content.replace(oldText, () => newText);
     } else {
       const fuzzy = fuzzyReplace(content, oldText, newText);
-      if (!fuzzy) throw new Error(`oldText 在 ${args.path} 中不存在,请先 read 确认原文。`);
+      if (!fuzzy) {
+        throw new Error(`oldText not found in ${args.path}; read the file first to confirm it.`);
+      }
       next = fuzzy.next;
-      note = `(精确匹配失败,按忽略行尾空白与引号样式的宽松匹配命中第 ${fuzzy.line} 行)`;
+      note = ` (exact match failed; fuzzy match ignoring trailing whitespace and quote style hit line ${fuzzy.line})`;
     }
-    if (next === content) throw new Error("替换后内容与原文相同,未写入。");
+    if (next === content)
+      throw new Error("replacement is identical to the original; nothing written.");
     writeFileSync(path, crlf ? next.replaceAll("\n", "\r\n") : next, "utf8");
-    return `已替换 ${args.path} 中的一处文本。${note}`;
+    return `replaced one occurrence in ${args.path}.${note}`;
   },
 });

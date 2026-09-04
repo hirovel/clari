@@ -59,7 +59,7 @@ const server = createServer((req, res) => {
     }
     rateLimited = false;
     // 摘要请求(压缩策略发的)直接给一段摘要。
-    if (/压缩成一份/.test(lastUser)) {
+    if (/Compress the conversation above/.test(lastUser)) {
       sse(res, [...textChunks("## 任务与意图\n看目录并总结。\n## 下一步\n继续回答。"), finish("stop", promptTokens, 30)]);
       return;
     }

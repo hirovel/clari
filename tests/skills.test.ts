@@ -117,8 +117,8 @@ describe("SKILL.md 解析与发现", () => {
     expect(args.skillsList).toBe("none");
     const withList = systemPromptFor({ ...parseCommonArgs([]) }, proj, { home, root: proj });
     const without = systemPromptFor(args, proj, { home, root: proj });
-    expect(withList.sections.some((s) => s.name === "技能")).toBe(true);
-    expect(without.sections.some((s) => s.name === "技能")).toBe(false);
+    expect(withList.sections.some((s) => s.name === "Skills")).toBe(true);
+    expect(without.sections.some((s) => s.name === "Skills")).toBe(false);
     const preset: KernelConfig = {
       default: "m",
       providers: {},

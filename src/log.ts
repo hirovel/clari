@@ -57,7 +57,7 @@ export class EventLog {
         log.events.push(JSON.parse(trimmed) as AgentEvent);
       } catch (err) {
         // 损坏的行要能定位。历史是唯一真相,静默跳过等于篡改。
-        throw new Error(`事件日志损坏 ${filePath}:${i + 1}: ${(err as Error).message}`);
+        throw new Error(`corrupt event log ${filePath}:${i + 1}: ${(err as Error).message}`);
       }
     }
     return log;

@@ -140,28 +140,28 @@ describe("界面命令", () => {
       value: "换个思路,先读文件",
     });
     let doc = text(a);
-    expect(doc).toContain("已编辑事件 #2 的 reasoning");
-    expect(doc).toContain("之后所有消息的思考块都不再回传");
+    expect(doc).toContain("◇ edited event #2.reasoning");
+    expect(doc).toContain("thinking blocks after this point are no longer");
 
     await a.command("/edit 4 reasoning 试图改摘要");
     expect(log.events.at(-1)?.type).toBe("context/edit"); // 没有新增
     doc = text(a);
-    expect(doc).toContain("思考是摘要");
+    expect(doc).toContain("event #4 thinking is a summary");
 
     // #6 是刚追加的 context/edit 事件本身,不进入模型上下文。
     await a.command("/edit 6 text x");
-    expect(text(a)).toContain("是 context/edit,不进入模型上下文");
+    expect(text(a)).toContain("event #6 is context/edit; it never reaches the model");
     await a.command("/edit 1 reasoning x");
-    expect(text(a)).toContain("没有字段 reasoning");
+    expect(text(a)).toContain("event #1 has no field reasoning");
 
     await a.command("/drop 2 走错方向");
     expect(log.events.at(-1)).toMatchObject({ type: "context/drop", target: 2, note: "走错方向" });
-    expect(text(a)).toContain("连同它的 1 个工具结果");
+    expect(text(a)).toContain("◇ dropped event #2 with its 1 tool results");
 
     await a.command("/edits");
     doc = text(a);
-    expect(doc).toContain("编辑 #2.reasoning");
-    expect(doc).toContain("丢弃 #2");
+    expect(doc).toContain("edit #2.reasoning");
+    expect(doc).toContain("drop #2");
     a.stop();
   });
 });

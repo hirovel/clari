@@ -157,6 +157,13 @@ describe("检视器组装视图", () => {
     expect(screen).toContain("6 messages");
     expect(screen).toContain("summary(covers #2–#5)");
     expect(screen).toContain("omitted: 4 covered by the summary");
+    // Enter 先开动作菜单(Q83),第一项"View full message"再 Enter 才进全文
+    insp.handleInput("\r");
+    expect(insp.currentMode).toBe("actions");
+    const menu = insp.render(120).map(plain).join("\n");
+    expect(menu).toContain("Message #6");
+    expect(menu).toContain("View full message");
+    expect(menu).toContain("If you do this");
     insp.handleInput("\r");
     expect(insp.currentMode).toBe("message");
     expect(insp.render(120).map(plain).join("\n")).toContain("Message #6");

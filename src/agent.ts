@@ -105,7 +105,7 @@ export class Agent {
    * 从当前投影再发一次请求。编辑上下文之后立刻看效果的入口。丢弃以 context/drop 事件落盘,原文不动。
    */
   async retry(): Promise<TurnOutcome> {
-    if (this.active) throw new Error("运行中不能重跑,先打断");
+    if (this.active) throw new Error("cannot retry while running; interrupt first");
     const events = this.opts.log.events;
     const dropped = editState(events).dropped;
     let target = -1;
@@ -115,7 +115,7 @@ export class Agent {
         break;
       }
     }
-    if (target < 0) throw new Error("没有可重跑的助手消息");
+    if (target < 0) throw new Error("no assistant message to retry");
     this.opts.log.append({ type: "context/drop", at: now(), target, note: "retry" });
     return this.run();
   }

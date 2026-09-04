@@ -91,10 +91,18 @@ export function collectRequests(events: readonly AgentEvent[]): RequestRecord[] 
   return out;
 }
 
-export const SECTIONS = ["概要", "决策", "发送", "工具定义", "线路 JSON", "接收", "写入"] as const;
+export const SECTIONS = [
+  "summary",
+  "decisions",
+  "sent",
+  "tool defs",
+  "wire JSON",
+  "received",
+  "written",
+] as const;
 export type Section = 1 | 2 | 3 | 4 | 5 | 6 | 7;
 
-export const COMPACTION_SECTIONS = ["对照", "原文", "摘要", "清除"] as const;
+export const COMPACTION_SECTIONS = ["compare", "original", "summary", "cleared"] as const;
 export type CompactionSection = 1 | 2 | 3 | 4;
 
 /** 一个可检视的数组:主会话或某个子 agent 会话。 */
@@ -114,6 +122,8 @@ export type InspectorDeps = {
   rows: () => number;
   /** 主会话某请求的原始流(开了 trace 才有)。 */
   rawFor?: (requestIndex: number) => string[] | undefined;
+  /** 上下文面板里选中一条消息并选了动作(Q83)。view 由检视器自己处理,其余交给界面落到命令上。 */
+  onAction?: (action: ContextAction, row: CompositionRow) => void;
   onClose: () => void;
   requestRender: () => void;
 };
@@ -178,7 +188,7 @@ function roleLabel(m: Message): string {
     case "assistant":
       return "assistant";
     case "tool":
-      return `tool:${m.name}${m.isError ? "(错误)" : ""}`;
+      return `tool:${m.name}${m.isError ? " ✗" : ""}`;
   }
 }
 
@@ -200,29 +210,29 @@ export function listRow(rec: RequestRecord, selected: boolean): string {
   const mark = selected ? c.zhu("▸") : " ";
   const head = `#${rec.n}`.padEnd(4);
   const model = rec.request.model;
-  const sent = `${rec.request.messages} 条消息  ≈${fmtTok(rec.request.estimatedTokens)}`;
+  const sent = `${rec.request.messages} msgs  ≈${fmtTok(rec.request.estimatedTokens)}`;
   let tail: string;
   if (rec.response) {
     const u = rec.response.usage;
     const measured = u
-      ? `→ ${fmtTok(u.inputTokens)}${u.cacheReadTokens !== undefined ? `(缓存 ${fmtTok(u.cacheReadTokens)})` : ""}  +${fmtTok(u.outputTokens)}`
-      : "→ 无用量";
+      ? `→ ${fmtTok(u.inputTokens)}${u.cacheReadTokens !== undefined ? ` (cache ${fmtTok(u.cacheReadTokens)})` : ""}  +${fmtTok(u.outputTokens)}`
+      : "→ no usage";
     tail = `${measured}  ${fmtMs(rec.response.latencyMs)}  ${rec.response.stopReason}`;
   } else if (rec.compaction) {
     const u = rec.compaction.usage;
-    tail = `→ ${u ? `${fmtTok(u.inputTokens)}  +${fmtTok(u.outputTokens)}` : "无用量"}  ${fmtMs(rec.compaction.latencyMs)}  摘要 ${rec.compaction.summary?.length ?? 0} 字`;
+    tail = `→ ${u ? `${fmtTok(u.inputTokens)}  +${fmtTok(u.outputTokens)}` : "no usage"}  ${fmtMs(rec.compaction.latencyMs)}  summary ${rec.compaction.summary?.length ?? 0} chars`;
   } else if (rec.error) {
     tail = c.zhu(`✗ ${rec.error.status ?? ""} ${firstLine(rec.error.error)}`.trim());
   } else {
-    tail = rec.request.reason === "compaction" ? "… 无结果" : "… 进行中";
+    tail = rec.request.reason === "compaction" ? "… no result" : "… in progress";
   }
-  const retry = rec.retries.length > 0 ? `  重试 ${rec.retries.length}` : "";
+  const retry = rec.retries.length > 0 ? `  retries ${rec.retries.length}` : "";
   // 请求种类放在前面:一眼分出正常步、压缩摘要、溢出重发;行尾被截断也不丢这个信息。
   const kind =
     rec.request.reason === "overflow-retry"
-      ? "溢出重发  "
+      ? "overflow retry  "
       : rec.request.reason === "compaction"
-        ? "压缩  "
+        ? "compaction  "
         : "";
   const body = `${head} ${clock(rec.request.at)}  ${model}  ${kind}${sent}  ${tail}${retry}`;
   return `${mark} ${selected ? c.bold(c.ink(body)) : c.soft(body)}`;
@@ -236,26 +246,30 @@ export function summaryLines(rec: RequestRecord, messages: Message[]): string[] 
   const total = messages.reduce((n, m) => n + messageTokens(m), 0);
   const row = (k: string, v: string) => `${c.soft(k.padEnd(12))} ${c.ink(v)}`;
   const REASONS = {
-    turn: "正常步",
-    "overflow-retry": "溢出压缩后的重发",
-    compaction: "压缩策略的摘要请求(整段上下文发给模型换一份摘要)",
+    turn: "turn",
+    "overflow-retry": "resend after overflow compaction",
+    compaction:
+      "summary request from the compaction strategy (the context is sent in exchange for a summary)",
   } as const;
   const lines = [
-    row("时间", `${r.at}`),
-    row("模型", r.model),
-    row("原因", REASONS[r.reason]),
-    row("强度", r.effort ?? "未设置(不传,用供应商默认)"),
-    row("发送", `${r.messages} 条消息 · ${r.tools.length} 个工具 · 估算 ${r.estimatedTokens} tok`),
+    row("time", `${r.at}`),
+    row("model", r.model),
+    row("reason", REASONS[r.reason]),
+    row("effort", r.effort ?? "not set (omitted; provider default)"),
+    row(
+      "sent",
+      `${r.messages} messages · ${r.tools.length} tools · estimated ${r.estimatedTokens} tok`,
+    ),
   ];
-  if (rec.compaction?.strategy) lines.push(row("策略", rec.compaction.strategy));
+  if (rec.compaction?.strategy) lines.push(row("strategy", rec.compaction.strategy));
   if (r.threshold !== undefined) {
     const room = r.threshold - r.estimatedTokens;
     lines.push(
       row(
-        "自动压缩",
+        "auto-compact",
         room > 0
-          ? `阈值 ${r.threshold},还差 ${room} tok(${pctOf(room, r.threshold)})`
-          : `阈值 ${r.threshold},已超 ${-room} tok,发送前应已压缩`,
+          ? `threshold ${r.threshold}, ${room} tok to go (${pctOf(room, r.threshold)})`
+          : `threshold ${r.threshold}, over by ${-room} tok; compaction should have run before sending`,
       ),
     );
   }
@@ -263,30 +277,30 @@ export function summaryLines(rec: RequestRecord, messages: Message[]): string[] 
     const drift = r.estimatedTokens > 0 ? u.inputTokens / r.estimatedTokens : 0;
     lines.push(
       row(
-        "实测输入",
-        `${u.inputTokens} tok(估算的 ${Math.round(drift * 100)}%)${u.cacheReadTokens !== undefined ? ` · 缓存命中 ${u.cacheReadTokens} tok(${pctOf(u.cacheReadTokens, u.inputTokens)})` : ""}`,
+        "measured in",
+        `${u.inputTokens} tok (${Math.round(drift * 100)}% of estimate)${u.cacheReadTokens !== undefined ? ` · cache hit ${u.cacheReadTokens} tok (${pctOf(u.cacheReadTokens, u.inputTokens)})` : ""}`,
       ),
     );
     lines.push(
       row(
-        "实测输出",
-        `${u.outputTokens} tok${u.reasoningTokens !== undefined ? ` · 其中推理 ${u.reasoningTokens}` : ""}`,
+        "measured out",
+        `${u.outputTokens} tok${u.reasoningTokens !== undefined ? ` · reasoning ${u.reasoningTokens}` : ""}`,
       ),
     );
   }
   if (rec.response) {
-    lines.push(row("停止原因", rec.response.stopReason));
-    lines.push(row("耗时", fmtMs(rec.response.latencyMs)));
-    lines.push(row("工具调用", `${rec.response.toolCalls.length} 个`));
+    lines.push(row("stop reason", rec.response.stopReason));
+    lines.push(row("latency", fmtMs(rec.response.latencyMs)));
+    lines.push(row("tool calls", `${rec.response.toolCalls.length}`));
   }
   if (rec.error)
-    lines.push(row("失败", c.zhu(`${rec.error.status ?? ""} ${rec.error.error}`.trim())));
-  lines.push(row("重试", rec.retries.length === 0 ? "无" : `${rec.retries.length} 次`));
+    lines.push(row("failed", c.zhu(`${rec.error.status ?? ""} ${rec.error.error}`.trim())));
+  lines.push(row("retries", rec.retries.length === 0 ? "none" : `${rec.retries.length}`));
   lines.push("");
-  lines.push(c.soft("各消息占比(按估算)"));
+  lines.push(c.soft("share by role (estimated)"));
   const byRole = new Map<string, number>();
   for (const m of messages) {
-    const k = m.role === "tool" ? `工具结果 ${m.name}` : m.role;
+    const k = m.role === "tool" ? `tool result ${m.name}` : m.role;
     byRole.set(k, (byRole.get(k) ?? 0) + messageTokens(m));
   }
   for (const [k, v] of [...byRole.entries()].sort((a, b) => b[1] - a[1])) {
@@ -302,49 +316,54 @@ export function decisionLines(rec: RequestRecord): string[] {
   if (auto !== undefined) {
     lines.push(
       rec.request.estimatedTokens > auto
-        ? `${c.jin("◇")} 自动压缩检查:估算 ${rec.request.estimatedTokens} > 阈值 ${auto},触发`
-        : `${c.faint("·")} 自动压缩检查:估算 ${rec.request.estimatedTokens} ≤ 阈值 ${auto},未触发`,
+        ? `${c.jin("◇")} auto-compaction check: estimated ${rec.request.estimatedTokens} > threshold ${auto}, triggered`
+        : `${c.faint("·")} auto-compaction check: estimated ${rec.request.estimatedTokens} ≤ threshold ${auto}, not triggered`,
     );
   } else {
-    lines.push(`${c.faint("·")} 未配置压缩,不检查`);
+    lines.push(`${c.faint("·")} no compaction configured, not checked`);
   }
   for (const e of rec.before) {
     switch (e.type) {
       case "compaction": {
         const parts: string[] = [];
         if (e.summary !== undefined)
-          parts.push(`摘要覆盖事件 ${e.coversFrom ?? 1}-${e.coversUpTo}`);
-        if (e.cleared?.length) parts.push(`清除 ${e.cleared.length} 条工具结果`);
-        if (e.tokensBefore !== undefined) parts.push(`压缩前 ${e.tokensBefore} tok`);
-        if (e.usage) parts.push(`摘要请求 ${e.usage.inputTokens}→${e.usage.outputTokens} tok`);
-        lines.push(`${c.jin("◇")} 压缩${e.strategy ? `(${e.strategy})` : ""}:${parts.join(",")}`);
+          parts.push(`summary covers events ${e.coversFrom ?? 1}-${e.coversUpTo}`);
+        if (e.cleared?.length) parts.push(`cleared ${e.cleared.length} tool results`);
+        if (e.tokensBefore !== undefined) parts.push(`${e.tokensBefore} tok before`);
+        if (e.usage)
+          parts.push(`summary request ${e.usage.inputTokens}→${e.usage.outputTokens} tok`);
+        lines.push(
+          `${c.jin("◇")} compaction${e.strategy ? ` (${e.strategy})` : ""}: ${parts.join(", ")}`,
+        );
         break;
       }
       case "decision":
         lines.push(
           e.slot === "steering"
-            ? `${c.jin("◇")} 插话注入 ${e.injected} 条(${e.boundary} 边界)`
+            ? `${c.jin("◇")} steering injected ${e.injected} (${e.boundary} boundary)`
             : e.slot === "execution"
-              ? `${c.jin("◇")} 并行执行 ${e.parallel} 个调用:${e.tools.join(", ")}`
-              : `${c.jin("◇")} 终止策略叫停:第 ${e.steps} 步,${e.reason}`,
+              ? `${c.jin("◇")} parallel execution of ${e.parallel} calls: ${e.tools.join(", ")}`
+              : `${c.jin("◇")} termination stopped the loop at step ${e.steps}: ${e.reason}`,
         );
         break;
       case "session/interrupt":
-        lines.push(`${c.zhu("◇")} 用户打断`);
+        lines.push(`${c.zhu("◇")} interrupted by the user`);
         break;
       case "session/model":
-        lines.push(`${c.jin("◇")} 切换模型:${e.model}`);
+        lines.push(`${c.jin("◇")} model switched to ${e.model}`);
         break;
       case "session/slot":
         lines.push(`${c.jin("◇")} slot ${e.slot} → ${e.value}`);
         break;
       case "context/edit":
         lines.push(
-          `${c.zhu("◇")} 用户编辑了事件 #${e.target} 的 ${e.field}(${e.value.length} 字${e.note ? `;${e.note}` : ""})`,
+          `${c.zhu("◇")} the user edited event #${e.target}.${e.field} (${e.value.length} chars${e.note ? `; ${e.note}` : ""})`,
         );
         break;
       case "context/drop":
-        lines.push(`${c.zhu("◇")} 用户丢弃了事件 #${e.target}${e.note ? `(${e.note})` : ""}`);
+        lines.push(
+          `${c.zhu("◇")} the user dropped event #${e.target}${e.note ? ` (${e.note})` : ""}`,
+        );
         break;
       default:
         break;
@@ -352,16 +371,18 @@ export function decisionLines(rec: RequestRecord): string[] {
   }
   for (const r of rec.retries) {
     lines.push(
-      `${c.zhu("◇")} 重试 ${r.attempt}:${r.status ?? ""} ${firstLine(r.error)},等待 ${fmtMs(r.delayMs)} 后再试`,
+      `${c.zhu("◇")} retry ${r.attempt}: ${r.status ?? ""} ${firstLine(r.error)}, waited ${fmtMs(r.delayMs)}`,
     );
   }
-  if (rec.error) lines.push(`${c.zhu("✗")} 最终失败:${rec.error.status ?? ""} ${rec.error.error}`);
+  if (rec.error) lines.push(`${c.zhu("✗")} failed: ${rec.error.status ?? ""} ${rec.error.error}`);
   if (rec.response?.stopReason === "length")
-    lines.push(`${c.jin("◇")} 输出被截断:本步工具调用一律不执行,回喂重发指令`);
+    lines.push(
+      `${c.jin("◇")} output truncated: tool calls in this step are not executed; the model is asked to resend`,
+    );
   if (rec.response?.stopReason === "aborted")
-    lines.push(`${c.zhu("◇")} 响应被打断:半截文本已入日志`);
+    lines.push(`${c.zhu("◇")} response interrupted: the partial text is in the log`);
   lines.push("");
-  lines.push(c.faint("以上是内核在这一步做过的全部决定。没列出的就没发生。"));
+  lines.push(c.faint("Every decision the kernel made in this step. Nothing else happened."));
   return lines;
 }
 
@@ -375,14 +396,14 @@ export function sentLines(
   const total = messages.reduce((n, m) => n + messageTokens(m), 0);
   const lines: string[] = [
     c.faint(
-      `${messages.length} 条消息,估算 ${total} tok。${folded ? "已折叠正文(f 展开)" : "完整正文(f 折叠)"}`,
+      `${messages.length} messages, estimated ${total} tok. ${folded ? "bodies folded (f to unfold)" : "full bodies (f to fold)"}`,
     ),
     "",
   ];
   messages.forEach((m, i) => {
     const tok = messageTokens(m);
     lines.push(
-      `${c.jin(`[${i + 1}] ${roleLabel(m)}`)}  ${c.soft(`${tok} tok · ${pctOf(tok, total)}`)}${m.edited ? c.zhu("  ✎ 已编辑(原文见事件视图)") : ""}`,
+      `${c.jin(`[${i + 1}] ${roleLabel(m)}`)}  ${c.soft(`${tok} tok · ${pctOf(tok, total)}`)}${m.edited ? c.jin("  ✎ edited (original in the events view)") : ""}`,
     );
     // 系统提示词按段拆开(Q51):角色、环境、项目指令各占多少。
     if (m.role === "system" && sections && sections.length > 0) {
@@ -398,7 +419,7 @@ export function sentLines(
     if (m.role === "assistant" && m.reasoning) {
       lines.push(
         ...(folded
-          ? [c.faint(`    思考 ${firstLine(m.reasoning)}`)]
+          ? [c.faint(`    thinking ${firstLine(m.reasoning)}`)]
           : indent(m.reasoning).map((l) => c.faint(c.italic(l)))),
       );
     }
@@ -425,16 +446,16 @@ export function sentLines(
 }
 
 export function toolLines(defs: ToolDef[]): string[] {
-  if (defs.length === 0) return [c.faint("本次请求未携带工具。")];
+  if (defs.length === 0) return [c.faint("No tools were sent with this request.")];
   const lines: string[] = [
     c.faint(
-      `${defs.length} 个工具定义随请求发出,估算 ${defs.reduce((n, d) => n + estimateTokens(JSON.stringify(d)), 0)} tok。`,
+      `${defs.length} tool definitions sent with the request, estimated ${defs.reduce((n, d) => n + estimateTokens(JSON.stringify(d)), 0)} tok.`,
     ),
     "",
   ];
   for (const d of defs) {
     lines.push(`${c.jin(d.name)}  ${c.soft(`${estimateTokens(JSON.stringify(d))} tok`)}`);
-    lines.push(...indent(d.description || "(无描述)").map((l) => c.ink(l)));
+    lines.push(...indent(d.description || "(no description)").map((l) => c.ink(l)));
     lines.push(...indent(JSON.stringify(d.parameters, null, 2)).map((l) => c.faint(l)));
     lines.push("");
   }
@@ -448,13 +469,19 @@ export function wireLines(
   effort?: string,
 ): string[] {
   if (!provider?.wire) {
-    return [c.faint("该 provider 未实现 wire(),无法重建线路层正文;发送分区展示的是内核层投影。")];
+    return [
+      c.faint(
+        "This provider has no wire(); the wire body cannot be rebuilt. The sent section shows the kernel projection.",
+      ),
+    ];
   }
   const level = effort ? parseEffort(effort) : undefined;
   const body = provider.wire(messages, defs, level ? { effort: level } : {});
   const json = JSON.stringify(body, null, 2);
   return [
-    c.faint(`请求正文,与实际发送逐字节一致(鉴权头不在正文内)。${json.length} 字符。`),
+    c.faint(
+      `Request body, byte-identical to what was sent (auth headers are not part of the body). ${json.length} chars.`,
+    ),
     "",
     ...json.split("\n").map((l) => c.ink(l)),
   ];
@@ -467,62 +494,62 @@ export function receivedLines(rec: RequestRecord, raw: string[] | undefined): st
   } else if (rec.compaction) {
     const k = rec.compaction;
     lines.push(
-      `${c.soft("耗时")} ${c.ink(fmtMs(k.latencyMs))}   ${c.soft("覆盖事件")} ${c.ink(`${k.coversFrom ?? 1}-${k.coversUpTo}`)}`,
+      `${c.soft("latency")} ${c.ink(fmtMs(k.latencyMs))}   ${c.soft("covers events")} ${c.ink(`${k.coversFrom ?? 1}-${k.coversUpTo}`)}`,
     );
-    if (k.usage) lines.push(`${c.soft("用量")} ${c.ink(JSON.stringify(k.usage))}`);
+    if (k.usage) lines.push(`${c.soft("usage")} ${c.ink(JSON.stringify(k.usage))}`);
     lines.push("");
-    lines.push(c.jin("摘要(将作为一条 user 消息进入后续请求)"));
-    lines.push(...indent(k.summary ?? "(无)").map((l) => c.ink(l)));
+    lines.push(c.jin("summary (enters later requests as one user message)"));
+    lines.push(...indent(k.summary ?? "(none)").map((l) => c.ink(l)));
     lines.push("");
   } else if (!rec.response) {
     lines.push(
       c.faint(
         rec.request.reason === "compaction"
-          ? "摘要请求没有产生压缩(策略判定无进展或被安全阀拦下)。"
-          : "尚未收到响应。",
+          ? "The summary request produced no compaction (no progress, or the safety valve stopped it)."
+          : "No response yet.",
       ),
     );
   } else {
     const r = rec.response;
     lines.push(
-      `${c.soft("停止原因")} ${c.ink(r.stopReason)}   ${c.soft("耗时")} ${c.ink(fmtMs(r.latencyMs))}`,
+      `${c.soft("stop reason")} ${c.ink(r.stopReason)}   ${c.soft("latency")} ${c.ink(fmtMs(r.latencyMs))}`,
     );
-    if (r.usage) lines.push(`${c.soft("用量")} ${c.ink(JSON.stringify(r.usage))}`);
+    if (r.usage) lines.push(`${c.soft("usage")} ${c.ink(JSON.stringify(r.usage))}`);
     lines.push("");
     if (r.reasoning) {
       lines.push(
         c.jin(
           r.reasoningKind === "summary"
-            ? "思考(摘要:只给人看,模型读的正文在私有回传物里,不可编辑)"
+            ? "thinking (summary: shown to people only; the model reads the opaque block; not editable)"
             : r.reasoningKind === "full"
-              ? "思考(全文:下一轮原样回传给模型,可编辑)"
-              : "思考",
+              ? "thinking (full: echoed back to the model next turn; editable)"
+              : "thinking",
         ),
       );
       lines.push(...indent(r.reasoning).map((l) => c.faint(c.italic(l))));
       lines.push("");
     }
     if (r.extras && Object.keys(r.extras).length > 0) {
-      lines.push(c.jin("extras(供应商元数据,不解释)"));
+      lines.push(c.jin("extras (provider metadata, not interpreted)"));
       lines.push(...indent(JSON.stringify(r.extras, null, 2)).map((l) => c.faint(l)));
       lines.push("");
     }
     if (r.opaque !== undefined) {
       const o = r.opaque as { kind?: string; blocks?: unknown[]; items?: unknown[] };
       const n = o.blocks?.length ?? o.items?.length ?? 0;
-      lines.push(c.jin("私有回传物(opaque)"));
+      lines.push(c.jin("opaque (private echo-back)"));
       lines.push(
         c.faint(
-          `    ${o.kind ?? "未知"} · ${n} 项 · ${JSON.stringify(r.opaque).length} 字符 · 下一轮原样送回,内核不解释;全文见写入分区的事件 JSON`,
+          `    ${o.kind ?? "unknown"} · ${n} items · ${JSON.stringify(r.opaque).length} chars · echoed back verbatim next turn, never interpreted; full JSON in the written section`,
         ),
       );
       lines.push("");
     }
-    lines.push(c.jin("文本"));
-    lines.push(...(r.text ? indent(r.text).map((l) => c.ink(l)) : [c.faint("    (空)")]));
+    lines.push(c.jin("text"));
+    lines.push(...(r.text ? indent(r.text).map((l) => c.ink(l)) : [c.faint("    (empty)")]));
     lines.push("");
     if (r.toolCalls.length > 0) {
-      lines.push(c.jin(`工具调用 ${r.toolCalls.length} 个`));
+      lines.push(c.jin(`tool calls ${r.toolCalls.length}`));
       for (const tc of r.toolCalls) {
         lines.push(`    ${c.zhu("⚙")} ${c.ink(tc.name)}  ${c.faint(tc.id)}`);
         lines.push(...indent(JSON.stringify(tc.args, null, 2), "      ").map((l) => c.soft(l)));
@@ -530,11 +557,16 @@ export function receivedLines(rec: RequestRecord, raw: string[] | undefined): st
       lines.push("");
     }
   }
-  lines.push(c.jin("原始流"));
-  if (!raw) lines.push(c.faint("    未开启 trace。启动加 --trace 即逐行记录收到的每一行 SSE。"));
-  else if (raw.length === 0) lines.push(c.faint("    (空)"));
+  lines.push(c.jin("raw stream"));
+  if (!raw)
+    lines.push(
+      c.faint(
+        "    raw capture is off (--no-trace). Restart without it to record every line received.",
+      ),
+    );
+  else if (raw.length === 0) lines.push(c.faint("    (empty)"));
   else {
-    lines.push(c.faint(`    ${raw.length} 行`));
+    lines.push(c.faint(`    ${raw.length} lines`));
     lines.push(...raw.map((l) => c.faint(`    ${l}`)));
   }
   return lines;
@@ -556,9 +588,9 @@ const PROJECTED = new Set(["session/start", "user/message", "assistant/message",
 const SHAPES = new Set(["compaction", "context/edit", "context/drop"]);
 
 function visibility(e: AgentEvent): string {
-  if (PROJECTED.has(e.type)) return "模型可见";
-  if (SHAPES.has(e.type)) return "改变投影";
-  return "只给人看";
+  if (PROJECTED.has(e.type)) return "model-visible";
+  if (SHAPES.has(e.type)) return "shapes projection";
+  return "people only";
 }
 
 function jsonLines(e: AgentEvent, pad: string): string[] {
@@ -575,19 +607,19 @@ export function writtenLines(
 ): string[] {
   const lines: string[] = [
     c.faint(
-      `请求 #${rec.n} 发出后追加进日志的事件(下标 ${rec.index + 1} 到 ${until - 1}),原样 JSON。内核记住的就是这些,没有别的。`,
+      `Events appended after request #${rec.n} (indices ${rec.index + 1} to ${until - 1}), raw JSON. This is all the kernel remembers.`,
     ),
     "",
   ];
   if (until <= rec.index + 1) {
-    lines.push(c.faint("(尚无)"));
+    lines.push(c.faint("(none yet)"));
     return lines;
   }
   for (let i = rec.index + 1; i < until; i++) {
     const e = events[i];
     if (!e) continue;
     lines.push(
-      `${c.jin(`#${i}`)} ${c.ink(e.type)}  ${c.soft(`${JSON.stringify(e).length} 字符 · ${visibility(e)}`)}`,
+      `${c.jin(`#${i}`)} ${c.ink(e.type)}  ${c.soft(`${JSON.stringify(e).length} chars · ${visibility(e)}`)}`,
     );
     lines.push(...jsonLines(e, "    ").map((l) => c.faint(l)));
     lines.push("");
@@ -602,12 +634,13 @@ export function eventRow(events: readonly AgentEvent[], i: number, selected: boo
   const state = compactionState(events);
   const ed = editState(events);
   let flag = "";
-  if (ed.dropped.has(i)) flag = "  已丢弃";
-  else if (ed.edits.has(i)) flag = `  已编辑(${Object.keys(ed.edits.get(i) ?? {}).join(",")})`;
-  else if (e.type === "tool/result" && state.cleared.has(i)) flag = "  已清除→占位";
-  else if (state.summary && i >= state.coversFrom && i < state.coversUpTo) flag = "  已被摘要覆盖";
+  if (ed.dropped.has(i)) flag = "  dropped";
+  else if (ed.edits.has(i)) flag = `  edited (${Object.keys(ed.edits.get(i) ?? {}).join(",")})`;
+  else if (e.type === "tool/result" && state.cleared.has(i)) flag = "  cleared → placeholder";
+  else if (state.summary && i >= state.coversFrom && i < state.coversUpTo)
+    flag = "  covered by summary";
   const size = JSON.stringify(e).length;
-  const body = `${`#${i}`.padEnd(5)} ${clock(e.at)}  ${e.type.padEnd(18)} ${String(size).padStart(7)} 字符  ${visibility(e)}${flag}`;
+  const body = `${`#${i}`.padEnd(5)} ${clock(e.at)}  ${e.type.padEnd(18)} ${String(size).padStart(7)} chars  ${visibility(e)}${flag}`;
   const mark = selected ? c.zhu("▸") : " ";
   const tone = selected
     ? c.bold(c.ink(body))
@@ -620,22 +653,22 @@ export function eventRow(events: readonly AgentEvent[], i: number, selected: boo
 /** 单条事件的原样 JSON 视图。 */
 export function eventLines(events: readonly AgentEvent[], i: number): string[] {
   const e = events[i];
-  if (!e) return [c.faint("(无此事件)")];
+  if (!e) return [c.faint("(no such event)")];
   const state = compactionState(events);
   const ed = editState(events);
   const notes: string[] = [visibility(e)];
-  if (ed.dropped.has(i)) notes.push("投影时已被丢弃(原文仍在这里)");
+  if (ed.dropped.has(i)) notes.push("dropped from the projection (original kept here)");
   else if (ed.edits.has(i)) {
     notes.push(
-      `投影时字段 ${Object.keys(ed.edits.get(i) ?? {}).join(",")} 已换成编辑后的值(原文仍在这里;编辑事件见后面的 context/edit)`,
+      `field ${Object.keys(ed.edits.get(i) ?? {}).join(",")} replaced by the edited value in the projection (original kept here; see the later context/edit event)`,
     );
   } else if (e.type === "tool/result" && state.cleared.has(i)) {
-    notes.push("投影时已换成占位文本(原文仍在这里)");
+    notes.push("replaced by a placeholder in the projection (original kept here)");
   } else if (state.summary && i >= state.coversFrom && i < state.coversUpTo) {
-    notes.push("投影时已被摘要取代(原文仍在这里)");
+    notes.push("replaced by the summary in the projection (original kept here)");
   }
   return [
-    c.faint(`${JSON.stringify(e).length} 字符 · ${notes.join(" · ")}`),
+    c.faint(`${JSON.stringify(e).length} chars · ${notes.join(" · ")}`),
     "",
     ...jsonLines(e, "").map((l) => c.ink(l)),
   ];
@@ -699,13 +732,13 @@ export function compactionRow(rec: CompactionRecord, selected: boolean): string 
     const ratio =
       rec.coveredTokens > 0 ? Math.round((rec.summaryTokens / rec.coveredTokens) * 100) : 0;
     parts.push(
-      `原文 #${rec.covered[0]}–#${rec.covered.at(-1)}(${rec.covered.length} 条 · ${fmtTok(rec.coveredTokens)} tok)→ 摘要 ${fmtTok(rec.summaryTokens)} tok · 压成 ${ratio}%`,
+      `original #${rec.covered[0]}–#${rec.covered.at(-1)} (${rec.covered.length} events · ${fmtTok(rec.coveredTokens)} tok) → summary ${fmtTok(rec.summaryTokens)} tok · ${ratio}%`,
     );
   }
   if (rec.cleared.length > 0) {
-    parts.push(`清除 ${rec.cleared.length} 条工具结果(${fmtTok(rec.clearedTokens)} tok)`);
+    parts.push(`cleared ${rec.cleared.length} tool results (${fmtTok(rec.clearedTokens)} tok)`);
   }
-  const body = `${`#${rec.n}`.padEnd(4)} ${clock(e.at)}  ${e.strategy ?? "未署名策略"}  ${parts.join("  ")}`;
+  const body = `${`#${rec.n}`.padEnd(4)} ${clock(e.at)}  ${e.strategy ?? "unnamed strategy"}  ${parts.join("  ")}`;
   return `${selected ? c.zhu("▸") : " "} ${selected ? c.bold(c.ink(body)) : c.soft(body)}`;
 }
 
@@ -729,7 +762,7 @@ function eventBodyLines(events: readonly AgentEvent[], i: number): string[] {
     }
     case "tool/result":
       return [
-        head(`tool:${e.name}${e.isError ? "(错误)" : ""}`),
+        head(`tool:${e.name}${e.isError ? " ✗" : ""}`),
         ...indent(e.content).map((l) => c.faint(l)),
         "",
       ];
@@ -749,32 +782,32 @@ export function compactionLines(
   switch (section) {
     case 1: {
       const row = (k: string, v: string) => `${c.soft(k.padEnd(12))} ${c.ink(v)}`;
-      const lines = [row("时间", e.at), row("策略", e.strategy ?? "未署名")];
+      const lines = [row("time", e.at), row("strategy", e.strategy ?? "unnamed")];
       if (rec.covered.length > 0) {
         const ratio = rec.coveredTokens > 0 ? rec.summaryTokens / rec.coveredTokens : 0;
         lines.push(
           row(
-            "覆盖范围",
-            `事件 #${e.coversFrom ?? 1} 到 #${(e.coversUpTo ?? 0) - 1},其中模型可见 ${rec.covered.length} 条`,
+            "covers",
+            `events #${e.coversFrom ?? 1} to #${(e.coversUpTo ?? 0) - 1}, ${rec.covered.length} model-visible`,
           ),
-          row("原文", `${rec.coveredTokens} tok`),
-          row("摘要", `${rec.summaryTokens} tok`),
-          row("压缩比", `${Math.round(ratio * 100)}%(摘要 / 原文)`),
+          row("original", `${rec.coveredTokens} tok`),
+          row("summary", `${rec.summaryTokens} tok`),
+          row("ratio", `${Math.round(ratio * 100)}% (summary / original)`),
         );
       }
       if (rec.cleared.length > 0) {
         lines.push(
           row(
-            "清除",
-            `${rec.cleared.length} 条工具结果,共 ${rec.clearedTokens} tok,投影里换成占位文本`,
+            "cleared",
+            `${rec.cleared.length} tool results, ${rec.clearedTokens} tok, replaced by placeholders in the projection`,
           ),
         );
       }
-      if (e.tokensBefore !== undefined) lines.push(row("压缩前估算", `${e.tokensBefore} tok`));
+      if (e.tokensBefore !== undefined) lines.push(row("before", `${e.tokensBefore} tok`));
       if (e.usage)
         lines.push(
           row(
-            "摘要请求",
+            "summary request",
             `${e.usage.inputTokens}→${e.usage.outputTokens} tok · ${fmtMs(e.latencyMs)}`,
           ),
         );
@@ -783,25 +816,26 @@ export function compactionLines(
         const max = Math.max(rec.coveredTokens, rec.summaryTokens, 1);
         const bar = (n: number) => "█".repeat(Math.max(1, Math.round((n / max) * 30))).padEnd(30);
         lines.push(
-          `${c.soft("原文")} ${c.jin(bar(rec.coveredTokens))} ${c.faint(`${rec.coveredTokens} tok`)}`,
+          `${c.soft("original")} ${c.jin(bar(rec.coveredTokens))} ${c.faint(`${rec.coveredTokens} tok`)}`,
         );
         lines.push(
-          `${c.soft("摘要")} ${c.jin(bar(rec.summaryTokens))} ${c.faint(`${rec.summaryTokens} tok`)}`,
+          `${c.soft("summary ")} ${c.jin(bar(rec.summaryTokens))} ${c.faint(`${rec.summaryTokens} tok`)}`,
         );
         lines.push("");
       }
       lines.push(
         c.faint(
-          "原文一字未删,仍在数组里;被替换的只是投影。分区 2 看原文,3 看摘要,4 看被清除的工具结果。",
+          "Nothing was deleted; the original is still in the array. Only the projection changed. Section 2 original, 3 summary, 4 cleared tool results.",
         ),
       );
       return lines;
     }
     case 2: {
-      if (rec.covered.length === 0) return [c.faint("这次压缩没有摘要覆盖(只做了清除)。")];
+      if (rec.covered.length === 0)
+        return [c.faint("This compaction has no summary (clear only).")];
       const lines = [
         c.faint(
-          `被摘要取代的 ${rec.covered.length} 条模型可见事件,${rec.coveredTokens} tok,全文。`,
+          `The ${rec.covered.length} model-visible events the summary replaced, ${rec.coveredTokens} tok, in full.`,
         ),
         "",
       ];
@@ -809,18 +843,20 @@ export function compactionLines(
       return lines;
     }
     case 3: {
-      if (e.summary === undefined) return [c.faint("这次压缩没有摘要。")];
+      if (e.summary === undefined) return [c.faint("This compaction has no summary.")];
       return [
-        c.faint(`摘要 ${rec.summaryTokens} tok,以一条 user 消息进入此后的每次请求。`),
+        c.faint(
+          `Summary, ${rec.summaryTokens} tok; enters every later request as one user message.`,
+        ),
         "",
         ...indent(e.summary, "").map((l) => c.ink(l)),
       ];
     }
     case 4: {
-      if (rec.cleared.length === 0) return [c.faint("这次压缩没有清除工具结果。")];
+      if (rec.cleared.length === 0) return [c.faint("This compaction cleared no tool results.")];
       const lines = [
         c.faint(
-          `被换成占位文本的 ${rec.cleared.length} 条工具结果,${rec.clearedTokens} tok,原文。`,
+          `The ${rec.cleared.length} tool results replaced by placeholders, ${rec.clearedTokens} tok, original text.`,
         ),
         "",
       ];
@@ -908,6 +944,134 @@ export function compositionLines(events: readonly AgentEvent[], r: CompositionRo
   return lines;
 }
 
+// ---------- 上下文面板的动作(Q83):选中一条消息,Enter 列出能做什么,每项带后果 ----------
+
+export type ContextAction =
+  | "view"
+  | "edit"
+  | "edit-reasoning"
+  | "compare"
+  | "restore"
+  | "drop"
+  | "rewind"
+  | "retry"
+  | "fork";
+
+export type ActionItem = { action: ContextAction; label: string; hint: string };
+
+const EDITABLE = new Set(["user/message", "assistant/message", "tool/result", "session/start"]);
+
+/** 这条消息能做的动作。不能做的不列:没编辑过就没有 compare/restore,最后一条没有 rewind。 */
+export function actionsFor(
+  events: readonly AgentEvent[],
+  r: CompositionRow,
+  total: number,
+): ActionItem[] {
+  const src = events[r.event];
+  const edited = editState(events).edits.has(r.event);
+  const out: ActionItem[] = [
+    {
+      action: "view",
+      label: "View full message",
+      hint: "content, thinking, tool calls, provenance",
+    },
+  ];
+  if (src && EDITABLE.has(src.type))
+    out.push({
+      action: "edit",
+      label: "Edit content",
+      hint: "opens $EDITOR; the original stays in the event",
+    });
+  if (src?.type === "assistant/message" && src.reasoningKind === "full")
+    out.push({
+      action: "edit-reasoning",
+      label: "Edit thinking",
+      hint: "full thinking is echoed back, so this steers the model",
+    });
+  if (edited) {
+    out.push({
+      action: "compare",
+      label: "Compare with original",
+      hint: "line diff, original vs current",
+    });
+    out.push({
+      action: "restore",
+      label: "Restore original",
+      hint: "recorded as another edit; nothing is deleted",
+    });
+  }
+  if (src?.type === "user/message" || src?.type === "assistant/message")
+    out.push({
+      action: "drop",
+      label: "Drop this message",
+      hint: "assistant messages take their tool results with them",
+    });
+  if (r.i < total)
+    out.push({
+      action: "rewind",
+      label: "Rewind to here",
+      hint: `drop everything after #${r.event}`,
+    });
+  out.push({
+    action: "retry",
+    label: "Retry last step",
+    hint: "drop the last reply and ask again, no new prompt",
+  });
+  out.push({
+    action: "fork",
+    label: "Fork here",
+    hint: `copy events up to #${r.event} into a new session file`,
+  });
+  return out;
+}
+
+/** 做了这个动作会怎样:多少条重算、缓存从哪失效、Anthropic 丢几个思考块。随选择实时变。 */
+export function consequenceOf(
+  action: ContextAction,
+  r: CompositionRow,
+  rows: CompositionRow[],
+  events: readonly AgentEvent[],
+  provider?: Provider,
+): string {
+  const after = rows.filter((x) => x.i > r.i);
+  const afterTok = after.reduce((s, x) => s + messageTokens(x.message), 0);
+  const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
+  const anthropic = provider?.fields?.protocol.startsWith("anthropic") ?? false;
+  const thinking = rows.filter(
+    (x) => x.i >= r.i && x.message.role === "assistant" && x.message.opaque !== undefined,
+  ).length;
+  const fromHere = [
+    after.length > 0
+      ? `${plural(after.length, "message")} after #${r.event} recomputed (${fmtTok(afterTok)} tok)`
+      : `nothing after #${r.event} to recompute`,
+    `cache miss from #${r.event} on`,
+    ...(anthropic && thinking > 0 ? [`Anthropic drops ${plural(thinking, "thinking block")}`] : []),
+  ];
+  switch (action) {
+    case "view":
+    case "compare":
+      return "read-only · nothing changes";
+    case "edit":
+    case "edit-reasoning":
+    case "restore":
+      return [...fromHere, "Retry afterwards to see the effect"].join(" · ");
+    case "drop": {
+      const src = events[r.event];
+      const calls = src?.type === "assistant/message" ? src.toolCalls.length : 0;
+      return [
+        `#${r.event} leaves the projection${calls > 0 ? ` with its ${plural(calls, "tool result")}` : ""}`,
+        ...fromHere,
+      ].join(" · ");
+    }
+    case "rewind":
+      return `${plural(after.length, "message")} after #${r.event} leave the projection (${fmtTok(afterTok)} tok) · the next request starts from #${r.event} · nothing is deleted`;
+    case "retry":
+      return "drops the last assistant reply and its tool results · asks again from the current context · no new prompt";
+    case "fork":
+      return `copies the first ${r.event + 1} events into a new session file · this session is untouched`;
+  }
+}
+
 // ---------- 组件 ----------
 
 type Mode =
@@ -918,6 +1082,7 @@ type Mode =
   | "compactions"
   | "compaction"
   | "composition"
+  | "actions"
   | "message";
 
 export class RequestInspector implements Component {
@@ -962,6 +1127,7 @@ export class RequestInspector implements Component {
   }
 
   private messageSelected = 0;
+  private actionSelected = 0;
 
   /** 直接定位到第 n 次请求的某个分区(/raw N → 接收分区)。没有该请求返回 false。 */
   showRequest(n: number, section: Section): boolean {
@@ -1000,7 +1166,7 @@ export class RequestInspector implements Component {
 
   sessions(): SessionSource[] {
     const list = this.deps.sessions?.() ?? [];
-    return list.length > 0 ? list : [{ name: "主会话", events: this.deps.events() }];
+    return list.length > 0 ? list : [{ name: "main", events: this.deps.events() }];
   }
 
   /** 当前选中会话的事件数组。 */
@@ -1142,8 +1308,29 @@ export class RequestInspector implements Component {
         else if (matchesKey(data, Key.end) || data === "G")
           this.messageSelected = Math.max(0, rows.length - 1);
         else if (matchesKey(data, Key.enter) && rows.length > 0) {
-          this.mode = "message";
-          this.scroll = 0;
+          this.mode = "actions";
+          this.actionSelected = 0;
+        }
+        break;
+      }
+      case "actions": {
+        const rows = this.composition().rows;
+        const r = rows[this.messageSelected];
+        const items = r ? actionsFor(events, r, rows.length) : [];
+        if (matchesKey(data, Key.escape) || data === "q") this.mode = "composition";
+        else if (matchesKey(data, Key.up) || data === "k")
+          this.actionSelected = clampSel(this.actionSelected - 1, items.length);
+        else if (matchesKey(data, Key.down) || data === "j")
+          this.actionSelected = clampSel(this.actionSelected + 1, items.length);
+        else if (matchesKey(data, Key.enter) && r) {
+          const item = items[this.actionSelected];
+          if (item?.action === "view") {
+            this.mode = "message";
+            this.scroll = 0;
+          } else if (item) {
+            this.mode = "composition";
+            this.deps.onAction?.(item.action, r);
+          }
         }
         break;
       }
@@ -1272,7 +1459,7 @@ export class RequestInspector implements Component {
     const items = list.map((s, i) =>
       i === this.sessionIndex ? c.jin(`▸ ${s.name}`) : c.faint(`  ${s.name}`),
     );
-    return `${items.join("   ")}   ${c.faint("s 切换会话")}`;
+    return `${items.join("   ")}   ${c.faint("s switch session")}`;
   }
 
   render(width: number): string[] {
@@ -1295,19 +1482,19 @@ export class RequestInspector implements Component {
 
     if (this.mode === "list") {
       const recs = this.records();
-      const title = `${c.bold(c.jin("请求检视"))}  ${c.soft(`${recs.length} 次请求`)}  ${c.faint("Tab 事件视图 · 压缩对照")}`;
+      const title = `${c.bold(c.jin("Requests"))}  ${c.soft(`${recs.length} requests`)}  ${c.faint("one line per API request · Tab: events · compactions · context")}`;
       const columns = c.faint(
-        "  序号  时间      模型  发送(条数 · 估算 tok)  → 实测(缓存)  +输出  耗时  停止原因",
+        "  #    time      model  sent (msgs · est. tok)  → measured (cache)  +out  latency  stop",
       );
       const head = withSession([pad(title), pad(columns), pad(rule)]);
       const foot = [
         pad(rule),
-        pad(c.faint("↑↓ 选择 · Enter 详情 · Tab 切视图 · s 切会话 · Esc 关闭")),
+        pad(c.faint("↑↓ select · Enter details · Tab next view · s session · Esc close")),
       ];
       const viewport = rows - head.length - foot.length;
       this.lastViewport = viewport;
       let body: string[];
-      if (recs.length === 0) body = [pad(c.faint("尚无请求。发一条消息后再来。"))];
+      if (recs.length === 0) body = [pad(c.faint("No requests yet. Send a message first."))];
       else {
         const start = windowStart(this.selected, recs.length, viewport);
         body = recs
@@ -1318,12 +1505,12 @@ export class RequestInspector implements Component {
     }
 
     if (this.mode === "events") {
-      const title = `${c.bold(c.jin("事件日志"))}  ${c.soft(`${events.length} 条`)}  ${c.faint("内核维护的全部状态就是这个数组;屏幕、请求视图、模型看到的消息都是它的投影")}`;
-      const columns = c.faint("  下标  时间      类型                  大小  可见性  压缩状态");
+      const title = `${c.bold(c.jin("Events"))}  ${c.soft(`${events.length} events`)}  ${c.faint("this array is the whole kernel state; the screen, the requests and what the model sees are projections of it")}`;
+      const columns = c.faint("  #     time      type                  size   visibility  state");
       const head = withSession([pad(title), pad(columns), pad(rule)]);
       const foot = [
         pad(rule),
-        pad(c.faint("↑↓ 选择 · Enter 原样 JSON · Tab 压缩对照 · s 切会话 · Esc 关闭")),
+        pad(c.faint("↑↓ select · Enter raw JSON · Tab compactions · s session · Esc close")),
       ];
       const viewport = rows - head.length - foot.length;
       this.lastViewport = viewport;
@@ -1338,7 +1525,7 @@ export class RequestInspector implements Component {
 
     if (this.mode === "event") {
       const e = events[this.eventSelected];
-      const title = `${c.bold(c.jin(`事件 #${this.eventSelected}`))}  ${c.ink(e?.type ?? "")}  ${c.faint(e ? clock(e.at) : "")}  ${c.faint(`(${this.eventSelected + 1}/${events.length})`)}`;
+      const title = `${c.bold(c.jin(`Event #${this.eventSelected}`))}  ${c.ink(e?.type ?? "")}  ${c.faint(e ? clock(e.at) : "")}  ${c.faint(`(${this.eventSelected + 1}/${events.length})`)}`;
       const head = [pad(title), pad(rule)];
       const content = this.cached(cacheKey(`event:${this.eventSelected}`), () =>
         eventLines(events, this.eventSelected).flatMap((l) => wrapTextWithAnsi(l, inner)),
@@ -1346,7 +1533,7 @@ export class RequestInspector implements Component {
       return this.scrollable(
         head,
         content,
-        "↑↓ 滚动 · PgUp/PgDn 翻页 · [ ] 上下一条 · Esc 返回",
+        "↑↓ scroll · PgUp/PgDn page · [ ] prev/next · Esc back",
         rows,
         pad,
         rule,
@@ -1355,20 +1542,26 @@ export class RequestInspector implements Component {
 
     if (this.mode === "compactions") {
       const comps = this.compactions();
-      const title = `${c.bold(c.jin("压缩对照"))}  ${c.soft(`${comps.length} 次压缩`)}  ${c.faint("哪一大段原文变成了什么;原文永远留在数组里")}`;
+      const title = `${c.bold(c.jin("Compactions"))}  ${c.soft(`${comps.length} compactions`)}  ${c.faint("what became what; the original always stays in the array")}`;
       const columns = c.faint(
-        "  序号  时间      策略  原文范围(条数 · tok)→ 摘要 tok · 压缩比  清除",
+        "  #    time      strategy  original (events · tok) → summary tok · ratio  cleared",
       );
       const head = withSession([pad(title), pad(columns), pad(rule)]);
       const foot = [
         pad(rule),
-        pad(c.faint("↑↓ 选择 · Enter 对照详情 · Tab 组装视图 · s 切会话 · Esc 关闭")),
+        pad(c.faint("↑↓ select · Enter details · Tab context · s session · Esc close")),
       ];
       const viewport = rows - head.length - foot.length;
       this.lastViewport = viewport;
       let body: string[];
       if (comps.length === 0)
-        body = [pad(c.faint("尚无压缩。上下文接近阈值或 /compact 之后再来。"))];
+        body = [
+          pad(
+            c.faint(
+              "No compactions yet. Come back after the context nears the threshold, or /compact.",
+            ),
+          ),
+        ];
       else {
         const start = windowStart(this.compactionSelected, comps.length, viewport);
         body = comps
@@ -1395,7 +1588,7 @@ export class RequestInspector implements Component {
       const foot = [
         pad(rule),
         pad(om),
-        pad(c.faint("↑↓ select · Enter message · Tab requests · s session · Esc close")),
+        pad(c.faint("↑↓ select · Enter actions · Tab requests · s session · Esc close")),
       ];
       const viewport = rows - head.length - foot.length;
       this.lastViewport = viewport;
@@ -1408,6 +1601,48 @@ export class RequestInspector implements Component {
           .map((r, i) => pad(compositionRow(r, start + i === this.messageSelected)));
       }
       return [...head, ...fill(body, viewport), ...foot];
+    }
+
+    if (this.mode === "actions") {
+      const { rows: crows } = this.composition();
+      const r = crows[this.messageSelected];
+      if (!r) {
+        this.mode = "composition";
+        return this.render(width);
+      }
+      const items = actionsFor(events, r, crows.length);
+      const sel = Math.min(this.actionSelected, items.length - 1);
+      const m = r.message;
+      const title = `${c.bold(c.jin(`Message #${r.i}`))}  ${c.ink(roleLabel(m))}  ${c.soft(`event #${r.event} · ≈${messageTokens(m)} tok${m.edited ? " · edited" : ""}`)}`;
+      const head = [pad(title), pad(rule)];
+      const previewSrc = m.content
+        ? m.content.split("\n").slice(0, 6)
+        : m.role === "assistant" && m.toolCalls.length > 0
+          ? m.toolCalls.map((t) => `⚙ ${t.name} ${JSON.stringify(t.args)}`)
+          : ["(empty)"];
+      const chosen = items[sel] as ActionItem;
+      const body = [
+        ...previewSrc.map((l) => pad(c.faint(`  ${truncateToWidth(l, inner - 4, "…")}`))),
+        pad(""),
+        pad(c.soft("Actions")),
+        ...items.map((it, i) =>
+          pad(
+            i === sel
+              ? `  ${c.jin("▸")} ${c.bold(c.ink(it.label.padEnd(24)))} ${c.faint(it.hint)}`
+              : `    ${c.soft(it.label.padEnd(24))} ${c.faint(it.hint)}`,
+          ),
+        ),
+        pad(""),
+        // 后果一行说不完就换行,不截断:这是面板存在的理由。
+        ...wrapTextWithAnsi(
+          `${c.soft("If you do this")}  ${c.faint(consequenceOf(chosen.action, r, crows, events, this.deps.currentProvider?.()))}`,
+          inner,
+        ).map(pad),
+      ];
+      const foot = [pad(rule), pad(c.faint("↑↓ move · Enter choose · Esc back"))];
+      const viewport = rows - head.length - foot.length;
+      this.lastViewport = viewport;
+      return [...head, ...fill(body.slice(0, viewport), viewport), ...foot];
     }
 
     if (this.mode === "message") {
@@ -1445,7 +1680,7 @@ export class RequestInspector implements Component {
           ? c.bold(c.jin(`[${n} ${name}]`))
           : c.soft(` ${n} ${name} `);
       }).join(" ");
-      const title = `${c.bold(c.jin(`压缩 #${rec.n}`))}  ${c.ink(rec.event.strategy ?? "")}  ${c.faint(clock(rec.event.at))}  ${c.faint(`(${this.compactionSelected + 1}/${comps.length})`)}`;
+      const title = `${c.bold(c.jin(`Compaction #${rec.n}`))}  ${c.ink(rec.event.strategy ?? "")}  ${c.faint(clock(rec.event.at))}  ${c.faint(`(${this.compactionSelected + 1}/${comps.length})`)}`;
       const head = [pad(title), pad(tabs), pad(rule)];
       const content = this.cached(
         cacheKey(`compaction:${rec.index}:${this.compactionSection}`),
@@ -1457,7 +1692,7 @@ export class RequestInspector implements Component {
       return this.scrollable(
         head,
         content,
-        "↑↓ 滚动 · PgUp/PgDn 翻页 · ←→ 或 1-4 切分区 · [ ] 切压缩 · Esc 返回",
+        "↑↓ scroll · PgUp/PgDn · ←→ 1-4 section · [ ] compaction · Esc back",
         rows,
         pad,
         rule,
@@ -1474,7 +1709,7 @@ export class RequestInspector implements Component {
       const n = i + 1;
       return n === this.section ? c.bold(c.jin(`[${n} ${name}]`)) : c.soft(` ${n} ${name} `);
     }).join(" ");
-    const title = `${c.bold(c.jin(`请求 #${rec.n}`))}  ${c.ink(rec.request.model)}  ${c.faint(clock(rec.request.at))}  ${c.faint(`(${this.selected + 1}/${recs.length})`)}`;
+    const title = `${c.bold(c.jin(`Request #${rec.n}`))}  ${c.ink(rec.request.model)}  ${c.faint(clock(rec.request.at))}  ${c.faint(`(${this.selected + 1}/${recs.length})`)}`;
     const head = [pad(title), pad(tabs), pad(rule)];
     const content = this.cached(
       cacheKey(`detail:${rec.index}:${this.section}:${this.folded}`),
@@ -1483,7 +1718,7 @@ export class RequestInspector implements Component {
     return this.scrollable(
       head,
       content,
-      "↑↓ 滚动 · PgUp/PgDn 翻页 · ←→ 或 1-7 切分区 · [ ] 切请求 · f 折叠正文 · Esc 返回",
+      "↑↓ scroll · PgUp/PgDn · ←→ 1-7 section · [ ] request · f fold · Esc back",
       rows,
       pad,
       rule,
@@ -1507,9 +1742,10 @@ export class RequestInspector implements Component {
     while (slice.length < viewport) slice.push("");
     const pos =
       content.length <= viewport
-        ? `${content.length} 行`
-        : `第 ${this.scroll + 1}-${Math.min(content.length, this.scroll + viewport)} 行 / ${content.length}`;
-    const foot = [pad(rule), pad(`${c.faint(hint)}  ${c.soft(pos)}`)];
+        ? `${content.length} lines`
+        : `lines ${this.scroll + 1}-${Math.min(content.length, this.scroll + viewport)} of ${content.length}`;
+    // 位置在前:窄终端截断的是按键提示,不是"第几行"。
+    const foot = [pad(rule), pad(`${c.soft(pos)}  ${c.faint(hint)}`)];
     return [...head, ...slice.map(pad), ...foot];
   }
 }

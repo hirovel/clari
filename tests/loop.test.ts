@@ -119,7 +119,10 @@ describe("runTurn", () => {
       tools: [echoTool],
       slots: { approve: () => false },
     });
-    expect(firstResult(log)).toMatchObject({ content: "用户拒绝执行此调用。", isError: true });
+    expect(firstResult(log)).toMatchObject({
+      content: "The user denied this call.",
+      isError: true,
+    });
   });
 
   it("maxSteps 终止策略叫停,返回 stopped 理由(Q8)", async () => {

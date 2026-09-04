@@ -1,4 +1,5 @@
 // TUI 应用:与终端实现解耦,便于用虚拟终端离线验证。cli/tui.ts 负责配置与真实终端,本文件负责界面。
+
 // pi-tui 只当渲染引擎(Q45):差分渲染、编辑器、宽度计算;视觉层全部是这里的自有组合。
 import { existsSync, readFileSync } from "node:fs";
 import {
@@ -32,7 +33,7 @@ import {
   steer,
   type TurnDeps,
 } from "../src/loop.js";
-import { editState, type Message } from "../src/messages.js";
+import { composeContext, editState, type Message } from "../src/messages.js";
 import {
   EFFORT_LEVELS,
   type EffortLevel,
@@ -46,16 +47,30 @@ import type { Tool } from "../src/tools.js";
 import { expandFileRefs } from "./attachments.js";
 import { forkSession, loadCompactionStrategy, SESSIONS_DIR } from "./bootstrap.js";
 import {
+  callLine,
+  cont,
   errorCardLines,
+  firstRunLines,
+  GUTTER,
   predictedCache,
   rawRow,
-  reasoningTitle,
   receiveBlockLines,
   receiveHead,
+  resultLines,
   sendCardLines,
+  shortcutLines,
+  thinkingLines,
 } from "./cards.js";
 import { editInExternalEditor } from "./editor.js";
-import { fmtMs, fmtTok, messagesFor, RequestInspector, type SessionSource } from "./inspector.js";
+import {
+  type CompositionRow,
+  type ContextAction,
+  fmtMs,
+  fmtTok,
+  messagesFor,
+  RequestInspector,
+  type SessionSource,
+} from "./inspector.js";
 import { expandSkill, type Skill } from "./prompt.js";
 import { expandTemplate, type PromptTemplate } from "./templates.js";
 import { c, editorTheme, markdownTheme } from "./theme.js";
@@ -165,35 +180,64 @@ const CHILD_TAIL = 3;
 type ChildMode = "tail" | "all" | "progress";
 
 const COMMANDS = [
-  { name: "inspect", description: "请求检视器:每次 API 请求的发送、接收、决策与写入(Ctrl+R)" },
-  { name: "events", description: "事件视图:内核维护的全部事件数组,逐条原样 JSON(检视器内 Tab)" },
-  { name: "compactions", description: "压缩对照:每次压缩把哪一大段原文变成了什么摘要" },
+  {
+    name: "inspect",
+    description:
+      "Inspector (Ctrl+R): every API request, what was sent, received, decided and written",
+  },
+  {
+    name: "events",
+    description: "Events view: the whole event array the kernel maintains, raw JSON per event",
+  },
+  {
+    name: "compactions",
+    description: "Compactions: which span of the original became which summary",
+  },
   {
     name: "composition",
     description:
       "Context composition (Ctrl+E): every message the model sees next, its source event, stages, wire index",
   },
-  { name: "context", description: "上下文构成:各部分 token 与占比" },
-  { name: "prompt", description: "系统提示词由哪几段组成、各占多少、放在哪(Q66)" },
+  { name: "context", description: "Context breakdown: tokens and share per part" },
+  { name: "prompt", description: "System prompt sections: what they are, how big, where they sit" },
   {
     name: "memory",
-    description: "跨会话记忆:/memory 列出;/memory forget N 删一条;/memory clear 清空",
+    description:
+      "Cross-session memory: /memory lists; /memory forget N removes one; /memory clear empties it",
   },
-  { name: "compact", description: "手动压缩,可附指示:/compact 保留报错" },
+  {
+    name: "compact",
+    description: "Compact now, optionally with instructions: /compact keep the errors",
+  },
   {
     name: "fork",
-    description: "分叉会话:/fork 复制到最后一条用户消息之前;/fork N 复制前 N 条事件到新文件",
+    description:
+      "Fork the session: /fork copies up to the last user message; /fork N copies the first N events to a new file",
   },
   {
     name: "edit",
     description:
-      "编辑上下文:/edit N [text|reasoning|content|system] [新文本];不给文本则开外部编辑器。原文永远留在事件里",
+      "Edit the context: /edit N [text|reasoning|content|system] [new text]; without text the external editor opens. The original stays in the event",
   },
-  { name: "drop", description: "丢弃一条消息:/drop N [备注];助手消息连同它的工具结果一起不再发送" },
-  { name: "edits", description: "列出本会话的全部编辑与丢弃" },
+  {
+    name: "drop",
+    description:
+      "Drop a message: /drop N [note]; an assistant message takes its tool results with it",
+  },
+  { name: "compare", description: "Compare an edited message with its original: /compare N" },
+  {
+    name: "restore",
+    description: "Restore the original of an edited message: /restore N (recorded as another edit)",
+  },
+  {
+    name: "rewind",
+    description: "Rewind to a message: /rewind N drops every message after event N",
+  },
+  { name: "edits", description: "List every edit and drop in this session" },
   {
     name: "retry",
-    description: "重跑一步:丢掉最后一条助手消息及其工具结果,不加新消息,从当前投影再发一次请求",
+    description:
+      "Retry the step: drop the last assistant reply and its tool results, then ask again with no new prompt",
   },
   { name: "slots", description: "Show every strategy slot and its current implementation" },
   {
@@ -216,15 +260,31 @@ const COMMANDS = [
   { name: "execution", description: "Tool execution: /execution sequential|parallel" },
   { name: "steering", description: "When queued messages are injected: /steering step|turn" },
   { name: "approve", description: "Tool approval: /approve all|ask" },
-  { name: "model", description: "切换模型:/model 供应商/模型;不带参数列出可选" },
-  { name: "models", description: "向供应商查询当前可用模型,对照配置标出下线与新增" },
-  { name: "fields", description: "当前协议往请求里放哪些字段、从响应里读哪些、明知存在但不读哪些" },
-  { name: "effort", description: "强度级别:/effort off|low|medium|high|xhigh|max;auto 恢复不传" },
-  { name: "key", description: "设置供应商 key:/key deepseek sk-…(写入配置文件)" },
-  { name: "default", description: "把当前模型设为缺省" },
-  { name: "stop", description: "打断正在运行的 turn" },
-  { name: "help", description: "命令列表" },
-  { name: "quit", description: "退出" },
+  {
+    name: "model",
+    description: "Switch model: /model provider/model; without arguments lists the options",
+  },
+  {
+    name: "models",
+    description: "Ask the provider which models exist; flags configured ones that are gone",
+  },
+  {
+    name: "fields",
+    description:
+      "What this protocol puts in a request, reads from a response, and knowingly ignores",
+  },
+  {
+    name: "effort",
+    description: "Effort level: /effort off|low|medium|high|xhigh|max; auto omits it",
+  },
+  {
+    name: "key",
+    description: "Set a provider key: /key deepseek sk-… (written to the config file)",
+  },
+  { name: "default", description: "Make the current model the default" },
+  { name: "stop", description: "Interrupt the running turn" },
+  { name: "help", description: "List commands" },
+  { name: "quit", description: "Quit" },
 ];
 
 /** 引导线:子 agent 的每一行都带它,一眼分清层级;不是框线(Q45)。 */
@@ -251,7 +311,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     new CombinedAutocompleteProvider(
       [
         ...COMMANDS,
-        ...templates.map((t) => ({ name: t.name, description: `模板:${t.description}` })),
+        ...templates.map((t) => ({ name: t.name, description: `template: ${t.description}` })),
       ],
       process.cwd(),
     ),
@@ -260,7 +320,9 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
   tui.addChild(header);
   tui.addChild(
     new Text(
-      c.faint("Esc 打断 · Ctrl+R 检视 · Ctrl+O 折叠 · Ctrl+T 思考 · 运行中输入即插话 · /help"),
+      c.faint(
+        "Esc interrupt · Ctrl+R inspect · Ctrl+E context · Ctrl+O fold · Ctrl+T thinking · ? shortcuts",
+      ),
       1,
       0,
     ),
@@ -281,7 +343,10 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
 
   // 显示状态(Q49):折叠/隐藏只改屏幕,不改日志;切换键重绘已有节点。
   let foldResults = deps.fold ?? false;
-  let showReasoning = true;
+  // 思考缺省折成一行(首行 + 种类 + 行数),Ctrl+T 展开全文。
+  let showReasoning = false;
+  /** 首屏(新会话且还没有用户消息时显示),第一条消息一到就撤。 */
+  let firstRun: Text | undefined;
   let childMode: ChildMode = "tail";
   type ResultRecord = { name: string; content: string; isError: boolean; durationMs?: number };
   const resultNodes: ({ node: Text } & ResultRecord)[] = [];
@@ -300,9 +365,9 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
 
   // 推理内容不隐藏(Q34):thinking 模型的思考过程以淡字实时呈现。
   const renderReasoning = (s: string, kind?: "full" | "summary") =>
-    showReasoning
-      ? `${c.faint(reasoningTitle(kind))}\n${c.faint(c.italic(indent(s.trim())))}`
-      : c.faint(`${reasoningTitle(kind)}(已隐藏,Ctrl+T 显示)`);
+    thinkingLines(s, kind, showReasoning, Math.max(20, deps.terminal.columns - GUTTER - 24)).join(
+      "\n",
+    );
 
   // 发送卡 / 接收卡(可见性的核心):上一次正常步发出的消息是"未变 / 新增"的比较基线;
   // 每个 request 事件下标对应一个接收卡头行节点,响应、压缩结果或失败到来时更新它。
@@ -348,8 +413,10 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
         const allowed = decision !== "n";
         note(
           allowed
-            ? c.faint(`· 审批:允许 ${call.name}${decision === "a" ? "(本会话不再问)" : ""}`)
-            : c.zhu(`· 审批:拒绝 ${call.name}`),
+            ? c.faint(
+                `· approve: allowed ${call.name}${decision === "a" ? " (not asked again this session)" : ""}`,
+              )
+            : c.zhu(`· approve: denied ${call.name}`),
         );
         resolve(allowed);
       });
@@ -369,8 +436,9 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     slots: { ...deps.slots, ...(deps.approve === "ask" && { approve: askApproval }) },
     onDelta: (d) => {
       if (!streaming) {
-        transcript.addChild(new Spacer(1));
-        streaming = new Markdown("", 1, 0, markdownTheme, { color: c.ink });
+        // 回复正文:一行 reply 标签,正文缩进到标签沟的内容列,Markdown 照常渲染。
+        transcript.addChild(new Text(c.faint("reply"), 1, 0));
+        streaming = new Markdown("", GUTTER + 3, 0, markdownTheme, { color: c.ink });
         transcript.addChild(streaming);
       }
       streamBuffer += d;
@@ -401,29 +469,29 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     deps.settings?.priceFor?.(model) ?? (model === info.model ? deps.price : undefined);
 
   function updateStatus(): void {
-    const state = agent.running ? c.zhu("● 运行中") : c.green("○ 空闲");
+    const state = agent.running ? c.zhu("● running") : c.green("○ idle");
     const t = threshold();
-    let tokens = c.faint("尚无请求");
+    let tokens = c.faint("no requests yet");
     if (lastUsage) {
       // 上下文占用条:以自动压缩阈值为满格;过七成转朱色提醒。
       const used = Math.min(1, lastUsage.inputTokens / t);
       const cells = used > 0 ? Math.max(1, Math.round(used * 10)) : 0;
       const bar = "▰".repeat(cells) + "▱".repeat(10 - cells);
       const tone = used >= 0.7 ? c.zhu : c.jin;
-      tokens = `${tone(bar)} ${c.faint(`距自动压缩 ${pct(Math.max(0, 1 - used))} · ${lastUsage.inputTokens}→${lastUsage.outputTokens} tok`)}`;
+      tokens = `${tone(bar)} ${c.faint(`${pct(Math.max(0, 1 - used))} until auto-compaction · ${lastUsage.inputTokens}→${lastUsage.outputTokens} tok`)}`;
     }
     // 会话累计(含压缩摘要请求):输入、输出、缓存命中、费用。数据全部来自事件数组。
     const totals = usageTotals(log.events, priceFor);
     const sum =
       totals.requests > 0
         ? c.faint(
-            ` · 累计 ↑${fmtTok(totals.inputTokens)} ↓${fmtTok(totals.outputTokens)}${totals.cacheReadTokens > 0 ? ` 缓存 ${fmtTok(totals.cacheReadTokens)}` : ""}${totals.cost !== undefined ? ` ${fmtCost(totals.cost)}` : ""}`,
+            ` · total ↑${fmtTok(totals.inputTokens)} ↓${fmtTok(totals.outputTokens)}${totals.cacheReadTokens > 0 ? ` cache ${fmtTok(totals.cacheReadTokens)}` : ""}${totals.cost !== undefined ? ` ${fmtCost(totals.cost)}` : ""}`,
           )
         : "";
-    const queued = agent.queued > 0 ? c.faint(` · 留言 ${agent.queued}`) : "";
-    const effort = agent.effort ? c.faint(` · 强度 ${agent.effort}`) : "";
+    const queued = agent.queued > 0 ? c.faint(` · queued ${agent.queued}`) : "";
+    const effort = agent.effort ? c.faint(` · effort ${agent.effort}`) : "";
     const runningChildren = childViews.filter((v) => v.running).length;
-    const kids = runningChildren > 0 ? c.faint(` · 子 ${runningChildren} 运行中`) : "";
+    const kids = runningChildren > 0 ? c.faint(` · sub-agents ${runningChildren} running`) : "";
     status.setText(`${state}  ${tokens}${sum}${effort}${queued}${kids}`);
     tui.requestRender();
   }
@@ -435,20 +503,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
 
   /** 工具结果的屏幕文本。折叠只是显示状态,内容原封不动留在节点里。 */
   function resultText(r: ResultRecord): string {
-    const mark = r.isError ? c.zhu("✗") : c.green("✓");
-    const trimmed = r.content.trim();
-    const all = trimmed ? trimmed.split("\n") : [];
-    let body: string;
-    if (all.length === 0) body = "  (无输出)";
-    else if (foldResults && all.length > FOLD_HEAD + 1) {
-      body = `${indent(all.slice(0, FOLD_HEAD).join("\n"))}\n${c.soft(`  … 还有 ${all.length - FOLD_HEAD} 行(Ctrl+O 展开)`)}`;
-    } else body = indent(trimmed);
-    const metaParts = [
-      ...(all.length > 1 ? [`${all.length} 行`] : []),
-      ...(r.durationMs !== undefined ? [fmtMs(r.durationMs)] : []),
-    ];
-    const meta = metaParts.length > 0 ? c.faint(`  ${metaParts.join(" · ")}`) : "";
-    return `${mark} ${c.soft(r.name)}${meta}\n${r.isError ? c.soft(body) : c.faint(body)}`;
+    return resultLines(r, { folded: foldResults, head: FOLD_HEAD }).join("\n");
   }
 
   /** Ctrl+O:父的工具结果折叠/展开;子 agent 块在 尾窗 → 全部 → 仅进度 间轮换。 */
@@ -460,16 +515,20 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     for (const v of childViews) v.refresh();
     const kids =
       childViews.length > 0
-        ? `;子 agent ${childMode === "tail" ? "尾窗" : childMode === "all" ? "全部" : "仅进度"}`
+        ? `; sub-agents: ${childMode === "tail" ? "tail" : childMode === "all" ? "all" : "progress only"}`
         : "";
-    note(c.faint(`· 工具结果已${foldResults ? "折叠(Ctrl+O 展开)" : "展开"}${kids}`));
+    note(
+      c.faint(`· tool results ${foldResults ? "folded (Ctrl+O to unfold)" : "unfolded"}${kids}`),
+    );
   }
 
   function toggleReasoning(): void {
     showReasoning = !showReasoning;
     for (const r of reasoningNodes) r.node.setText(renderReasoning(r.text, r.kind));
     if (reasoningView) reasoningView.setText(renderReasoning(reasoningBuffer));
-    note(c.faint(showReasoning ? "· 思考已显示" : "· 思考已隐藏(Ctrl+T 显示)"));
+    note(
+      c.faint(showReasoning ? "· thinking expanded" : "· thinking collapsed to one line (Ctrl+T)"),
+    );
   }
 
   /** 更新某次请求的接收卡头行;n 是它的请求序号。 */
@@ -551,29 +610,29 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
 
     refresh(): void {
       const elapsed = fmtMs((this.finishedAt ?? Date.now()) - this.startedAt);
-      const stats = `第 ${this.steps} 步 · ${this.toolsUsed} 次工具 · ${elapsed}${this.tokens ? ` · ${fmtTok(this.tokens)} tok` : ""}`;
+      const stats = `step ${this.steps} · ${this.toolsUsed} tool calls · ${elapsed}${this.tokens ? ` · ${fmtTok(this.tokens)} tok` : ""}`;
       const head = this.running
-        ? `${c.zhu("●")} ${c.soft(`运行中 · ${stats}`)}`
+        ? `${c.zhu("●")} ${c.soft(`running · ${stats}`)}`
         : this.ok
-          ? `${c.green("✓")} ${c.soft(`完成 · ${stats}`)}`
-          : `${c.zhu("✗")} ${c.soft(`部分完成 · ${stats}`)}`;
+          ? `${c.green("✓")} ${c.soft(`done · ${stats}`)}`
+          : `${c.zhu("✗")} ${c.soft(`partial · ${stats}`)}`;
       this.progress.setText(GUIDE + head);
       let body: string;
       if (childMode === "progress" || (!this.running && childMode !== "all")) {
         body =
           GUIDE +
           c.faint(
-            `子会话 ${this.lines.length} 行 · Ctrl+O 展开${this.info.log.path ? ` · ${this.info.log.path}` : ""}`,
+            `sub-session ${this.lines.length} lines · Ctrl+O to expand${this.info.log.path ? ` · ${this.info.log.path}` : ""}`,
           );
       } else if (childMode === "all") {
-        body = this.lines.length > 0 ? this.lines.join("\n") : GUIDE + c.faint("(尚无输出)");
+        body = this.lines.length > 0 ? this.lines.join("\n") : GUIDE + c.faint("(no output yet)");
       } else {
         const tail = this.lines.slice(-CHILD_TAIL);
         const more =
           this.lines.length > CHILD_TAIL
-            ? [GUIDE + c.faint(`… 子会话共 ${this.lines.length} 行,Ctrl+O 展开全部`)]
+            ? [GUIDE + c.faint(`… ${this.lines.length} lines in the sub-session · Ctrl+O for all`)]
             : [];
-        body = [...tail, ...more].join("\n") || GUIDE + c.faint("(尚无输出)");
+        body = [...tail, ...more].join("\n") || GUIDE + c.faint("(no output yet)");
       }
       this.body.setText(body);
       tui.requestRender();
@@ -595,9 +654,9 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     tools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters }));
   let overlay: OverlayHandle | undefined;
   const sessions = (): SessionSource[] => [
-    { name: "主会话", events: log.events },
+    { name: "main", events: log.events },
     ...childViews.map((v) => ({
-      name: `子 #${v.info.index} ${brief(v.info.task)}`,
+      name: `sub #${v.info.index} ${brief(v.info.task)}`,
       events: v.info.log.events,
     })),
   ];
@@ -616,6 +675,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     rows: () => deps.terminal.rows,
     ...(deps.trace && { rawFor: (i: number) => rawAt.get(i) }),
     onClose: () => closeInspector(),
+    onAction: (action, row) => void contextAction(action, row),
     requestRender: () => tui.requestRender(),
   });
 
@@ -654,6 +714,10 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
   function render(e: AgentEvent): void {
     switch (e.type) {
       case "user/message":
+        if (firstRun) {
+          transcript.removeChild(firstRun);
+          firstRun = undefined;
+        }
         transcript.addChild(new Spacer(1));
         transcript.addChild(new Text(`${c.zhu("›")} ${c.bold(c.ink(e.text))}`, 1, 0));
         break;
@@ -686,22 +750,26 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
           streaming = undefined;
           streamBuffer = "";
         } else if (e.text) {
-          transcript.addChild(new Spacer(1));
-          transcript.addChild(new Markdown(e.text, 1, 0, markdownTheme, { color: c.ink }));
+          transcript.addChild(new Text(c.faint("reply"), 1, 0));
+          transcript.addChild(new Markdown(e.text, GUTTER + 3, 0, markdownTheme, { color: c.ink }));
         }
         if (e.usage) lastUsage = e.usage;
-        if (e.toolCalls.length > 0) transcript.addChild(new Spacer(1));
         for (const tc of e.toolCalls) {
-          transcript.addChild(
-            new Text(
-              `${c.zhu("⚙")} ${c.bold(c.ink(tc.name))}  ${c.soft(formatArgs(tc.args))}`,
-              1,
-              0,
-            ),
-          );
-          // edit/write 的改动内容直接可见(Q58):diff 从参数算出,不进日志。
+          transcript.addChild(new Text(callLine(tc.name, formatArgs(tc.args)), 1, 0));
+          // edit/write 的改动内容直接可见(Q58):diff 从参数算出,不进日志。续行缩进到内容列。
           const detail = toolCallDetail(tc.name, tc.args);
-          if (detail) transcript.addChild(new Text(detail, 1, 0));
+          if (detail) {
+            transcript.addChild(
+              new Text(
+                detail
+                  .split("\n")
+                  .map((l) => cont(l))
+                  .join("\n"),
+                1,
+                0,
+              ),
+            );
+          }
           // task 调用行下面留一个槽,子 agent 开跑时把它的块挂进来(Q62)。
           if (tc.name === "task") {
             const slot = new Container();
@@ -716,8 +784,9 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
           const raw = rawAt.get(lastTurnRequestIndex);
           if (raw) transcript.addChild(new Text(rawRow(raw.length, requestCount), 1, 0));
         }
-        if (e.stopReason === "aborted") note(c.faint("— 已打断 —"));
-        if (e.stopReason === "length") note(c.jin("◇ 输出被截断,已要求模型重发"));
+        if (e.stopReason === "aborted") note(c.faint("— interrupted —"));
+        if (e.stopReason === "length")
+          note(c.jin("◇ output truncated; the model was asked to resend"));
         break;
       }
       case "tool/result": {
@@ -749,6 +818,10 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
           before: [],
         };
         const messages = messagesFor(log.events, rec);
+        // 来历(Q81):正常步的正文就是之前事件的投影,每条都能对回事件号;摘要请求的正文由策略记的 body 重建,没有来历。
+        const provenance = e.body
+          ? undefined
+          : composeContext(log.events.slice(0, lastRequestIndex)).provenance;
         const activeDefs = defs().filter((d) => e.tools.includes(d.name));
         const level = e.effort ? parseEffort(e.effort) : undefined;
         const wire = agent.provider.wire?.(messages, activeDefs, level ? { effort: level } : {});
@@ -766,6 +839,8 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
               defs: activeDefs,
               ...(start?.type === "session/start" &&
                 start.sections && { sections: start.sections }),
+              ...(provenance && { provenance }),
+              width: Math.max(24, deps.terminal.columns - 52),
               toolsUnchanged: toolNames === lastToolNames,
               dropsThinking: agent.provider.fields?.protocol.startsWith("anthropic") ?? false,
             }).join("\n"),
@@ -790,14 +865,15 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       case "retry":
         note(
           c.faint(
-            `· 重试 ${e.attempt}:${e.status ?? ""} ${e.error.split("\n")[0]},${fmtMs(e.delayMs)} 后再试`,
+            `· retry ${e.attempt}: ${e.status ?? ""} ${e.error.split("\n")[0]}, next attempt in ${fmtMs(e.delayMs)}`,
           ),
         );
         break;
       case "decision":
-        if (e.slot === "steering") note(c.faint(`· 插话注入 ${e.injected} 条(${e.boundary} 边界)`));
+        if (e.slot === "steering")
+          note(c.faint(`· steering: injected ${e.injected} (${e.boundary} boundary)`));
         if (e.slot === "execution")
-          note(c.faint(`· 并行执行 ${e.parallel} 个调用:${e.tools.join(", ")}`));
+          note(c.faint(`· parallel: ${e.parallel} calls at once: ${e.tools.join(", ")}`));
         break;
       case "request/error": {
         // 接收卡头行标成失败,下面画错误卡:分类、供应商原话、下一步、原始体在哪。
@@ -825,19 +901,19 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
         }
         const parts: string[] = [];
         if (e.summary !== undefined)
-          parts.push(`摘要覆盖事件 ${e.coversFrom ?? 1}-${e.coversUpTo}`);
-        if (e.cleared?.length) parts.push(`清除 ${e.cleared.length} 条工具结果`);
+          parts.push(`summary covers events ${e.coversFrom ?? 1}-${e.coversUpTo}`);
+        if (e.cleared?.length) parts.push(`cleared ${e.cleared.length} tool results`);
         const cost = e.usage
-          ? `  摘要请求 · ${fmtTok(e.usage.inputTokens)}→${fmtTok(e.usage.outputTokens)} tok · ${fmtMs(e.latencyMs)}`
+          ? `  summary request · ${fmtTok(e.usage.inputTokens)}→${fmtTok(e.usage.outputTokens)} tok · ${fmtMs(e.latencyMs)}`
           : "";
-        const who = e.strategy ? `(${e.strategy})` : "";
+        const who = e.strategy ? ` (${e.strategy})` : "";
         note(
-          `${c.jin(`◇ 已压缩${who}:${parts.join(",")}`)}${c.faint(`${cost}  /compactions 看原文与摘要对照`)}`,
+          `${c.jin(`◇ compacted${who}: ${parts.join(", ")}`)}${c.faint(`${cost}  /compactions to compare original and summary`)}`,
         );
         break;
       }
       case "session/model":
-        note(c.jin(`◇ 已切换模型:${e.model}`));
+        note(c.jin(`◇ model switched to ${e.model}`));
         break;
       case "session/slot":
         // 恢复会话时把历史切换也画出来;当前会话里 slotCommand 已经打过确认行,这里只补状态。
@@ -856,7 +932,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     for (const e of log.events) render(e);
     log.subscribe(render);
     if (log.events.length > 1) {
-      note(c.jin(`◇ 已恢复会话:${log.events.length} 条事件,继续写入 ${info.sessionFile}`));
+      note(c.jin(`◇ resumed: ${log.events.length} events, appending to ${info.sessionFile}`));
     }
   } else {
     log.subscribe(render);
@@ -866,6 +942,10 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       model: info.model,
       system: deps.systemPrompt ?? "",
     });
+  }
+  if (!log.events.some((e) => e.type === "user/message")) {
+    firstRun = new Text(firstRunLines().join("\n"), 1, 0);
+    transcript.addChild(firstRun);
   }
   updateHeader();
   updateStatus();
@@ -878,8 +958,8 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     for (const a of expanded.attachments) {
       note(
         a.skipped
-          ? c.zhu(`· @${a.ref}:${a.skipped}`)
-          : c.faint(`· 附上 @${a.ref}(${a.bytes} 字节)`),
+          ? c.zhu(`· @${a.ref}: ${a.skipped}`)
+          : c.faint(`· attached @${a.ref} (${a.bytes} bytes)`),
       );
     }
     const text = expanded.text;
@@ -888,20 +968,20 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       note(
         c.faint(
           opts.deliverAs === "followUp"
-            ? "· 已排入后续留言:模型做完手头的事再给它"
-            : "· 已排入插话:下一个步边界注入",
+            ? "· queued for after the current step"
+            : "· queued as steering: injected at the next step boundary",
         ),
       );
       updateStatus();
       return;
     }
-    showLoader("思考中");
+    showLoader("thinking");
     try {
       // prompt() 同步执行到首个 await 时已把 running 置位;此处刷新状态栏才能显示"运行中"。
       const pending = agent.prompt(text);
       updateStatus();
       const outcome = await pending;
-      if (typeof outcome === "object") note(c.jin(`◇ 循环停止:${outcome.stopped}`));
+      if (typeof outcome === "object") note(c.jin(`◇ loop stopped: ${outcome.stopped}`));
     } catch (err) {
       // 请求层的失败已由 request/error 事件画成错误卡;这里只兜住循环之外的异常。
       if (log.events.at(-1)?.type !== "request/error") note(c.zhu(`✗ ${(err as Error).message}`));
@@ -920,9 +1000,11 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
           [
             ...COMMANDS.map((x) => `${c.jin(`/${x.name}`.padEnd(12))} ${c.soft(x.description)}`),
             ...templates.map(
-              (t) => `${c.jin(`/${t.name}`.padEnd(12))} ${c.soft(`模板:${t.description}`)}`,
+              (t) => `${c.jin(`/${t.name}`.padEnd(12))} ${c.soft(`template: ${t.description}`)}`,
             ),
-            c.faint("Alt+Enter 排入后续留言(模型做完再给);@路径 把文件附进消息"),
+            c.faint(
+              "Alt+Enter queues a message for after the current step · @path attaches a file · ? shortcuts",
+            ),
           ].join("\n"),
         );
         break;
@@ -997,6 +1079,15 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       case "edits":
         note(editsList());
         break;
+      case "compare":
+        note(compareCommand(arg));
+        break;
+      case "restore":
+        note(restoreCommand(arg));
+        break;
+      case "rewind":
+        note(rewindCommand(arg));
+        break;
       case "retry":
         await retryStep();
         break;
@@ -1030,17 +1121,17 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
         break;
       case "default":
         if (!deps.settings) {
-          note(c.zhu("未配置设置接口"));
+          note(c.zhu("settings interface not configured"));
           break;
         }
         deps.settings.setDefault(`${info.providerName}/${info.model}`);
-        note(c.jin(`◇ 缺省模型已设为 ${info.providerName}/${info.model}`));
+        note(c.jin(`◇ default model set to ${info.providerName}/${info.model}`));
         break;
       default: {
         // 提示词模板:/名 参数 → 展开成一条普通用户消息提交。
         const t = templates.find((x) => x.name === cmd);
         if (t) {
-          note(c.faint(`· 模板 /${t.name}  ${t.path}`));
+          note(c.faint(`· template /${t.name}  ${t.path}`));
           await submit(expandTemplate(t, arg));
           break;
         }
@@ -1060,7 +1151,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
           }
           break;
         }
-        note(c.zhu(`未知命令 /${cmd}`) + c.faint("  /help 查看命令"));
+        note(c.zhu(`unknown command /${cmd}`) + c.faint("  /help lists commands"));
       }
     }
   }
@@ -1074,7 +1165,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     target: number,
   ): { fields: EditField[]; current: (f: EditField) => string } | string {
     const e = log.events[target];
-    if (!e) return `没有事件 #${target}(共 ${log.events.length} 条,Ctrl+R → Tab 事件视图看下标)`;
+    if (!e) return `no event #${target} (${log.events.length} events; Ctrl+E shows event numbers)`;
     const cur = editState(log.events).edits.get(target) ?? {};
     switch (e.type) {
       case "assistant/message":
@@ -1090,40 +1181,44 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       case "session/start":
         return { fields: ["system"], current: () => cur.system ?? e.system };
       default:
-        return `事件 #${target} 是 ${e.type},不进入模型上下文,没有可改的字段`;
+        return `event #${target} is ${e.type}; it never reaches the model, nothing to edit`;
     }
   }
 
   /** 编辑的后果,保存时一并打印:缓存前缀失效、回传物丢弃、Anthropic 之后思考块全丢。 */
   function editConsequences(target: number): string[] {
-    const out = [`从事件 #${target} 起的前缀与上次不再相同,下一请求的缓存命中率会掉`];
+    const out = [
+      `the prefix from event #${target} on differs from the last request; cache hits will drop`,
+    ];
     const e = log.events[target];
     if (e?.type === "assistant/message" && e.opaque !== undefined)
-      out.push("这条消息的私有回传物不再发送");
+      out.push("this message's opaque block is no longer sent");
     if (agent.provider.fields?.protocol.startsWith("anthropic")) {
-      out.push("Anthropic 的思考块签名绑定前缀:之后所有消息的思考块都不再回传");
+      out.push(
+        "Anthropic thinking signatures bind the prefix: thinking blocks after this point are no longer echoed back",
+      );
     }
     return out;
   }
 
   function editCommand(arg: string): string {
-    if (agent.running) return c.zhu("运行中不能编辑,先 Esc 打断");
+    if (agent.running) return c.zhu("cannot edit while running; press Esc first");
     const m = arg.match(/^(\d+)(?:\s+(text|reasoning|content|system))?(?:\s+([\s\S]+))?$/);
     if (!m)
       return c.faint(
-        "用法:/edit N [text|reasoning|content|system] [新文本];不给文本则开外部编辑器",
+        "Usage: /edit N [text|reasoning|content|system] [new text]; without text the external editor opens",
       );
     const target = Number(m[1]);
     const info = editable(target);
     if (typeof info === "string") return c.zhu(info);
     const field = (m[2] as EditField | undefined) ?? (info.fields[0] as EditField);
     if (!info.fields.includes(field)) {
-      return c.zhu(`事件 #${target} 没有字段 ${field},可改:${info.fields.join(" / ")}`);
+      return c.zhu(`event #${target} has no field ${field}; editable: ${info.fields.join(" / ")}`);
     }
     const e = log.events[target];
     if (field === "reasoning" && e?.type === "assistant/message" && e.reasoningKind !== "full") {
       return c.zhu(
-        `事件 #${target} 的思考是${e.reasoningKind === "summary" ? "摘要" : "未标注来源"}:模型读的正文在回传物里,改摘要它看不见。要引导它,追加一条消息(直接输入),或换 DeepSeek 一类回传全文思考的模型`,
+        `event #${target} thinking is ${e.reasoningKind === "summary" ? "a summary" : "of unknown kind"}: the model reads the opaque block, so editing it changes nothing. To steer, append a message, or use a model that echoes full thinking (DeepSeek)`,
       );
     }
     let value = m[3]?.trim();
@@ -1134,51 +1229,195 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
         suffix: field === "reasoning" ? ".txt" : ".md",
       });
       tui.start();
-      if (next === undefined) return c.faint("· 未改动,取消");
+      if (next === undefined) return c.faint("· unchanged, cancelled");
       value = next;
     }
     log.append({ type: "context/edit", at: now(), target, field, value });
     return [
-      c.jin(`◇ 已编辑事件 #${target} 的 ${field}(${value.length} 字)`),
+      c.jin(`◇ edited event #${target}.${field} (${value.length} chars)`),
       ...editConsequences(target).map((s) => c.faint(`  · ${s}`)),
-      c.faint("  · 原文仍在事件里;Ctrl+R → 发送分区看改后的投影,事件视图看 context/edit"),
+      c.faint(
+        "  · the original stays in the event; Ctrl+E shows the projection, the events view shows context/edit",
+      ),
     ].join("\n");
   }
 
   function dropCommand(arg: string): string {
-    if (agent.running) return c.zhu("运行中不能编辑,先 Esc 打断");
+    if (agent.running) return c.zhu("cannot edit while running; press Esc first");
     const m = arg.match(/^(\d+)(?:\s+([\s\S]+))?$/);
-    if (!m) return c.faint("用法:/drop N [备注]");
+    if (!m) return c.faint("Usage: /drop N [note]");
     const target = Number(m[1]);
     const e = log.events[target];
-    if (!e) return c.zhu(`没有事件 #${target}`);
+    if (!e) return c.zhu(`no event #${target}`);
     if (e.type !== "user/message" && e.type !== "assistant/message") {
-      return c.zhu(`只能丢弃用户消息或助手消息(连同它的工具结果);#${target} 是 ${e.type}`);
+      return c.zhu(
+        `only user or assistant messages can be dropped (with their tool results); #${target} is ${e.type}`,
+      );
     }
     const note = m[2]?.trim();
     log.append({ type: "context/drop", at: now(), target, ...(note && { note }) });
     const withResults =
       e.type === "assistant/message" && e.toolCalls.length > 0
-        ? `,连同它的 ${e.toolCalls.length} 个工具结果`
+        ? ` with its ${e.toolCalls.length} tool results`
         : "";
     return [
-      c.jin(`◇ 已丢弃事件 #${target}${withResults}`),
+      c.jin(`◇ dropped event #${target}${withResults}`),
       ...editConsequences(target).map((s) => c.faint(`  · ${s}`)),
     ].join("\n");
+  }
+
+  /** 某事件在投影里可改的主字段与它的原值。 */
+  function originalOf(target: number): { field: EditField; value: string } | undefined {
+    const e = log.events[target];
+    switch (e?.type) {
+      case "assistant/message":
+        return { field: "text", value: e.text };
+      case "user/message":
+        return { field: "content", value: e.text };
+      case "tool/result":
+        return { field: "content", value: e.content };
+      case "session/start":
+        return { field: "system", value: e.system };
+      default:
+        return undefined;
+    }
+  }
+
+  /** 某字段的原值:reasoning 单独取,其余是主字段。 */
+  function originalValue(target: number, field: string): string {
+    const e = log.events[target];
+    if (field === "reasoning" && e?.type === "assistant/message") return e.reasoning ?? "";
+    return originalOf(target)?.value ?? "";
+  }
+
+  /** /compare N:编辑过的字段,原文与现值的行级 diff。 */
+  function compareCommand(arg: string): string {
+    const target = Number(arg);
+    if (!Number.isInteger(target) || !originalOf(target))
+      return c.faint("Usage: /compare N  (an edited user, assistant, tool-result or system event)");
+    const cur = editState(log.events).edits.get(target) ?? {};
+    const fields = Object.entries(cur).filter(([, v]) => typeof v === "string") as [
+      string,
+      string,
+    ][];
+    if (fields.length === 0) return c.faint(`event #${target} has no edits; nothing to compare`);
+    const out: string[] = [];
+    for (const [field, value] of fields) {
+      const before = originalValue(target, field);
+      out.push(
+        c.jin(
+          `◇ #${target}.${field}  original ${before.length} chars → current ${value.length} chars`,
+        ),
+      );
+      out.push(
+        (toolCallDetail("edit", { oldText: before, newText: value }) || c.faint("(identical)"))
+          .split("\n")
+          .map((l) => `    ${l}`)
+          .join("\n"),
+      );
+    }
+    return out.join("\n");
+  }
+
+  /** /restore N:把编辑过的字段改回原值。记成又一次编辑;事件数组只增不删。 */
+  function restoreCommand(arg: string): string {
+    if (agent.running) return c.zhu("cannot edit while running; press Esc first");
+    const target = Number(arg);
+    if (!Number.isInteger(target) || !originalOf(target)) return c.faint("Usage: /restore N");
+    const cur = editState(log.events).edits.get(target) ?? {};
+    const fields = Object.keys(cur) as EditField[];
+    if (fields.length === 0) return c.faint(`event #${target} has no edits; nothing to restore`);
+    for (const field of fields) {
+      log.append({
+        type: "context/edit",
+        at: now(),
+        target,
+        field,
+        value: originalValue(target, field),
+        note: "restore",
+      });
+    }
+    return [
+      c.jin(
+        `◇ restored event #${target} (${fields.join(", ")}) · recorded as another edit, nothing deleted`,
+      ),
+      ...editConsequences(target).map((s) => c.faint(`  · ${s}`)),
+    ].join("\n");
+  }
+
+  /** /rewind N:丢弃事件 N 之后的每条用户与助手消息(工具结果随调用一起走)。下一请求从 N 起。 */
+  function rewindCommand(arg: string): string {
+    if (agent.running) return c.zhu("cannot edit while running; press Esc first");
+    const target = Number(arg);
+    if (!Number.isInteger(target) || !log.events[target])
+      return c.faint("Usage: /rewind N  (drops every message after event N)");
+    const dropped = editState(log.events).dropped;
+    const victims = log.events
+      .map((e, i) => ({ e, i }))
+      .filter(
+        ({ e, i }) =>
+          i > target &&
+          (e.type === "user/message" || e.type === "assistant/message") &&
+          !dropped.has(i),
+      );
+    if (victims.length === 0) return c.faint(`nothing after event #${target} to drop`);
+    for (const { i } of victims)
+      log.append({ type: "context/drop", at: now(), target: i, note: `rewind to #${target}` });
+    return [
+      c.jin(
+        `◇ rewound to event #${target}: dropped ${victims.length} message${victims.length === 1 ? "" : "s"} after it (tool results go with their calls)`,
+      ),
+      c.faint(
+        "  · nothing is deleted; the next request starts from here · /retry asks again, or type a new message",
+      ),
+    ].join("\n");
+  }
+
+  /** 上下文面板(Ctrl+E)里选中一条消息后的动作:全部落到已有命令上,面板只是入口。 */
+  async function contextAction(action: ContextAction, row: CompositionRow): Promise<void> {
+    if (action === "view") return;
+    closeInspector();
+    const target = row.event;
+    switch (action) {
+      case "edit":
+        note(editCommand(`${target} ${originalOf(target)?.field ?? "content"}`));
+        break;
+      case "edit-reasoning":
+        note(editCommand(`${target} reasoning`));
+        break;
+      case "compare":
+        note(compareCommand(String(target)));
+        break;
+      case "restore":
+        note(restoreCommand(String(target)));
+        break;
+      case "drop":
+        note(dropCommand(String(target)));
+        break;
+      case "rewind":
+        note(rewindCommand(String(target)));
+        break;
+      case "retry":
+        await retryStep();
+        break;
+      case "fork":
+        note(forkCommand(String(target + 1)));
+        break;
+    }
   }
 
   /** /retry:编辑之后立刻看效果。丢弃以事件落盘,发送卡会标出编辑点。 */
   async function retryStep(): Promise<void> {
     if (agent.running) {
-      note(c.zhu("运行中不能重跑,先 Esc 打断"));
+      note(c.zhu("cannot retry while running; press Esc first"));
       return;
     }
-    showLoader("重跑中");
+    showLoader("retrying");
     try {
       const pending = agent.retry();
       updateStatus();
       const outcome = await pending;
-      if (typeof outcome === "object") note(c.jin(`◇ 循环停止:${outcome.stopped}`));
+      if (typeof outcome === "object") note(c.jin(`◇ loop stopped: ${outcome.stopped}`));
     } catch (err) {
       note(c.zhu(`✗ ${(err as Error).message}`));
     } finally {
@@ -1191,12 +1430,12 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     const rows = log.events
       .map((e, i) => ({ e, i }))
       .filter(({ e }) => e.type === "context/edit" || e.type === "context/drop");
-    if (rows.length === 0) return c.faint("没有编辑。/edit N 改一条,/drop N 丢一条");
+    if (rows.length === 0) return c.faint("No edits. /edit N changes a message, /drop N drops one");
     return rows
       .map(({ e, i }) =>
         e.type === "context/edit"
-          ? `  ${c.jin(`#${i}`)} ${c.ink(`编辑 #${e.target}.${e.field}`)} ${c.faint(`${e.value.length} 字 ${e.at.slice(11, 19)}`)}`
-          : `  ${c.jin(`#${i}`)} ${c.ink(`丢弃 #${(e as { target: number }).target}`)} ${c.faint(e.at.slice(11, 19))}`,
+          ? `  ${c.jin(`#${i}`)} ${c.ink(`edit #${e.target}.${e.field}`)} ${c.faint(`${e.value.length} chars ${e.at.slice(11, 19)}`)}`
+          : `  ${c.jin(`#${i}`)} ${c.ink(`drop #${(e as { target: number }).target}`)} ${c.faint(e.at.slice(11, 19))}`,
       )
       .join("\n");
   }
@@ -1206,34 +1445,35 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     let upTo: number;
     if (arg) {
       upTo = Number(arg);
-      if (!Number.isInteger(upTo) || upTo < 1) return c.zhu("用法:/fork 或 /fork N(前 N 条事件)");
+      if (!Number.isInteger(upTo) || upTo < 1)
+        return c.zhu("Usage: /fork or /fork N (first N events)");
     } else {
       const lastUser = [...log.events].reverse().findIndex((e) => e.type === "user/message");
       upTo = lastUser < 0 ? log.events.length : log.events.length - 1 - lastUser;
-      if (upTo < 1) return c.faint("还没有可分叉的历史");
+      if (upTo < 1) return c.faint("nothing to fork yet");
     }
     const r = forkSession(log.events, upTo, deps.sessionsDir ?? SESSIONS_DIR);
-    return `${c.jin(`◇ 已分叉:前 ${r.events} 条事件 → ${r.file}`)}\n${c.faint(`  pnpm tui -- --resume ${r.file}   从那个时点继续;当前会话不受影响`)}`;
+    return `${c.jin(`◇ forked: first ${r.events} events → ${r.file}`)}\n${c.faint(`  pnpm tui -- --resume ${r.file}   continues from there; this session is untouched`)}`;
   }
 
   function switchModel(arg: string): void {
     if (!deps.settings) {
-      note(c.zhu("未配置设置接口"));
+      note(c.zhu("settings interface not configured"));
       return;
     }
     const models = deps.settings.listModels();
     if (!arg) {
       note(
-        `${c.soft("当前")} ${c.ink(`${info.providerName}/${info.model}`)}\n${models
+        `${c.soft("current")} ${c.ink(`${info.providerName}/${info.model}`)}\n${models
           .map((m) =>
             m === `${info.providerName}/${info.model}` ? c.jin(`  ▸ ${m}`) : c.faint(`    ${m}`),
           )
-          .join("\n")}\n${c.faint("用法:/model 供应商/模型")}`,
+          .join("\n")}\n${c.faint("Usage: /model provider/model")}`,
       );
       return;
     }
     if (agent.running) {
-      note(c.zhu("运行中不能切换模型,先 Esc 打断"));
+      note(c.zhu("cannot switch models while running; press Esc first"));
       return;
     }
     try {
@@ -1256,30 +1496,30 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       const rows = EFFORT_LEVELS.map((l) => {
         const current = l === agent.effort;
         const unsupported = effortLevels && !effortLevels.includes(l);
-        return `  ${current ? c.jin("▸") : " "} ${current ? c.jin(l) : c.soft(l)}${unsupported ? c.faint("  该模型未声明支持,发送时向下回退") : ""}`;
+        return `  ${current ? c.jin("▸") : " "} ${current ? c.jin(l) : c.soft(l)}${unsupported ? c.faint("  not declared by this model; clamped down when sending") : ""}`;
       });
       note(
-        `${c.soft("强度级别")} ${c.ink(agent.effort ?? "未设置(不传,用供应商默认)")}\n${rows.join("\n")}\n${c.faint("用法:/effort <级别>;/effort auto 恢复不传")}`,
+        `${c.soft("Effort")} ${c.ink(agent.effort ?? "not set (omitted; provider default)")}\n${rows.join("\n")}\n${c.faint("Usage: /effort <level>; /effort auto omits it again")}`,
       );
       return;
     }
     if (arg === "auto") {
       agent.setEffort(undefined);
-      note(c.jin("◇ 强度已恢复为不传"));
+      note(c.jin("◇ effort omitted again"));
       updateStatus();
       return;
     }
     const level = parseEffort(arg);
     if (!level) {
-      note(c.zhu(`未知级别 "${arg}"`) + c.faint(`  可选:${EFFORT_LEVELS.join(" ")} auto`));
+      note(c.zhu(`unknown level "${arg}"`) + c.faint(`  options: ${EFFORT_LEVELS.join(" ")} auto`));
       return;
     }
     agent.setEffort(level);
     const clamped =
       effortLevels && !effortLevels.includes(level)
-        ? c.faint(`  当前模型声明支持 ${effortLevels.join("/")},发送时向下回退`)
+        ? c.faint(`  this model declares ${effortLevels.join("/")}; clamped down when sending`)
         : "";
-    note(c.jin(`◇ 强度已设为 ${level},下一请求生效`) + clamped);
+    note(c.jin(`◇ effort set to ${level}; applies from the next request`) + clamped);
     updateStatus();
   }
 
@@ -1287,10 +1527,10 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
   async function listRemoteModels(): Promise<void> {
     const p = agent.provider;
     if (!p.listModels) {
-      note(c.zhu("当前 provider 不支持查询模型列表"));
+      note(c.zhu("this provider cannot list models"));
       return;
     }
-    showLoader("查询模型列表");
+    showLoader("listing models");
     try {
       const remote = await p.listModels();
       const prefix = `${info.providerName}/`;
@@ -1298,23 +1538,23 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
         .filter((m) => m.startsWith(prefix))
         .map((m) => m.slice(prefix.length));
       const lines = [
-        `${c.soft("供应商")} ${c.ink(info.providerName)}  ${c.faint(`服务器 ${remote.length} 个模型 · 配置 ${configured.length} 个`)}`,
+        `${c.soft("provider")} ${c.ink(info.providerName)}  ${c.faint(`server ${remote.length} models · configured ${configured.length}`)}`,
       ];
       for (const m of configured) {
         lines.push(
           remote.includes(m)
             ? `  ${c.green("✓")} ${c.ink(m)}`
-            : `  ${c.zhu("✗")} ${c.ink(m)}  ${c.zhu("服务器无此模型,可能已下线")}`,
+            : `  ${c.zhu("✗")} ${c.ink(m)}  ${c.zhu("not on the server; possibly retired")}`,
         );
       }
       const extra = remote.filter((m) => !configured.includes(m));
       if (extra.length > 0) {
-        lines.push(c.faint("  服务器有、配置里没有:"));
+        lines.push(c.faint("  on the server, not in config:"));
         for (const m of extra) lines.push(c.faint(`    · ${m}`));
       }
       note(lines.join("\n"));
     } catch (err) {
-      note(c.zhu(`✗ 查询失败:${(err as Error).message}`));
+      note(c.zhu(`✗ listing failed: ${(err as Error).message}`));
     } finally {
       hideLoader();
       updateStatus();
@@ -1323,19 +1563,20 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
 
   function setKey(arg: string): void {
     if (!deps.settings) {
-      note(c.zhu("未配置设置接口"));
+      note(c.zhu("settings interface not configured"));
       return;
     }
     const [providerName, ...keyParts] = arg.split(/\s+/);
     const key = keyParts.join("");
     if (!providerName || !key) {
-      note(c.faint("用法:/key 供应商 密钥   例:/key deepseek sk-xxxx"));
+      note(c.faint("Usage: /key provider key   e.g. /key deepseek sk-xxxx"));
       return;
     }
     try {
       deps.settings.setKey(providerName, key);
       note(
-        c.jin(`◇ ${providerName} 的 key 已写入配置文件`) + c.faint("  /model 切换到该供应商即生效"),
+        c.jin(`◇ key for ${providerName} written to the config file`) +
+          c.faint("  /model to switch to that provider"),
       );
     } catch (err) {
       note(c.zhu(`✗ ${(err as Error).message}`));
@@ -1482,7 +1723,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
   }
 
   async function manualCompact(instructions: string): Promise<void> {
-    showLoader("压缩中");
+    showLoader("compacting");
     try {
       const payload = await compaction.strategy({
         events: log.events,
@@ -1491,10 +1732,10 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
         provider: recordingProvider(log, agent.provider, { threshold: threshold(), onRaw }),
         ...(instructions && { instructions }),
       });
-      if (!payload) note(c.faint("压缩未执行:无事可做或未取得足够进展"));
+      if (!payload) note(c.faint("compaction skipped: nothing to do or not enough progress"));
       else log.append({ type: "compaction", at: now(), ...payload });
     } catch (err) {
-      note(c.zhu(`✗ 压缩失败:${(err as Error).message}`));
+      note(c.zhu(`✗ compaction failed: ${(err as Error).message}`));
     } finally {
       hideLoader();
       updateStatus();
@@ -1504,27 +1745,27 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
   /** /fields:当前适配器的三张字段表。数据是适配器自己维护的静态清单,与代码同步。 */
   function renderFields(): string {
     const f = agent.provider.fields;
-    if (!f) return c.faint("当前 provider 没有提供字段清单");
+    if (!f) return c.faint("this provider has no field table");
     const block = (title: string, rows: string[]) => [
       c.jin(title),
       ...rows.map((r) => `  ${c.soft("·")} ${c.ink(r)}`),
     ];
     return [
-      `${c.soft("协议")} ${c.ink(f.protocol)}  ${c.faint(`模型 ${info.model} · 逐字节正文见 Ctrl+R → 线路 JSON`)}`,
-      ...block("发送", f.sends),
-      ...block("读取", f.reads),
-      ...block("明知存在但不读", f.ignores),
+      `${c.soft("protocol")} ${c.ink(f.protocol)}  ${c.faint(`model ${info.model} · byte-exact body in Ctrl+R → wire JSON`)}`,
+      ...block("sends", f.sends),
+      ...block("reads", f.reads),
+      ...block("known but ignored", f.ignores),
     ].join("\n");
   }
 
   /** /prompt:系统提示词的段构成与位置(Q66)。数据来自 session/start,与模型看到的同源。 */
   function renderPrompt(): string {
     const start = log.events.find((e) => e.type === "session/start");
-    if (start?.type !== "session/start") return c.faint("尚无会话");
+    if (start?.type !== "session/start") return c.faint("no session yet");
     const sections = start.sections ?? [];
     const total = sections.reduce((n, s) => n + s.chars, 0);
     const lines = [
-      `${c.soft("系统提示词")}  ${c.ink(`${sections.length} 段 · 约 ${Math.ceil(start.system.length / 4)} tok`)}`,
+      `${c.soft("System prompt")}  ${c.ink(`${sections.length} sections · ≈${Math.ceil(start.system.length / 4)} tok`)}`,
     ];
     for (const s of sections) {
       lines.push(
@@ -1532,14 +1773,19 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       );
     }
     const preamble = log.events[1];
-    if (preamble?.type === "user/message" && start.sections?.every((s) => s.name !== "项目指令")) {
+    if (
+      preamble?.type === "user/message" &&
+      start.sections?.every((s) => !/instruction|指令/i.test(s.name))
+    ) {
       lines.push(
-        c.faint("  项目指令与记忆放在首条 user 消息里(--instructions-as user),见上方第一条 › 行"),
+        c.faint(
+          "  project instructions and memory are in the first user message (--instructions-as user); see the first › line above",
+        ),
       );
     }
     lines.push(
       c.faint(
-        `  记忆:${deps.memory ? "已打开(remember 工具可用)" : "关(--memory 打开;AGENTS.md 里的记忆节不会注入)"}  · 全文见 Ctrl+R → 发送分区`,
+        `  memory: ${deps.memory ? "on (remember tool available)" : "off (--memory enables it; the memory section of AGENTS.md is not injected)"}  · full text in Ctrl+R → sent`,
       ),
     );
     return lines.join("\n");
@@ -1547,7 +1793,8 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
 
   /** /memory:列出、删一条、清空。记忆就是 AGENTS.md 里的一节,这里只是它的编辑入口。 */
   function memoryCommand(arg: string): string {
-    if (!deps.memory) return c.faint("记忆未打开。启动加 --memory,或配置 prompt.memory: true");
+    if (!deps.memory)
+      return c.faint("memory is off. Start with --memory or set prompt.memory: true");
     const files = [deps.memory.project, deps.memory.user].filter((f): f is string => !!f);
     const all = files.flatMap((file) =>
       (existsSync(file) ? memoryEntries(readFileSync(file, "utf8")) : []).map((text, i) => ({
@@ -1559,18 +1806,18 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     const [sub, ...restArgs] = arg.split(/\s+/).filter(Boolean);
     if (sub === "clear") {
       const n = files.reduce((acc, f) => acc + clearMemory(f), 0);
-      return c.jin(`◇ 已清空 ${n} 条记忆`);
+      return c.jin(`◇ cleared ${n} memories`);
     }
     if (sub === "forget") {
       const idx = Number(restArgs[0]);
       const target = all[idx - 1];
-      if (!target) return c.zhu(`没有第 ${restArgs[0] ?? "?"} 条(共 ${all.length} 条)`);
+      if (!target) return c.zhu(`no entry ${restArgs[0] ?? "?"} (${all.length} total)`);
       const removed = forgetMemory(target.file, target.i);
-      return c.jin(`◇ 已删除:${removed}`);
+      return c.jin(`◇ removed: ${removed}`);
     }
-    if (all.length === 0) return c.faint(`没有记忆。文件:${files.join(", ")}`);
+    if (all.length === 0) return c.faint(`no memories. files: ${files.join(", ")}`);
     const lines = [
-      `${c.soft("记忆")} ${c.ink(`${all.length} 条`)}  ${c.faint("下次会话开始时注入;/memory forget N 删除")}`,
+      `${c.soft("Memory")} ${c.ink(`${all.length} entries`)}  ${c.faint("injected at the start of the next session · /memory forget N removes one")}`,
     ];
     all.forEach((m, k) => {
       lines.push(`  ${c.jin(String(k + 1).padStart(2))} ${c.ink(m.text)}  ${c.faint(m.file)}`);
@@ -1581,22 +1828,22 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
   function renderContext(): string {
     const b = contextBreakdown(log.events, contextWindow);
     const lines = [
-      `${c.soft("上下文构成")}  ${c.ink(`估算 ${b.estimatedTokens} tok`)} ${c.faint(`/ 窗口 ${b.window},占 ${pct(b.usedShare)}`)}`,
+      `${c.soft("Context")}  ${c.ink(`estimated ${b.estimatedTokens} tok`)} ${c.faint(`/ window ${b.window} · ${pct(b.usedShare)}`)}`,
     ];
     if (b.measuredTokens !== undefined)
-      lines.push(c.faint(`上次请求实测输入 ${b.measuredTokens} tok`));
+      lines.push(c.faint(`last request measured ${b.measuredTokens} tok in`));
     const totals = usageTotals(log.events, priceFor);
     if (totals.requests > 0) {
       lines.push(
         c.faint(
-          `会话累计 ${totals.requests} 次请求 · 输入 ${totals.inputTokens} · 输出 ${totals.outputTokens} · 缓存命中 ${totals.cacheReadTokens} · 缓存写入 ${totals.cacheWriteTokens}${totals.cost !== undefined ? ` · 费用 ${fmtCost(totals.cost)}` : " · 未配置价格(config 里 models[].price)"}`,
+          `session total: ${totals.requests} requests · in ${totals.inputTokens} · out ${totals.outputTokens} · cache read ${totals.cacheReadTokens} · cache write ${totals.cacheWriteTokens}${totals.cost !== undefined ? ` · cost ${fmtCost(totals.cost)}` : " · no price configured (models[].price)"}`,
         ),
       );
     }
     for (const p of b.parts) {
       const bar = "█".repeat(Math.max(1, Math.round(p.share * 24))).padEnd(24);
       lines.push(
-        `${c.jin(bar)} ${pct(p.share).padStart(4)}  ${c.soft(`${p.tokens} tok · ${p.count} 条 · ${p.label}`)}`,
+        `${c.jin(bar)} ${pct(p.share).padStart(4)}  ${c.soft(`${p.tokens} tok · ${p.count} · ${p.label}`)}`,
       );
     }
     // 系统提示词按段拆开(Q51):角色、环境、项目指令各占多少,一眼可见。
@@ -1604,7 +1851,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     const sections = start?.type === "session/start" ? start.sections : undefined;
     if (sections && sections.length > 0) {
       const total = sections.reduce((n, s) => n + s.chars, 0);
-      lines.push(c.soft("系统提示词构成"));
+      lines.push(c.soft("System prompt sections"));
       for (const s of sections) {
         const tok = Math.ceil(s.chars / 4);
         lines.push(
@@ -1645,6 +1892,10 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       return { consume: true };
     }
     if (overlay || approval) return undefined; // 检视器或审批提示打开时,其余按键归它们
+    if (data === "?" && editor.getText() === "") {
+      note(shortcutLines().join("\n"));
+      return { consume: true };
+    }
     if (matchesKey(data, Key.alt("enter"))) {
       // 后续留言:不打断当前步,等模型不再调工具时才给它。空闲时与普通提交等价。
       const text = editor.getText().trim();
@@ -1722,8 +1973,8 @@ class ApprovalPrompt implements Component {
 
   render(): string[] {
     return [
-      `${c.zhu("?")} ${c.bold(c.ink("执行"))} ${c.bold(c.ink(this.call.name))}  ${c.soft(formatArgs(this.call.args))}`,
-      c.faint(`  y 允许 · n 拒绝 · a 本会话总是允许 ${this.call.name} · Esc 拒绝`),
+      `${c.zhu("?")} ${c.bold(c.ink("run"))} ${c.bold(c.ink(this.call.name))}  ${c.soft(formatArgs(this.call.args))}`,
+      c.faint(`  y allow · n deny · a always allow ${this.call.name} this session · Esc deny`),
     ];
   }
 
@@ -1760,14 +2011,14 @@ export function childEventLines(e: AgentEvent): string[] {
       for (const tc of e.toolCalls) {
         lines.push(`${c.zhu("⚙")} ${c.bold(c.ink(tc.name))}  ${c.soft(formatArgs(tc.args))}`);
       }
-      if (e.stopReason === "aborted") lines.push(c.faint("— 已打断 —"));
+      if (e.stopReason === "aborted") lines.push(c.faint("— interrupted —"));
       return lines;
     }
     case "tool/result": {
       const mark = e.isError ? c.zhu("✗") : c.green("✓");
       const body = e.content.trim().split("\n");
       const meta = [
-        ...(body.length > 1 ? [`${body.length} 行`] : []),
+        ...(body.length > 1 ? [`${body.length} lines`] : []),
         ...(e.durationMs !== undefined ? [fmtMs(e.durationMs)] : []),
       ];
       return [
@@ -1776,11 +2027,11 @@ export function childEventLines(e: AgentEvent): string[] {
       ];
     }
     case "retry":
-      return [c.faint(`· 重试 ${e.attempt}:${e.status ?? ""} ${e.error.split("\n")[0]}`)];
+      return [c.faint(`· retry ${e.attempt}: ${e.status ?? ""} ${e.error.split("\n")[0]}`)];
     case "request/error":
-      return [c.zhu(`✗ 请求失败:${e.error.split("\n")[0]}`)];
+      return [c.zhu(`✗ request failed: ${e.error.split("\n")[0]}`)];
     case "compaction":
-      return [c.jin(`◇ 已压缩${e.strategy ? `(${e.strategy})` : ""}`)];
+      return [c.jin(`◇ compacted${e.strategy ? ` (${e.strategy})` : ""}`)];
     default:
       return [];
   }
@@ -1800,7 +2051,7 @@ function formatArgs(args: unknown): string {
   else if (typeof a.path === "string") {
     const range =
       typeof a.offset === "number" || typeof a.limit === "number"
-        ? `  第 ${a.offset ?? 1} 行起${typeof a.limit === "number" ? `,${a.limit} 行` : ""}`
+        ? `  from line ${a.offset ?? 1}${typeof a.limit === "number" ? `, ${a.limit} lines` : ""}`
         : "";
     s = `${a.path}${range}`;
   } else if (typeof a.task === "string") {
@@ -1820,33 +2071,26 @@ export function toolCallDetail(name: string, args: unknown): string {
     lines = hunks(diffLines(a.oldText, a.newText)).map((l) => {
       switch (l.kind) {
         case "-":
-          return c.zhu(`  - ${l.text}`);
+          return c.zhu(`- ${l.text}`);
         case "+":
-          return c.green(`  + ${l.text}`);
+          return c.green(`+ ${l.text}`);
         case "…":
-          return c.faint(`    ${l.text}`);
+          return c.faint(`  ${l.text}`);
         default:
-          return c.faint(`    ${l.text}`);
+          return c.faint(`  ${l.text}`);
       }
     });
   } else if (name === "write" && typeof a.content === "string") {
     const all = a.content.split("\n");
-    lines = all.slice(0, 12).map((l) => c.green(`  + ${l}`));
-    if (all.length > 12) lines.push(c.faint(`    … 共 ${all.length} 行`));
+    lines = all.slice(0, 12).map((l) => c.green(`+ ${l}`));
+    if (all.length > 12) lines.push(c.faint(`… ${all.length} lines total`));
   }
   if (lines.length === 0) return "";
   if (lines.length > DETAIL_MAX_LINES) {
     const rest = lines.length - DETAIL_MAX_LINES;
-    lines = [...lines.slice(0, DETAIL_MAX_LINES), c.faint(`    … 还有 ${rest} 行改动`)];
+    lines = [...lines.slice(0, DETAIL_MAX_LINES), c.faint(`… ${rest} more changed lines`)];
   }
   return lines.join("\n");
-}
-
-function indent(s: string): string {
-  return s
-    .split("\n")
-    .map((l) => `  ${l}`)
-    .join("\n");
 }
 
 function pct(share: number): string {

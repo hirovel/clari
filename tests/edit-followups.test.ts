@@ -114,12 +114,15 @@ describe("发送卡的编辑点与预计命中", () => {
       toolsUnchanged: true,
       dropsThinking: true,
     }).map(plain);
-    const edit = lines.find((l) => l.includes("编辑点"));
-    expect(edit).toContain("[6] user 改过");
-    expect(edit).toContain("2 条");
-    expect(edit).toContain("之后 1 条消息的思考块不再回传");
-    // "未变"行(不是"系统 … 未变"那行)给出预计命中上限。
-    expect(lines.some((l) => l.includes("与上次逐字节相同 → 预计缓存命中上限"))).toBe(true);
+    // 编辑点信息现在在 changed 行:改了哪条、从哪起重算、丢几条思考、预计命中上限。
+    const edit = lines.find((l) => l.startsWith("changed"));
+    expect(edit).toContain("1 edited (#6)");
+    expect(edit).toContain("2 recomputed");
+    expect(edit).toContain("1 thinking block dropped");
+    expect(edit).toMatch(/cache ≤\S+ of \S+/);
+    // 消息表里被改的那条标 ✎ edited,前缀未变的折成一行。
+    expect(lines.some((l) => /✎\s+6\s+user\b.*\bedited\b/.test(l))).toBe(true);
+    expect(lines.some((l) => l.includes("3 unchanged"))).toBe(true);
     const predicted = predictedCache(prev, cur);
     expect(predicted).toBeGreaterThan(0);
     const head = plain(
@@ -137,7 +140,7 @@ describe("发送卡的编辑点与预计命中", () => {
         },
       }),
     );
-    expect(head).toContain("缓存 40 · 40%,预计≤");
+    expect(head).toContain("cache 40 · 40% · expected ≤");
   });
 });
 
@@ -184,6 +187,6 @@ describe("/retry", () => {
       },
       tools: [],
     });
-    await expect(agent.retry()).rejects.toThrow(/没有可重跑/);
+    await expect(agent.retry()).rejects.toThrow(/no assistant message to retry/);
   });
 });

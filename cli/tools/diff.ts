@@ -65,7 +65,9 @@ export function hunks(lines: DiffLine[], context = 2): (DiffLine | { kind: "…"
   lines.forEach((l, idx) => {
     if (keep[idx]) {
       // 开头的未变行直接省略,不放标记;中间的才标出略去多少。
-      if (skipping > 0 && out.length > 0) out.push({ kind: "…", text: `…${skipping} 行未变…` });
+      if (skipping > 0 && out.length > 0) {
+        out.push({ kind: "…", text: `…${skipping} unchanged lines…` });
+      }
       skipping = 0;
       out.push(l);
     } else skipping++;

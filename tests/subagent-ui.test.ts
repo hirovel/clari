@@ -97,9 +97,9 @@ describe("子 agent 视图(Q62)", () => {
 
     // 调用行、引导线、完成态进度、尾窗提示
     expect(doc).toContain("⚙ task  统计 echo 两次");
-    expect(doc).toContain("┆ ✓ 完成 · 第 2 步 · 1 次工具");
+    expect(doc).toContain("┆ ✓ done · step 2 · 1 tool calls");
     expect(doc).toContain("420 tok");
-    expect(doc).toContain("┆ 子会话"); // 完成后收起为一行
+    expect(doc).toContain("┆ sub-session"); // 完成后收起为一行
     expect(doc).toContain("✓ task"); // 父的工具结果
     expect(doc).toContain("子完成:one");
     expect(doc).toContain("父收到");
@@ -114,13 +114,13 @@ describe("子 agent 视图(Q62)", () => {
     // 检视器:s 切到子会话,请求列表与事件视图作用在子的数组上
     app.inspector.open();
     let insp = app.inspector.lines(110).map(stripAnsi).join("\n");
-    expect(insp).toContain("▸ 主会话");
-    expect(insp).toContain("子 #1 统计 echo 两次");
-    expect(insp).toContain("2 次请求");
+    expect(insp).toContain("▸ main");
+    expect(insp).toContain("sub #1 统计 echo 两次");
+    expect(insp).toContain("2 requests");
     app.inspector.key("s");
     insp = app.inspector.lines(110).map(stripAnsi).join("\n");
-    expect(insp).toContain("▸ 子 #1");
-    expect(insp).toContain("2 次请求");
+    expect(insp).toContain("▸ sub #1");
+    expect(insp).toContain("2 requests");
     app.inspector.key("\r");
     app.inspector.key("5");
     insp = app.inspector.lines(110).map(stripAnsi).join("\n");
@@ -128,8 +128,8 @@ describe("子 agent 视图(Q62)", () => {
     app.inspector.key("\x1b");
     app.inspector.key("\t");
     insp = app.inspector.lines(110).map(stripAnsi).join("\n");
-    expect(insp).toContain("事件日志");
-    expect(insp).toContain("▸ 子 #1");
+    expect(insp).toContain("Events");
+    expect(insp).toContain("▸ sub #1");
     app.inspector.close();
     app.stop();
   });
@@ -153,7 +153,7 @@ describe("子 agent 视图(Q62)", () => {
       isError: false,
       durationMs: 12,
     }).map(stripAnsi);
-    expect(result[0]).toBe("✓ bash  2 行 · 12ms");
+    expect(result[0]).toBe("✓ bash  2 lines · 12ms");
     expect(
       childEventLines({
         type: "request",
@@ -245,12 +245,12 @@ describe("压缩对照(Q63)", () => {
     const row = stripAnsi(compactionRow(a, true));
     expect(row).toContain("#1");
     expect(row).toContain("llmSummarize(structuredFull, replay)");
-    expect(row).toContain("原文 #3–#5(3 条");
-    expect(row).toContain("压成");
+    expect(row).toContain("original #3–#5 (3 events");
+    expect(row).toContain("→ summary");
     const overview = compactionLines(events, a, 1).map(stripAnsi).join("\n");
-    expect(overview).toContain("压缩比");
-    expect(overview).toContain("摘要请求");
-    expect(overview).toContain("原文一字未删");
+    expect(overview).toContain("ratio");
+    expect(overview).toContain("summary request");
+    expect(overview).toContain("Nothing was deleted");
     const original = compactionLines(events, a, 2).map(stripAnsi).join("\n");
     expect(original).toContain("#4 tool:bash");
     expect(original).toContain("x".repeat(100));
@@ -258,9 +258,13 @@ describe("压缩对照(Q63)", () => {
     expect(compactionLines(events, a, 3).map(stripAnsi).join("\n")).toContain(
       "摘要:看过 big 文件。",
     );
-    expect(compactionLines(events, a, 4).map(stripAnsi).join("\n")).toContain("没有清除");
+    expect(compactionLines(events, a, 4).map(stripAnsi).join("\n")).toContain(
+      "cleared no tool results",
+    );
     expect(compactionLines(events, b, 4).map(stripAnsi).join("\n")).toContain("#8 tool:read");
-    expect(compactionLines(events, b, 2).map(stripAnsi).join("\n")).toContain("没有摘要覆盖");
+    expect(compactionLines(events, b, 2).map(stripAnsi).join("\n")).toContain(
+      "has no summary (clear only)",
+    );
   });
 
   it("检视器:Tab 两次进压缩对照,Enter 看详情,分区切换,Esc 返回", () => {
@@ -279,19 +283,21 @@ describe("压缩对照(Q63)", () => {
     insp.handleInput("\t");
     expect(insp.currentMode).toBe("compactions");
     let doc = insp.render(120).map(stripAnsi).join("\n");
-    expect(doc).toContain("压缩对照");
-    expect(doc).toContain("2 次压缩");
+    expect(doc).toContain("Compactions");
+    expect(doc).toContain("2 compactions");
     expect(doc).toContain("▸ #2");
     insp.handleInput("g");
     insp.handleInput("\r");
     doc = insp.render(120).map(stripAnsi).join("\n");
     expect(insp.currentMode).toBe("compaction");
-    expect(doc).toContain("压缩 #1");
-    expect(doc).toContain("[1 对照]");
+    expect(doc).toContain("Compaction #1");
+    expect(doc).toContain("[1 compare]");
     insp.handleInput("2");
-    expect(insp.render(120).map(stripAnsi).join("\n")).toContain("被摘要取代的 3 条");
+    expect(insp.render(120).map(stripAnsi).join("\n")).toContain(
+      "The 3 model-visible events the summary replaced",
+    );
     insp.handleInput("\x1b[C");
-    expect(insp.render(120).map(stripAnsi).join("\n")).toContain("[3 摘要]");
+    expect(insp.render(120).map(stripAnsi).join("\n")).toContain("[3 summary]");
     insp.handleInput("\x1b");
     expect(insp.currentMode).toBe("compactions");
     insp.handleInput("\t");

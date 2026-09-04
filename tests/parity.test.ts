@@ -228,7 +228,7 @@ describe("edit 宽松匹配", () => {
   });
 
   it("多处命中报错,无命中返回 undefined", () => {
-    expect(() => fuzzyReplace("a\nb\na\nb\n", "a\nb", "c")).toThrow(/不唯一/);
+    expect(() => fuzzyReplace("a\nb\na\nb\n", "a\nb", "c")).toThrow(/not unique/);
     expect(fuzzyReplace("a\nb\n", "zzz", "c")).toBeUndefined();
   });
 });
@@ -274,8 +274,8 @@ describe("@文件引用", () => {
     expect(r.text).not.toContain('name="nope.txt"');
     expect(r.attachments.map((a) => [a.ref, a.skipped ?? "ok"])).toEqual([
       ["a.txt", "ok"],
-      ["bin", "二进制文件,未附上"],
-      ["big.txt", expect.stringContaining("超过")],
+      ["bin", "binary file, not attached"],
+      ["big.txt", expect.stringContaining("exceeds")],
     ]);
   });
 });
@@ -303,7 +303,7 @@ describe("技能段", () => {
       discover: { home, root: proj },
       env: { git: false },
     });
-    const sec = built.sections.find((s) => s.name === "技能");
+    const sec = built.sections.find((s) => s.name === "Skills");
     expect(sec?.text).toContain("- deploy: 发布流程");
     expect(sec?.text).not.toContain("步骤很长很长");
     // 不点名技能段就不扫目录、不注入。
@@ -314,7 +314,7 @@ describe("技能段", () => {
       env: { git: false },
       sections: ["role", "env"],
     });
-    expect(without.sections.some((s) => s.name === "技能")).toBe(false);
+    expect(without.sections.some((s) => s.name === "Skills")).toBe(false);
     expect(parseSkill("/x/foo/SKILL.md", "no front").name).toBe("foo");
   });
 });
@@ -356,7 +356,7 @@ describe("分叉与扩展模块", () => {
     expect((globalThis as { __seen?: number }).__seen).toBe(1);
     writeFileSync(join(dir, "bad.mjs"), "export default 42;");
     await expect(loadExtensions([join(dir, "bad.mjs")], { cwd: "/w", log })).rejects.toThrow(
-      /default 导出一个函数/,
+      /must default-export a function/,
     );
   });
 });

@@ -286,7 +286,7 @@ describe("策略请求的真实正文与策略名(Q60)", () => {
     });
 
     const standalone = [
-      { role: "system" as const, content: "你是会话压缩助手。" },
+      { role: "system" as const, content: "You are a conversation compaction assistant." },
       { role: "user" as const, content: "全文…" },
     ];
     expect(describeRequestBody(log.events, standalone)).toEqual({
@@ -346,7 +346,9 @@ describe("策略请求的真实正文与策略名(Q60)", () => {
     if (!body) throw new Error("应记 body");
     expect(body.tail).toHaveLength(1);
     expect(body.tail[0]?.role).toBe("user");
-    expect((body.tail[0] as { content: string }).content).toContain("压缩");
+    expect((body.tail[0] as { content: string }).content).toContain(
+      "Compress the conversation above",
+    );
     expect(body.prefixEvents).toBeGreaterThan(0);
 
     const cleared = await clearToolResults({ keepRecent: 0, clearAtLeast: 1 })({

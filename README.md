@@ -13,8 +13,8 @@
 
 - 读、写、编辑文件,跑命令,grep / glob / ls,派生子 agent
 - 三种协议(OpenAI chat completions、OpenAI Responses、Anthropic Messages),配置驱动的模型能力数据,`extraBody` 透传新参数,`/models` 实时发现模型下线,`/fields` 列出当前协议发什么、读什么、不读什么,供应商元数据(响应 id、服务模型、原始停止原因)原样存进 `extras`
-- 主屏每次请求一张发送卡(参数、系统段、工具、未变前缀、新增消息、合计)与一张接收卡(停止原因、耗时、实测与缓存命中率、费用,之下是思考、正文、调用、回传物);思考块标明是全文还是摘要
-- 编辑上下文:`/edit N [字段] [文本]`、`/drop N`、`/retry`,追加事件改投影,原文永远留在数组里;全文思考(DeepSeek 一类)可改来引导模型,摘要思考(Claude、GPT)拒绝并指向追加消息;每次改动的后果(哪几条重算、丢几个思考块、缓存预计与实测)在卡片上明示
+- 界面全英文,标签沟版式。每次请求一张 Request 卡:第一行 `changed` 说明相对上一次新增、编辑、摘要了哪几条与代价(多少条重算、缓存上限、丢几个思考块),再列参数、系统段、工具、每条消息(事件号、角色、token、状态、首行,未变的折叠)、离自动压缩多远;一张 Response 卡:停止原因、耗时、费用、实测与预计缓存命中并排,之下是 reply / thinking / call / result / opaque / extras / raw 各一行;思考缺省折成一行并标明全文还是摘要,Ctrl+T 展开
+- 编辑上下文:Ctrl+E 打开上下文面板,选中一条按 Enter 出动作菜单(view / edit / compare / restore / drop / rewind / retry / fork),每项一句后果;命令形式 `/edit N [字段] [文本]`、`/drop N`、`/compare N`、`/restore N`、`/rewind N`、`/retry`,追加事件改投影,原文永远留在数组里;全文思考(DeepSeek 一类)可改来引导模型,摘要思考(Claude、GPT)拒绝并指向追加消息;每次改动的后果(哪几条重算、丢几个思考块、缓存预计与实测)在卡片上明示
 - 自动 / 手动压缩,三种内置策略(LLM 摘要、清除旧工具结果、两者串联),外部策略模块 `--compaction ./my-strategy.mjs`
 - 会话恢复 `--continue`,一次性模式 `pnpm once -- "任务" --json`(策略 A/B 的执行器)
 - 请求检视器(Ctrl+R):一行一请求 → 概要 / 决策 / 发送 / 工具定义 / 线路 JSON / 接收(含原始流,缺省记录,`/raw N` 直达)/ 写入;`/tools` 列出随请求发出的工具定义与 token
@@ -80,7 +80,7 @@ pnpm replay sessions/<文件>.jsonl --request 3
 pnpm replay sessions/<文件>.jsonl --compaction 1 --json
 ```
 
-界面内:`Esc` 打断 · `Ctrl+R` 检视器(Tab 轮换 请求 / 事件 / 压缩 三视图,`s` 切会话)· `Ctrl+O` 折叠 · `Ctrl+T` 思考 · `/help`
+界面内:`Esc` 打断 · `Ctrl+R` 检视器(Tab 轮换 请求 / 事件 / 压缩 / 上下文,`s` 切会话)· `Ctrl+E` 上下文面板 · `Ctrl+O` 折叠 · `Ctrl+T` 思考 · `?` 快捷键 · `/help`
 
 ## 结构
 

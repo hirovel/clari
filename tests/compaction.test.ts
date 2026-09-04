@@ -162,11 +162,11 @@ describe("llmSummarize", () => {
     expect(p).not.toBeNull();
     expect(p).toMatchObject({ coversFrom: 2, coversUpTo: 7 });
     expect(p?.summary).toContain("摘要内容");
-    expect(p?.summary).toContain("读过的文件:a.ts");
+    expect(p?.summary).toContain("Files read: a.ts");
     // 最后一条是摘要指令,其前是前缀投影
     const last = capture.messages?.at(-1);
     expect(last?.role).toBe("user");
-    expect(last?.content).toContain("压缩");
+    expect(last?.content).toContain("Compress the conversation above");
     expect(capture.messages?.[0]?.role).toBe("system");
   });
 

@@ -23,7 +23,7 @@ export function parseTemplate(path: string, raw: string): PromptTemplate {
     const d = m[1]?.match(/^description:\s*(.+)$/m);
     if (d?.[1]) description = d[1].trim();
   }
-  return { name, description: description || `模板 ${name}`, body: body.trim(), path };
+  return { name, description: description || `template ${name}`, body: body.trim(), path };
 }
 
 /** 发现顺序:用户级 → 项目级;同名以项目级为准。 */

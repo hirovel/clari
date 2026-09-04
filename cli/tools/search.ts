@@ -104,13 +104,17 @@ export function createGrepTool(opts: { useRipgrep?: boolean; maxResults?: number
   return defineTool({
     name: "grep",
     description:
-      "在目录或文件里按正则搜索,返回 路径:行号:内容。用它定位再用 read 读上下文。" +
-      "结果最多 200 条,单行截到 500 字符。",
+      "Search a directory or file by regex; returns path:line:content. Use it to locate, then read for context. " +
+      "At most 200 results; lines cut to 500 characters.",
     parameters: Type.Object({
-      pattern: Type.String({ description: "正则表达式(JS 语法)" }),
-      path: Type.Optional(Type.String({ description: "搜索的目录或文件,缺省当前目录" })),
-      glob: Type.Optional(Type.String({ description: "只搜匹配的文件名,如 *.ts 或 src/**/*.ts" })),
-      ignoreCase: Type.Optional(Type.Boolean({ description: "忽略大小写" })),
+      pattern: Type.String({ description: "regular expression (JS syntax)" }),
+      path: Type.Optional(
+        Type.String({ description: "directory or file to search, default current directory" }),
+      ),
+      glob: Type.Optional(
+        Type.String({ description: "only search matching file names, e.g. *.ts or src/**/*.ts" }),
+      ),
+      ignoreCase: Type.Optional(Type.Boolean({ description: "case-insensitive" })),
     }),
     concurrency: "parallel",
     async execute(args) {
@@ -141,7 +145,7 @@ export function createGrepTool(opts: { useRipgrep?: boolean; maxResults?: number
           { cwd: rootIsFile ? dirname(root) : root, encoding: "utf8", maxBuffer: 8 * 1024 * 1024 },
         );
         if (!rg.error) {
-          if (rg.status === 1) return "(无匹配)";
+          if (rg.status === 1) return "(no matches)";
           if (rg.status === 0) {
             const lines = rg.stdout
               .trimEnd()
@@ -154,7 +158,7 @@ export function createGrepTool(opts: { useRipgrep?: boolean; maxResults?: number
             const shown = lines.slice(0, maxResults);
             const tail =
               lines.length > maxResults
-                ? `\n[只显示前 ${maxResults} 条,共 ${lines.length}+ 条,请缩小范围]`
+                ? `\n[showing first ${maxResults} of ${lines.length}+ results; narrow the search]`
                 : "";
             return capLine(shown.join("\n")) + tail;
           }
@@ -166,12 +170,15 @@ export function createGrepTool(opts: { useRipgrep?: boolean; maxResults?: number
         ...(args.glob && { glob: args.glob }),
         maxResults,
       });
-      if (r.matches.length === 0) return `(无匹配;扫描 ${r.scanned} 个文件)`;
+      if (r.matches.length === 0) return `(no matches; scanned ${r.scanned} files)`;
       const body = r.matches
         .map((m) => `${rootIsFile ? given : withBase(m.file)}:${m.line}:${m.text}`)
         .join("\n");
       return (
-        capLine(body) + (r.truncated ? `\n[只显示前 ${maxResults} 条,还有更多,请缩小范围]` : "")
+        capLine(body) +
+        (r.truncated
+          ? `\n[showing first ${maxResults} results, more exist; narrow the search]`
+          : "")
       );
     },
   });
@@ -181,27 +188,33 @@ export const grepTool = createGrepTool();
 
 export const globTool = defineTool({
   name: "glob",
-  description: "按通配模式列出文件,如 src/**/*.ts。返回相对路径,最多 500 条。",
+  description: "List files by glob pattern, e.g. src/**/*.ts. Returns relative paths, at most 500.",
   parameters: Type.Object({
-    pattern: Type.String({ description: "通配模式:** 任意层级,* 单段,? 单字符" }),
-    path: Type.Optional(Type.String({ description: "起始目录,缺省当前目录" })),
+    pattern: Type.String({
+      description: "glob pattern: ** any depth, * one segment, ? one character",
+    }),
+    path: Type.Optional(
+      Type.String({ description: "starting directory, default current directory" }),
+    ),
   }),
   concurrency: "parallel",
   async execute(args) {
     const root = resolve(args.path ?? ".");
     const re = globToRegExp(args.pattern);
     const all = walkFiles(root).filter((f) => re.test(f));
-    if (all.length === 0) return "(无匹配)";
+    if (all.length === 0) return "(no matches)";
     const shown = all.slice(0, 500);
-    return shown.join("\n") + (all.length > 500 ? `\n[只显示前 500 条,共 ${all.length} 条]` : "");
+    return (
+      shown.join("\n") + (all.length > 500 ? `\n[showing first 500 of ${all.length} results]` : "")
+    );
   },
 });
 
 export const lsTool = defineTool({
   name: "ls",
-  description: "列出目录内容:目录带 /,文件带大小。",
+  description: "List a directory: directories end with /, files show their size.",
   parameters: Type.Object({
-    path: Type.Optional(Type.String({ description: "目录,缺省当前目录" })),
+    path: Type.Optional(Type.String({ description: "directory, default current directory" })),
   }),
   concurrency: "parallel",
   async execute(args) {
@@ -212,7 +225,7 @@ export const lsTool = defineTool({
         return { name, dir: st.isDirectory(), size: st.size };
       })
       .sort((a, b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name));
-    if (entries.length === 0) return "(空目录)";
+    if (entries.length === 0) return "(empty directory)";
     return entries.map((e) => (e.dir ? `${e.name}/` : `${e.name}  ${e.size} B`)).join("\n");
   },
 });

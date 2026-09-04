@@ -180,20 +180,22 @@ describe("端到端(假服务器)", () => {
     expect(compaction && "latencyMs" in compaction && typeof compaction.latencyMs).toBe("number");
 
     // 屏幕视角
-    expect(doc).toContain("· 重试 1:429");
+    expect(doc).toContain("· retry 1: 429");
     expect(doc).toContain("✓ big");
-    expect(doc).toContain("◇ 已压缩(llmSummarize(structuredFull, replay)):摘要覆盖事件");
+    expect(doc).toContain(
+      "◇ compacted (llmSummarize(structuredFull, replay)): summary covers events",
+    );
     expect(doc).toContain("完成:文件已看过");
-    expect(doc).toContain("→ 实测 900(缓存 600 · 67%");
-    expect(doc).toContain("○ 空闲");
+    expect(doc).toMatch(/usage\s+in 900 \(estimated ≈\S+ · cache 600 · 67%/);
+    expect(doc).toContain("○ idle");
 
     // 检视器视角:四条记录,压缩请求有自己的一行,接收分区有原始流
     app.inspector.open();
     let insp = app.inspector.lines(110).map(stripAnsi).join("\n");
-    expect(insp).toContain("4 次请求");
-    expect(insp).toContain("压缩");
-    expect(insp).toContain("摘要");
-    expect(insp).toContain("溢出重发");
+    expect(insp).toContain("4 requests");
+    expect(insp).toContain("compaction");
+    expect(insp).toContain("summary");
+    expect(insp).toContain("overflow retry");
     app.inspector.key("\r");
     app.inspector.key("6");
     insp = app.inspector.lines(110).map(stripAnsi).join("\n");

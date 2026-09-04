@@ -130,13 +130,13 @@ describe("bash 工具的边界", () => {
     const tool = createBashTool({ defaultTimeoutS: 1 });
     await expect(
       tool.execute({ command: "echo before; sleep 5; echo after" }, ctx),
-    ).rejects.toThrow(/超过 1 秒未结束[\s\S]*before/);
+    ).rejects.toThrow(/did not finish within 1 s[\s\S]*before/);
   }, 15000);
 
   it("输出超过上限 → 终止并说明", async () => {
     const tool = createBashTool({ maxOutputBytes: 2000 });
     await expect(tool.execute({ command: "yes | head -c 100000" }, ctx)).rejects.toThrow(
-      /超过 0 MB/,
+      /exceeds 0 MB/,
     );
   }, 15000);
 
@@ -160,18 +160,18 @@ describe("文件工具的边界", () => {
     const file = join(dir, "e.txt");
     writeFileSync(file, "abc");
     await expect(editTool.execute({ path: file, oldText: "", newText: "x" }, ctx)).rejects.toThrow(
-      /不能为空/,
+      /must not be empty/,
     );
   });
 
   it("read:二进制文件 → 报错而不是吐乱码", async () => {
     const file = join(dir, "bin.dat");
     writeFileSync(file, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01, 0x02]));
-    await expect(readTool.execute({ path: file }, ctx)).rejects.toThrow(/二进制/);
+    await expect(readTool.execute({ path: file }, ctx)).rejects.toThrow(/binary/);
   });
 
   it("read:目录 → 报错指向 ls", async () => {
-    await expect(readTool.execute({ path: dir }, ctx)).rejects.toThrow(/是目录/);
+    await expect(readTool.execute({ path: dir }, ctx)).rejects.toThrow(/is a directory/);
   });
 
   it("read:空文件正常返回", async () => {

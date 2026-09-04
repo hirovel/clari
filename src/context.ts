@@ -41,20 +41,20 @@ export function contextBreakdown(events: readonly AgentEvent[], window: number):
   for (const m of deriveMessages(events)) {
     switch (m.role) {
       case "system":
-        add("系统提示词", estimateTokens(m.content));
+        add("system prompt", estimateTokens(m.content));
         break;
       case "user":
-        add("用户消息", estimateTokens(m.content));
+        add("user messages", estimateTokens(m.content));
         break;
       case "assistant":
         add(
-          "助手消息",
+          "assistant messages",
           estimateTokens(m.content) +
             m.toolCalls.reduce((n, tc) => n + estimateTokens(JSON.stringify(tc.args)) + 8, 0),
         );
         break;
       case "tool":
-        add(`工具结果 ${m.name}`, estimateTokens(m.content));
+        add(`tool results ${m.name}`, estimateTokens(m.content));
         break;
     }
   }

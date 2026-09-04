@@ -22,11 +22,16 @@ export function expandFileRefs(
     if (!existsSync(path) || !statSync(path).isFile()) continue;
     const size = statSync(path).size;
     if (size > ATTACH_MAX_BYTES) {
-      attachments.push({ ref, path, bytes: size, skipped: `超过 ${ATTACH_MAX_BYTES} 字节,未附上` });
+      attachments.push({
+        ref,
+        path,
+        bytes: size,
+        skipped: `exceeds ${ATTACH_MAX_BYTES} bytes, not attached`,
+      });
       continue;
     }
     if (size > 0 && looksBinary(path)) {
-      attachments.push({ ref, path, bytes: size, skipped: "二进制文件,未附上" });
+      attachments.push({ ref, path, bytes: size, skipped: "binary file, not attached" });
       continue;
     }
     if (attachments.some((a) => a.path === path && !a.skipped)) continue;

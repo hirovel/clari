@@ -61,10 +61,10 @@ describe("入口参数与会话文件", () => {
       rest: ["任务", "文本"],
     });
     expect(parseCommonArgs(["-p", "hi", "--continue"]).rest).toEqual(["hi"]);
-    expect(() => parseCommonArgs(["--effort", "ultra"])).toThrow("未知强度级别");
+    expect(() => parseCommonArgs(["--effort", "ultra"])).toThrow("unknown effort level");
     expect(parseCommonArgs(["--compaction", "./x.mjs"]).compaction).toBe("./x.mjs");
-    expect(() => parseCommonArgs(["--bogus"])).toThrow("未知参数");
-    expect(() => parseCommonArgs(["--model"])).toThrow("需要一个值");
+    expect(() => parseCommonArgs(["--bogus"])).toThrow("unknown option");
+    expect(() => parseCommonArgs(["--model"])).toThrow("requires a value");
   });
 
   it("latestSession 取最新且跳过 trace 文件;openSession 恢复时挂回同一文件", () => {
@@ -84,7 +84,7 @@ describe("入口参数与会话文件", () => {
     opened.log.append({ type: "user/message", at: "t", text: "继续" });
     expect(readFileSync(file, "utf8").trim().split("\n")).toHaveLength(2);
     expect(() => openSession({ resume: join(tmp ?? "", "nope.jsonl"), continue: false })).toThrow(
-      "不存在",
+      "session file not found",
     );
   });
 });
@@ -132,8 +132,8 @@ describe("会话恢复(Q54)", () => {
     let doc = app2.lines(100).map(stripAnsi).join("\n");
     expect(doc).toContain("› 第一轮");
     expect(doc).toContain("第一轮回复");
-    expect(doc).toContain("已恢复会话");
-    expect(doc).toContain("发送 #1"); // 历史请求的发送卡也在
+    expect(doc).toContain(`◇ resumed: ${before} events, appending to`);
+    expect(doc).toContain("Request #1"); // 历史请求的发送卡也在
     expect(log.events.filter((e) => e.type === "session/start")).toHaveLength(1);
     expect(log.events.filter((e) => e.type === "session/model")).toHaveLength(0);
 
@@ -175,18 +175,18 @@ describe("会话恢复(Q54)", () => {
     expect(out?.strategy).toBe("mine(0)");
     const cfg = await buildCompaction("clear", 1000, 100);
     expect(cfg).toMatchObject({ window: 1000, reserveTokens: 100 });
-    await expect(loadCompactionStrategy("zip")).rejects.toThrow("未知压缩策略");
+    await expect(loadCompactionStrategy("zip")).rejects.toThrow("unknown compaction strategy");
     writeFileSync(join(tmp, "bad.mjs"), "export const nothing = 1;\n");
     await expect(loadCompactionStrategy(join(tmp, "bad.mjs"))).rejects.toThrow(
-      "default 导出一个函数",
+      "must default-export a function",
     );
   });
 
   it("新会话的系统提示词带分段构成(名称、来源、字符数)", () => {
     tmp = mkdtempSync(join(tmpdir(), "ak-prompt-"));
     const p = systemPromptFor({}, tmp);
-    expect(p.sections.map((s) => s.name)).toEqual(["角色与规则", "环境"]);
+    expect(p.sections.map((s) => s.name)).toEqual(["Role and rules", "Environment"]);
     expect(p.sections.every((s) => s.chars > 0)).toBe(true);
-    expect(p.text).toContain("工作目录:");
+    expect(p.text).toContain("working directory: ");
   });
 });

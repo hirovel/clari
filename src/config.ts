@@ -194,7 +194,7 @@ export function loadConfig(path = DEFAULT_CONFIG_PATH): { config: KernelConfig; 
   try {
     parsed = JSON.parse(readFileSync(path, "utf8"));
   } catch (err) {
-    throw new Error(`配置文件解析失败 ${path}: ${(err as Error).message}`);
+    throw new Error(`failed to parse config ${path}: ${(err as Error).message}`);
   }
   return { config: validate(parsed, path), created: false };
 }
@@ -214,7 +214,7 @@ export function setApiKey(
   const p = config.providers[providerName];
   if (!p) {
     throw new Error(
-      `未知供应商 "${providerName}",可选:${Object.keys(config.providers).join(", ")}`,
+      `unknown provider "${providerName}"; options: ${Object.keys(config.providers).join(", ")}`,
     );
   }
   const next: KernelConfig = {
@@ -239,7 +239,7 @@ export function setDefaultModel(
 function validate(raw: unknown, path: string): KernelConfig {
   const c = raw as Partial<KernelConfig>;
   if (!c || typeof c !== "object" || typeof c.default !== "string" || !c.providers) {
-    throw new Error(`配置文件缺少 default 或 providers 字段: ${path}`);
+    throw new Error(`config is missing default or providers: ${path}`);
   }
   for (const [name, p] of Object.entries(c.providers)) {
     if (
@@ -247,14 +247,15 @@ function validate(raw: unknown, path: string): KernelConfig {
       p.protocol !== "anthropic" &&
       p.protocol !== "openai-responses"
     ) {
-      throw new Error(`供应商 ${name} 的 protocol 必须是 openai、openai-responses 或 anthropic`);
+      throw new Error(`provider ${name}: protocol must be openai, openai-responses or anthropic`);
     }
     if (typeof p.baseUrl !== "string" || !Array.isArray(p.models)) {
-      throw new Error(`供应商 ${name} 缺少 baseUrl 或 models`);
+      throw new Error(`provider ${name} is missing baseUrl or models`);
     }
     for (const m of p.models) {
       const ok = typeof m === "string" || (typeof m === "object" && typeof m?.name === "string");
-      if (!ok) throw new Error(`供应商 ${name} 的 models 元素必须是字符串或带 name 的对象`);
+      if (!ok)
+        throw new Error(`provider ${name}: models entries must be strings or objects with a name`);
     }
   }
   return c as KernelConfig;
@@ -284,7 +285,8 @@ export function resolveModel(config: KernelConfig, requested?: string): Resolved
   if (slash > 0) {
     const pn = name.slice(0, slash);
     const p = config.providers[pn];
-    if (!p) throw new Error(`未知供应商 "${pn}",可选:${entries.map(([n]) => n).join(", ")}`);
+    if (!p)
+      throw new Error(`unknown provider "${pn}"; options: ${entries.map(([n]) => n).join(", ")}`);
     return finish(pn, p, name.slice(slash + 1));
   }
 
@@ -300,7 +302,7 @@ export function resolveModel(config: KernelConfig, requested?: string): Resolved
   if (guess) return finish(guess[0], guess[1], name);
 
   const all = entries.flatMap(([pn, p]) => modelNames(p).map((m) => `${pn}/${m}`));
-  throw new Error(`无法为模型 "${name}" 匹配供应商。已配置的模型:\n  ${all.join("\n  ")}`);
+  throw new Error(`no provider matches model "${name}". Configured models:\n  ${all.join("\n  ")}`);
 
   function finish(pn: string, p: ProviderConfig, model: string): Resolved {
     const m = modelConfig(p, model);
@@ -330,9 +332,9 @@ export function resolveApiKey(name: string, p: ProviderConfig, env = process.env
     if (v?.trim()) return v.trim();
   }
   const where = p.apiKeyEnv
-    ? `环境变量 ${p.apiKeyEnv},或配置文件 providers.${name}.apiKey`
-    : `配置文件 providers.${name}.apiKey 或 apiKeyEnv`;
-  throw new Error(`供应商 ${name} 没有可用的 API key。请设置:${where}(${DEFAULT_CONFIG_PATH})`);
+    ? `env var ${p.apiKeyEnv}, or providers.${name}.apiKey in the config file`
+    : `providers.${name}.apiKey or apiKeyEnv in the config file`;
+  throw new Error(`no API key for provider ${name}. Set ${where} (${DEFAULT_CONFIG_PATH})`);
 }
 
 export function createProvider(r: Resolved, apiKey: string): Provider {

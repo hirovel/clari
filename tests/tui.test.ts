@@ -75,9 +75,9 @@ describe("TUI 壳", () => {
     expect(doc).toContain("echo:hi");
     expect(doc).toContain("完成");
     expect(doc.match(/内容是 hi/g)?.length).toBe(1); // 流式组件被定稿替换,不重复
-    expect(doc).toContain("○ 空闲");
+    expect(doc).toContain("○ idle");
     expect(doc).toContain("1200→40 tok");
-    expect(doc).toContain("距自动压缩 98%");
+    expect(doc).toContain("98% until auto-compaction");
 
     // 整条渲染管线:经差分渲染写入模拟终端后,屏幕上确实有内容
     app.tui.renderNow(true);
@@ -94,8 +94,8 @@ describe("TUI 壳", () => {
     const doc = text(app);
     expect(doc).toContain("/compact");
     expect(doc).toContain("/model");
-    expect(doc).toContain("上下文构成");
-    expect(doc).toContain("系统提示词");
+    expect(doc).toContain("Context  estimated");
+    expect(doc).toContain("system prompt");
     app.stop();
   });
 
@@ -128,12 +128,12 @@ describe("TUI 壳", () => {
     await app.command("/model other/big-model");
     expect(calls).toContain("switch:other/big-model");
     expect(text(app)).toContain("big-model");
-    expect(text(app)).toContain("已切换模型");
+    expect(text(app)).toContain("model switched to big-model");
     expect(app.agent.provider.model).toBe("big-model");
 
     await app.command("/key deepseek sk-123");
     expect(calls).toContain("key:deepseek:sk-123");
-    expect(text(app)).toContain("key 已写入");
+    expect(text(app)).toContain("key for deepseek written to the config file");
 
     await app.command("/default");
     expect(calls).toContain("default:other/big-model");
@@ -153,16 +153,16 @@ describe("TUI 壳", () => {
     const { app, term } = boot(provider);
     const running = app.submit("长任务");
     await new Promise((r) => setImmediate(r));
-    expect(text(app)).toContain("● 运行中");
+    expect(text(app)).toContain("● running");
     term.feed("\x1b");
     await running;
     const doc = text(app);
-    expect(doc).toContain("— 已打断 —");
-    expect(doc).toContain("○ 空闲");
+    expect(doc).toContain("— interrupted —");
+    expect(doc).toContain("○ idle");
     app.stop();
   });
 
-  it("每步一行请求小结;Ctrl+O 折叠/展开工具结果;Ctrl+T 隐藏/显示思考", async () => {
+  it("每步一张请求卡与响应卡;Ctrl+O 折叠/展开工具结果;Ctrl+T 展开/收起思考", async () => {
     const long = defineTool({
       name: "long",
       description: "",
@@ -180,7 +180,7 @@ describe("TUI 壳", () => {
           text: "",
           toolCalls: [{ id: "c1", name: "long", args: {} }],
           stopReason: "tool",
-          reasoning: "先拿到输出",
+          reasoning: "先拿到输出\n再看结果",
           usage: { inputTokens: 1200, outputTokens: 20 },
         },
         {
@@ -199,30 +199,39 @@ describe("TUI 壳", () => {
     });
     await app.submit("跑");
     let doc = text(app);
-    // 发送卡:参数、消息结构、合计;接收卡头行:停止原因、耗时、实测用量。
-    expect(doc).toContain("发送 #1");
-    expect(doc).toContain("2 条消息");
-    expect(doc).toContain("接收 #1");
-    expect(doc).toContain("→ 实测 1.2k");
-    expect(doc).toContain("发送 #2");
-    expect(doc).toContain("4 条消息");
+    // 请求卡:头行、changed 行、messages 行(条数与合计);响应卡:头行与 usage 行(实测用量)。
+    expect(doc).toContain("Request #1");
+    expect(doc).toContain("first request · 2 messages");
+    expect(doc).toContain("messages   2 · ≈");
+    expect(doc).toContain("Response #1");
+    expect(doc).toContain("in 1.2k (estimated ≈");
+    expect(doc).toContain("Request #2");
+    expect(doc).toContain("messages   4 · ≈");
     expect(doc).toContain("行10"); // 默认完整显示(Q34)
-    expect(doc).toContain("先拿到输出");
+    // 思考缺省折成一行:首行 + 种类与行数;第二行不显示。
+    expect(doc).toContain("thinking   先拿到输出");
+    expect(doc).toContain("(? · 2 lines · Ctrl+T)");
+    expect(doc).not.toContain("再看结果");
 
     term.feed("\x0f"); // Ctrl+O
     doc = text(app);
     expect(doc).toContain("行3");
     expect(doc).not.toContain("行10");
-    expect(doc).toContain("… 还有 7 行(Ctrl+O 展开)");
+    expect(doc).toContain("… 7 more lines · Ctrl+O");
+    expect(doc).toContain("· tool results folded (Ctrl+O to unfold)");
     term.feed("\x0f");
     expect(text(app)).toContain("行10");
 
-    term.feed("\x14"); // Ctrl+T
+    term.feed("\x14"); // Ctrl+T:展开全文
     doc = text(app);
-    expect(doc).not.toContain("先拿到输出");
-    expect(doc).toContain("思考(已隐藏,Ctrl+T 显示)");
-    term.feed("\x14");
-    expect(text(app)).toContain("先拿到输出");
+    expect(doc).toContain("先拿到输出");
+    expect(doc).toContain("再看结果");
+    expect(doc).toContain("· thinking expanded");
+    term.feed("\x14"); // 再按:收回一行
+    doc = text(app);
+    expect(doc).toContain("先拿到输出");
+    expect(doc).not.toContain("再看结果");
+    expect(doc).toContain("· thinking collapsed to one line (Ctrl+T)");
     app.stop();
   });
 
@@ -242,12 +251,12 @@ describe("TUI 壳", () => {
     term.feed("\x12"); // Ctrl+R
     expect(app.inspector.isOpen()).toBe(true);
     let doc = app.inspector.lines(100).map(stripAnsi).join("\n");
-    expect(doc).toContain("请求检视");
+    expect(doc).toContain("Requests");
     expect(doc).toContain("▸ #1");
     app.inspector.key("\r");
     doc = app.inspector.lines(100).map(stripAnsi).join("\n");
-    expect(doc).toContain("请求 #1");
-    expect(doc).toContain("[1 概要]");
+    expect(doc).toContain("Request #1");
+    expect(doc).toContain("[1 summary]");
     app.inspector.key("\x1b");
     app.inspector.key("\x1b");
     expect(app.inspector.isOpen()).toBe(false);
@@ -260,10 +269,10 @@ describe("TUI 壳", () => {
     // /events 直接进事件视图,/compactions 直接进压缩对照
     await app.command("/events");
     expect(app.inspector.isOpen()).toBe(true);
-    expect(app.inspector.lines(100).map(stripAnsi).join("\n")).toContain("事件日志");
+    expect(app.inspector.lines(100).map(stripAnsi).join("\n")).toContain("Events");
     app.inspector.close();
     await app.command("/compactions");
-    expect(app.inspector.lines(100).map(stripAnsi).join("\n")).toContain("压缩对照");
+    expect(app.inspector.lines(100).map(stripAnsi).join("\n")).toContain("Compactions");
     app.inspector.close();
     app.stop();
   });
@@ -292,23 +301,23 @@ describe("TUI 壳", () => {
       effortLevels: ["low", "high"],
     });
     await app.command("/effort");
-    expect(text(app)).toContain("未设置");
+    expect(text(app)).toContain("Effort not set");
     await app.command("/effort xhigh");
     let doc = text(app);
-    expect(doc).toContain("强度已设为 xhigh");
-    expect(doc).toContain("发送时向下回退");
-    expect(doc).toContain("强度 xhigh");
+    expect(doc).toContain("◇ effort set to xhigh");
+    expect(doc).toContain("clamped down when sending");
+    expect(doc).toContain("· effort xhigh");
     await app.submit("x");
     expect(seen).toEqual(["xhigh"]);
     const req = log.events.find((e) => e.type === "request");
     expect(req).toMatchObject({ type: "request", effort: "xhigh" });
     await app.command("/effort auto");
     doc = text(app);
-    expect(doc).toContain("强度已恢复为不传");
+    expect(doc).toContain("◇ effort omitted again");
     await app.submit("y");
     expect(seen).toEqual(["xhigh", undefined]);
     await app.command("/effort ultra");
-    expect(text(app)).toContain('未知级别 "ultra"');
+    expect(text(app)).toContain('unknown level "ultra"');
     app.stop();
   });
 
@@ -331,10 +340,10 @@ describe("TUI 壳", () => {
     const { app } = boot(provider, settings);
     await app.command("/models");
     const doc = text(app);
-    expect(doc).toContain("服务器 2 个模型 · 配置 2 个");
+    expect(doc).toContain("server 2 models · configured 2");
     expect(doc).toContain("✓ fake-model");
     expect(doc).toContain("✗ retired-model");
-    expect(doc).toContain("可能已下线");
+    expect(doc).toContain("possibly retired");
     expect(doc).toContain("· fresh-model");
     expect(doc).not.toContain("big-model");
     app.stop();
@@ -370,7 +379,7 @@ describe("TUI 壳", () => {
     expect(doc).toContain("- y = 2");
     expect(doc).toContain("+ y = 3");
     expect(doc).toContain("+ L0");
-    expect(doc).toContain("… 共 20 行");
+    expect(doc).toContain("… 20 lines total");
     expect(doc).not.toContain("+ L19");
     app.stop();
   });
@@ -416,8 +425,8 @@ describe("TUI 壳", () => {
     const running = app.submit("跑");
     await tick();
     const prompt = app.approvalLines().map(stripAnsi).join("\n");
-    expect(prompt).toContain("? 执行 echo");
-    expect(prompt).toContain("y 允许 · n 拒绝 · a 本会话总是允许 echo");
+    expect(prompt).toContain("? run echo");
+    expect(prompt).toContain("y allow · n deny · a always allow echo this session");
     term.feed("y");
     await tick();
     await tick();
@@ -428,13 +437,13 @@ describe("TUI 壳", () => {
     await running;
     const doc = text(app);
     expect(app.approvalLines()).toEqual([]);
-    expect(doc).toContain("· 审批:允许 echo");
-    expect(doc).toContain("· 审批:拒绝 echo");
-    expect(doc).toContain("· 审批:允许 echo(本会话不再问)");
+    expect(doc).toContain("· approve: allowed echo");
+    expect(doc).toContain("· approve: denied echo");
+    expect(doc).toContain("· approve: allowed echo (not asked again this session)");
     const results = log.events.filter((e) => e.type === "tool/result");
     expect(results.map((r) => r.type === "tool/result" && r.content)).toEqual([
       "echo:one",
-      "用户拒绝执行此调用。",
+      "The user denied this call.",
       "echo:three",
       "echo:four", // a 之后同名工具直接放行
     ]);
@@ -454,7 +463,7 @@ describe("TUI 壳", () => {
     const doc = text(app);
     expect(doc).toContain("Request #1 failed");
     expect(doc).toContain("网络断了");
-    expect(doc).toContain("○ 空闲");
+    expect(doc).toContain("○ idle");
     app.stop();
   });
 });

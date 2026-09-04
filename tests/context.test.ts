@@ -35,10 +35,10 @@ describe("contextBreakdown", () => {
   it("按角色分桶,工具结果按工具名细分", () => {
     const b = contextBreakdown(EVENTS, 10000);
     const labels = b.parts.map((p) => p.label);
-    expect(labels).toContain("系统提示词");
-    expect(labels).toContain("工具结果 read");
-    expect(labels).toContain("工具结果 bash");
-    expect(b.parts.find((p) => p.label === "工具结果 read")?.tokens).toBe(
+    expect(labels).toContain("system prompt");
+    expect(labels).toContain("tool results read");
+    expect(labels).toContain("tool results bash");
+    expect(b.parts.find((p) => p.label === "tool results read")?.tokens).toBe(
       estimateTokens("r".repeat(800)),
     );
   });

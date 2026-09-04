@@ -6,10 +6,10 @@ import { dirname } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { defineTool } from "../../src/tools.js";
 
-export const MEMORY_HEADING = "## 记忆(agent 写入)";
+export const MEMORY_HEADING = "## Memory (written by agent)";
 export const MEMORY_MAX_LINES = 200;
 export const MEMORY_MAX_BYTES = 8 * 1024;
-export const MEMORY_KINDS = ["偏好", "纠正", "项目事实", "参考"] as const;
+export const MEMORY_KINDS = ["preference", "correction", "project-fact", "reference"] as const;
 export type MemoryKind = (typeof MEMORY_KINDS)[number];
 
 /** 把文件拆成"人写的部分"与"记忆节正文"(不含标题)。记忆节从标题起到下一个二级标题或文件尾。 */
@@ -63,14 +63,14 @@ export function appendMemory(
   now = new Date(),
 ): { entries: number } {
   const oneLine = text.replace(/\s*\n\s*/g, " ").trim();
-  if (!oneLine) throw new Error("记忆内容为空");
+  if (!oneLine) throw new Error("memory text is empty");
   const { rest } = splitMemory(readOrEmpty(file));
   const entries = memoryEntries(readOrEmpty(file));
   const next = [...entries, `[${kind}] ${now.toISOString().slice(0, 10)} ${oneLine}`];
   const bytes = Buffer.byteLength(next.join("\n"), "utf8");
   if (next.length > MEMORY_MAX_LINES || bytes > MEMORY_MAX_BYTES) {
     throw new Error(
-      `记忆已达上限(${MEMORY_MAX_LINES} 条 / ${MEMORY_MAX_BYTES} 字节),先用 /memory forget 精简再记。当前 ${entries.length} 条。`,
+      `memory is full (${MEMORY_MAX_LINES} entries / ${MEMORY_MAX_BYTES} bytes); trim with /memory forget first. Currently ${entries.length} entries.`,
     );
   }
   writeWithMemory(file, rest, next);
@@ -82,7 +82,7 @@ export function forgetMemory(file: string, n: number): string {
   const content = readOrEmpty(file);
   const entries = memoryEntries(content);
   const target = entries[n - 1];
-  if (target === undefined) throw new Error(`没有第 ${n} 条记忆(共 ${entries.length} 条)`);
+  if (target === undefined) throw new Error(`no memory entry ${n} (${entries.length} total)`);
   writeWithMemory(
     file,
     splitMemory(content).rest,
@@ -110,19 +110,22 @@ export function createRememberTool(files: MemoryFiles) {
   return defineTool({
     name: "remember",
     description:
-      "把一条值得跨会话记住的事写进 AGENTS.md 的记忆节(下次会话开始时随项目指令读入)。" +
-      "只记从代码推导不出、且用户会希望你下次仍记得的:用户偏好、被纠正过的做法、项目事实、参考链接。" +
-      `一行一条,不记对话过程。上限 ${MEMORY_MAX_LINES} 条。`,
+      "Write one thing worth remembering across sessions into the memory section of AGENTS.md (loaded with the project instructions at the start of the next session). " +
+      "Record only what cannot be derived from the code and the user would want you to still know next time: user preferences, corrected practices, project facts, reference links. " +
+      `One line per entry; do not record the conversation itself. Limit ${MEMORY_MAX_LINES} entries.`,
     parameters: Type.Object({
-      text: Type.String({ description: "一句话,单行" }),
+      text: Type.String({ description: "one sentence, single line" }),
       kind: Type.Union(
         MEMORY_KINDS.map((k) => Type.Literal(k)),
-        { description: "偏好 | 纠正 | 项目事实 | 参考" },
+        { description: "preference | correction | project-fact | reference" },
       ),
       scope: Type.Optional(
         Type.Union(
           scopes.map((s) => Type.Literal(s)),
-          { description: "project = 本项目的 AGENTS.md(缺省);user = 跨项目的用户级文件" },
+          {
+            description:
+              "project = this project's AGENTS.md (default); user = cross-project user-level file",
+          },
         ),
       ),
     }),
@@ -130,7 +133,7 @@ export function createRememberTool(files: MemoryFiles) {
       const scope = args.scope ?? (files.project ? "project" : "user");
       const file = scope === "project" && files.project ? files.project : files.user;
       const r = appendMemory(file, args.kind, args.text);
-      return `已记入 ${file}(第 ${r.entries} 条),下次会话开始生效。`;
+      return `recorded in ${file} (entry ${r.entries}); takes effect at the next session.`;
     },
   });
 }

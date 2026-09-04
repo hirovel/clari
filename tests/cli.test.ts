@@ -80,7 +80,7 @@ describe("真实入口(子进程)", () => {
     for (const entry of [RUN, TUI]) {
       const r = await run(entry, ["--help"], { cwd: tmp, env: { CLARI_CONFIG: cfg } });
       expect(r.code, r.stderr).toBe(0);
-      expect(r.stdout).toContain("用法");
+      expect(r.stdout).toContain("Usage");
       expect(r.stdout).toContain("--compaction");
       expect(r.stdout).toContain(cfg);
     }
@@ -95,7 +95,7 @@ describe("真实入口(子进程)", () => {
       env: { CLARI_CONFIG: cfg, DEEPSEEK_API_KEY: "", ANTHROPIC_API_KEY: "", OPENAI_API_KEY: "" },
     });
     expect(r.code).toBe(1);
-    expect(r.stderr).toContain("没有可用的 API key");
+    expect(r.stderr).toContain("no API key");
     expect(r.stderr).toContain("DEEPSEEK_API_KEY");
     expect(existsSync(cfg)).toBe(true);
     const created = JSON.parse(readFileSync(cfg, "utf8")) as { default: string };
@@ -136,13 +136,13 @@ describe("真实入口(子进程)", () => {
       env: { CLARI_CONFIG: cfg },
     });
     expect(bad.code).toBe(2);
-    expect(bad.stderr).toContain("未知强度级别");
+    expect(bad.stderr).toContain("unknown effort level");
 
     // 纯文本模式:回复到 stdout,会话路径到 stderr
     const plain = await run(RUN, ["再来"], { cwd: tmp, env: { CLARI_CONFIG: cfg } });
     expect(plain.code, plain.stderr).toBe(0);
     expect(plain.stdout.trim()).toBe("收到:再来");
-    expect(plain.stderr).toContain("[会话:");
+    expect(plain.stderr).toContain("[session:");
     await model.close();
   }, 90000);
 });

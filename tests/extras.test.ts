@@ -133,14 +133,14 @@ describe("raw 缺省开;/raw N;/tools", () => {
     expect(doc).toContain("extras");
     expect(doc).toContain("id x1 · finish_reason stop");
     expect(doc).toContain("raw");
-    expect(doc).toContain("2 lines · /raw 1");
+    expect(doc).toContain("2 lines as received · /raw 1");
 
     await app.command("/raw 9");
     expect(plain(app.lines(120).join("\n"))).toContain("No request #9");
     await app.command("/raw 1");
     expect(app.inspector.isOpen()).toBe(true);
     const ins = plain(app.inspector.lines(120).join("\n"));
-    expect(ins).toContain("请求 #1");
+    expect(ins).toContain("Request #1");
     expect(ins).toContain('data: {"choices"');
     expect(ins).toContain("data: [DONE]");
     expect(ins).toContain("extras");

@@ -400,7 +400,7 @@ async function executeCalls(
   const prepare = async (call: ToolCall): Promise<Prepared> => {
     const tool = ctx.tools.find((t) => t.name === call.name);
     if (!tool) return { call, immediate: `未知工具 "${call.name}"。` };
-    if (!(await ctx.approve(call))) return { call, immediate: "用户拒绝执行此调用。" };
+    if (!(await ctx.approve(call))) return { call, immediate: "The user denied this call." };
     const checked = validateArgs(tool.parameters, call.args);
     if (!checked.ok) return { call, immediate: checked.error };
     return { call, tool, args: checked.value };

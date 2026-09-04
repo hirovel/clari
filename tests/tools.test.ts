@@ -57,14 +57,14 @@ describe("editTool", () => {
   it("不存在→报错提示先 read", async () => {
     const path = tempFile("aaa");
     await expect(editTool.execute({ path, oldText: "zzz", newText: "x" }, ctx)).rejects.toThrow(
-      "不存在",
+      "not found",
     );
   });
 
   it("多处匹配→报错并给出次数", async () => {
     const path = tempFile("aa aa");
     await expect(editTool.execute({ path, oldText: "aa", newText: "x" }, ctx)).rejects.toThrow(
-      "出现 2 次",
+      "occurs 2 times",
     );
   });
 });

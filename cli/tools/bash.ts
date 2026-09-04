@@ -21,20 +21,22 @@ export function createBashTool(
   return defineTool({
     name: "bash",
     description:
-      "在当前工作目录执行 bash 命令,返回 stdout 与 stderr 合并输出。" +
-      `缺省 ${defaultTimeout} 秒超时,长任务用 timeout 参数加大。` +
-      "输出超限时按截断策略保留一部分,全量写入临时文件并附路径。",
+      "Run a bash command in the current working directory; returns stdout and stderr combined. " +
+      `Default timeout ${defaultTimeout} s; raise the timeout parameter for long tasks. ` +
+      "When output exceeds the limit, a truncation policy keeps part of it; the full output is written to a temp file whose path is appended.",
     parameters: Type.Object({
-      command: Type.String({ description: "要执行的 bash 命令" }),
+      command: Type.String({ description: "bash command to run" }),
       timeout: Type.Optional(
-        Type.Number({ description: `超时秒数,缺省 ${defaultTimeout};0 = 不限` }),
+        Type.Number({
+          description: `timeout in seconds, default ${defaultTimeout}; 0 = unlimited`,
+        }),
       ),
     }),
     async execute(args, ctx) {
       const shell = findBash();
       if (!shell) {
         throw new Error(
-          "找不到 bash。可选方案:1. 安装 Git for Windows;2. 设环境变量 CLARI_SHELL 指向 bash 可执行文件。",
+          "bash not found. Options: 1. install Git for Windows; 2. set CLARI_SHELL to a bash executable.",
         );
       }
       const timeoutS = args.timeout ?? defaultTimeout;
@@ -43,17 +45,19 @@ export function createBashTool(
         maxBytes,
       });
       const shown = applyTruncation(r.output, truncate);
-      if (r.aborted) throw new Error(`命令已被打断。已产出的输出:\n${shown}`);
+      if (r.aborted) throw new Error(`command interrupted. Output so far:\n${shown}`);
       if (r.timedOut) {
-        throw new Error(`命令超过 ${timeoutS} 秒未结束,已终止。已产出的输出:\n${shown}`);
+        throw new Error(
+          `command did not finish within ${timeoutS} s, killed. Output so far:\n${shown}`,
+        );
       }
       if (r.overflowed) {
         throw new Error(
-          `命令输出超过 ${Math.round(maxBytes / 1024 / 1024)} MB,已终止。请缩小输出范围。已产出的输出:\n${shown}`,
+          `command output exceeds ${Math.round(maxBytes / 1024 / 1024)} MB, killed. Narrow the output. Output so far:\n${shown}`,
         );
       }
-      if (r.exitCode !== 0) throw new Error(`${shown}\n命令退出码 ${r.exitCode}`);
-      return shown || "(无输出)";
+      if (r.exitCode !== 0) throw new Error(`${shown}\ncommand exited with code ${r.exitCode}`);
+      return shown || "(no output)";
     },
   });
 }
@@ -67,7 +71,7 @@ function applyTruncation(output: string, truncate: TruncationPolicy): string {
   // 全量落盘是透明度要求,与策略无关:被截掉的部分永远找得回来。
   const fullPath = join(mkdtempSync(join(tmpdir(), "kernel-bash-")), "output.txt");
   writeFileSync(fullPath, output, "utf8");
-  return `${t.text.trimEnd()}\n[${t.note ?? "输出已截断"}。完整输出:${fullPath}]`;
+  return `${t.text.trimEnd()}\n[${t.note ?? "output truncated"}. Full output: ${fullPath}]`;
 }
 
 function findBash(): string | null {

@@ -21,7 +21,7 @@ import {
 
 const [file, ...flags] = process.argv.slice(2);
 if (!file) {
-  console.error("用法: pnpm replay <会话.jsonl> [--messages] [--request N]");
+  console.error("usage: pnpm replay <session.jsonl> [--messages] [--request N]");
   process.exit(1);
 }
 
@@ -31,7 +31,7 @@ const start = log.events.find((e) => e.type === "session/start");
 const sections = start?.type === "session/start" ? start.sections : undefined;
 
 console.log(
-  `\n事件 ${log.events.length} 条 · 请求 ${records.length} 次 · 模型可见消息 ${deriveMessages(log.events).length} 条`,
+  `\n${log.events.length} events · ${records.length} requests · ${deriveMessages(log.events).length} messages visible to the model`,
 );
 console.log("─".repeat(72));
 
@@ -39,7 +39,7 @@ console.log("─".repeat(72));
 for (const r of records) console.log(listRow(r, false));
 const compactions = collectCompactions(log.events);
 if (compactions.length > 0) {
-  console.log(`\n压缩 ${compactions.length} 次(--compaction N 看对照):`);
+  console.log(`\n${compactions.length} compactions (--compaction N to compare):`);
   for (const r of compactions) console.log(compactionRow(r, false));
 }
 
@@ -48,12 +48,12 @@ if (requestFlag >= 0) {
   const n = Number(flags[requestFlag + 1]);
   const rec = records.find((r) => r.n === n);
   if (!rec) {
-    console.error(`没有第 ${n} 次请求(共 ${records.length} 次)`);
+    console.error(`no request #${n} (${records.length} total)`);
     process.exit(1);
   }
-  console.log(`\n${"─".repeat(72)}\n请求 #${n} 的决策:`);
+  console.log(`\n${"─".repeat(72)}\nrequest #${n} decisions:`);
   for (const l of decisionLines(rec)) console.log(l);
-  console.log(`\n请求 #${n} 发出时模型看到的全部内容:`);
+  console.log(`\neverything the model saw when request #${n} was sent:`);
   for (const l of sentLines(deriveMessages(log.events.slice(0, rec.index)), false, sections)) {
     console.log(l);
   }
@@ -66,7 +66,7 @@ if (compactionFlag >= 0) {
   const comps = collectCompactions(log.events);
   const rec = comps.find((r) => r.n === n);
   if (!rec) {
-    console.error(`没有第 ${n} 次压缩(共 ${comps.length} 次)`);
+    console.error(`no compaction #${n} (${comps.length} total)`);
     process.exit(1);
   }
   if (flags.includes("--json")) {
@@ -96,23 +96,25 @@ if (compactionFlag >= 0) {
   }
   console.log(`\n${"─".repeat(72)}`);
   for (const section of [1, 2, 3, 4] as const) {
-    console.log(`\n【${COMPACTION_SECTIONS[section - 1]}】`);
+    console.log(`\n[${COMPACTION_SECTIONS[section - 1]}]`);
     for (const l of compactionLines(log.events, rec, section)) console.log(l);
   }
 }
 
 if (flags.includes("--messages")) {
-  console.log(`\n${"─".repeat(72)}\n当前投影(下一次请求会发出的内容):`);
+  console.log(`\n${"─".repeat(72)}\ncurrent projection (what the next request will send):`);
   for (const l of sentLines(deriveMessages(log.events), false, sections)) console.log(l);
 }
 
 console.log(`\n${"─".repeat(72)}`);
 const b = contextBreakdown(log.events, Number(process.env.CLARI_CONTEXT_WINDOW ?? 131072));
-console.log(`构成(估算 ${b.estimatedTokens} tok,占窗口 ${Math.round(b.usedShare * 100)}%):`);
+console.log(
+  `breakdown (est. ${b.estimatedTokens} tok, ${Math.round(b.usedShare * 100)}% of window):`,
+);
 for (const p of b.parts) {
   console.log(
     `  ${Math.round(p.share * 100)}%`.padStart(5) +
-      `  ${p.tokens} tok · ${p.count} 条 · ${p.label}`,
+      `  ${p.tokens} tok · ${p.count} items · ${p.label}`,
   );
 }
-console.log("\n以上全部来自日志文件本身。日志之外,别无来源。\n");
+console.log("\nEverything above comes from the log file alone. There is no other source.\n");

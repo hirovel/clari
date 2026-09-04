@@ -47,8 +47,10 @@ try {
   process.exit(2);
 }
 if (boot.configCreated) {
-  console.log(`已生成配置模板:${DEFAULT_CONFIG_PATH}`);
-  console.log("填入各家的 API key(推荐环境变量),或启动后用 /key 供应商 密钥 写入配置。\n");
+  console.log(`config template created: ${DEFAULT_CONFIG_PATH}`);
+  console.log(
+    "Fill in each provider's API key (env vars recommended), or run /key provider secret after startup to write it into the config.\n",
+  );
 }
 
 let first: ModelChoice;
@@ -56,7 +58,9 @@ try {
   first = boot.choose(args.model);
 } catch (err) {
   console.error((err as Error).message);
-  console.error("\n提示:任一供应商 key 就位后即可启动;其余供应商可在 TUI 内用 /key 设置。");
+  console.error(
+    "\nhint: one provider key is enough to start; set the others inside the TUI with /key.",
+  );
   process.exit(1);
 }
 
@@ -87,12 +91,12 @@ const crash = (kind: string) => (err: unknown) => {
     // 还原失败也要继续打印
   }
   const e = err as Error;
-  console.error(`\n${kind}:${e?.stack ?? String(err)}`);
-  console.error(`会话已落盘:${sessionFile};pnpm tui -- --resume ${sessionFile} 可恢复`);
+  console.error(`\n${kind}: ${e?.stack ?? String(err)}`);
+  console.error(`session saved: ${sessionFile}; resume with pnpm tui -- --resume ${sessionFile}`);
   process.exit(70);
 };
-process.on("uncaughtException", crash("未捕获异常"));
-process.on("unhandledRejection", crash("未处理的 Promise 拒绝"));
+process.on("uncaughtException", crash("uncaught exception"));
+process.on("unhandledRejection", crash("unhandled promise rejection"));
 const memory = args.memory ? memoryFiles() : undefined;
 let ext: Awaited<ReturnType<typeof loadExtensions>>;
 try {

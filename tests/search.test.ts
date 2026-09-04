@@ -71,7 +71,7 @@ describe("只读工具(Q56)", () => {
       { pattern: "zzz", path: root },
       { signal: new AbortController().signal },
     );
-    expect(none).toContain("无匹配");
+    expect(none).toContain("no matches");
 
     const files = await globTool.execute(
       { pattern: "**/*.ts", path: root },
@@ -108,7 +108,7 @@ describe("行级 diff(Q58)", () => {
       "-c",
       "+X",
       " d",
-      "……2 行未变…",
+      "……2 unchanged lines…",
       " g",
       "+h",
     ]);

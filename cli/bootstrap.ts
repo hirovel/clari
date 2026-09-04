@@ -43,8 +43,8 @@ import { createSkillTool } from "./tools/skill.js";
 import type { ModelChoice, TuiSettings } from "./tui-app.js";
 
 export const BASE_PROMPT =
-  "你是一个在用户机器上工作的编程助手。工作目录即当前目录。" +
-  "优先用 grep/glob 定位、read 读取、edit 做精确修改,用 bash 执行命令。回答简洁。";
+  "You are a coding assistant working on the user's machine. The working directory is the current directory. " +
+  "Prefer grep/glob to locate, read to read, edit for exact changes, and bash to run commands. Keep answers concise.";
 export const RESERVE = 32000;
 export const SESSIONS_DIR = "sessions";
 export const PROMPT_SECTION_NAMES: PromptSectionName[] = [
@@ -116,7 +116,7 @@ export function parseCommonArgs(argv: string[]): CommonArgs {
   };
   const takeValue = (i: number, name: string): string => {
     const v = argv[i + 1];
-    if (v === undefined) throw new Error(`${name} 需要一个值`);
+    if (v === undefined) throw new Error(`${name} requires a value`);
     return v;
   };
   for (let i = 0; i < argv.length; i++) {
@@ -128,7 +128,9 @@ export function parseCommonArgs(argv: string[]): CommonArgs {
       case "--effort": {
         const v = takeValue(i++, a);
         const level = parseEffort(v);
-        if (!level) throw new Error(`未知强度级别 "${v}",可选:${EFFORT_LEVELS.join(" ")}`);
+        if (!level) {
+          throw new Error(`unknown effort level "${v}"; choices: ${EFFORT_LEVELS.join(" ")}`);
+        }
         out.effort = level;
         break;
       }
@@ -169,7 +171,7 @@ export function parseCommonArgs(argv: string[]): CommonArgs {
         break;
       case "--approve": {
         const v = takeValue(i++, a);
-        if (v !== "all" && v !== "ask") throw new Error(`--approve 只接受 all 或 ask,收到 "${v}"`);
+        if (v !== "all" && v !== "ask") throw new Error(`--approve accepts all or ask, got "${v}"`);
         out.approve = v;
         out.approveExplicit = true;
         break;
@@ -195,7 +197,9 @@ export function parseCommonArgs(argv: string[]): CommonArgs {
           .filter(Boolean);
         for (const n of names) {
           if (!PROMPT_SECTION_NAMES.includes(n as PromptSectionName)) {
-            throw new Error(`未知提示词段 "${n}",可选:${PROMPT_SECTION_NAMES.join(" ")}`);
+            throw new Error(
+              `unknown prompt section "${n}"; choices: ${PROMPT_SECTION_NAMES.join(" ")}`,
+            );
           }
         }
         out.promptSections = names as PromptSectionName[];
@@ -204,14 +208,14 @@ export function parseCommonArgs(argv: string[]): CommonArgs {
       case "--instructions-as": {
         const v = takeValue(i++, a);
         if (v !== "system" && v !== "user")
-          throw new Error(`--instructions-as 只接受 system 或 user`);
+          throw new Error("--instructions-as accepts system or user");
         out.instructionsAs = v;
         break;
       }
       case "--execution": {
         const v = takeValue(i++, a);
         if (v !== "sequential" && v !== "parallel")
-          throw new Error(`--execution 只接受 sequential 或 parallel,收到 "${v}"`);
+          throw new Error(`--execution accepts sequential or parallel, got "${v}"`);
         out.execution = v;
         break;
       }
@@ -226,45 +230,45 @@ export function parseCommonArgs(argv: string[]): CommonArgs {
         out.rest.push(takeValue(i++, a));
         break;
       default:
-        if (a.startsWith("--")) throw new Error(`未知参数 ${a}`);
+        if (a.startsWith("--")) throw new Error(`unknown option ${a}`);
         out.rest.push(a);
     }
   }
   return out;
 }
 
-export const USAGE = `用法
-  pnpm tui  [-- 选项]                  交互界面
-  pnpm once -- "任务" [选项]           一次性模式:跑一个 turn 就退出,stdout 是回复
-  pnpm replay <会话.jsonl> [--request N] [--compaction N [--json]] [--messages]
+export const USAGE = `Usage
+  pnpm tui  [-- options]               interactive UI
+  pnpm once -- "task" [options]        one-shot mode: run one turn and exit; stdout is the reply
+  pnpm replay <session.jsonl> [--request N] [--compaction N [--json]] [--messages]
 
-选项
-  --model 供应商/模型            缺省用配置里的 default
-  --effort off|low|medium|high|xhigh|max   缺省不传,用供应商默认
-  --compaction llm|clear|pipeline|./策略.mjs   缺省 llm
-  --resume <会话文件> | --continue   恢复会话并沿用同一文件
-  --system-prompt <文件> | --append-system-prompt <文件>
-  --approve all|ask              ask = 每个工具调用弹一行确认(仅界面);缺省 all
-  --preset 名                    用配置里 presets.名 的一组参数;显式参数仍优先
-  --memory | --no-memory         跨会话记忆(AGENTS.md 里的记忆节 + remember 工具);缺省关
-  --prompt-sections role,env,instructions,memory,skills,append   系统提示词要哪几段、什么顺序
-  --instructions-as system|user  项目指令与记忆放 system(缺省)还是首条 user 消息
-  --execution sequential|parallel  工具执行槽:缺省逐个;parallel = 相邻只读调用同时跑
-  --extension <模块.mjs>         装载扩展模块(可多次):加工具、换槽实现
-  --max-steps N                  终止保底(缺省不设上限)
-  --subagent                     装上 task 工具(子 agent)
-  --no-trace                     不记录原始流(缺省逐行记录收到的每一行,写 <会话>.trace.jsonl,/raw N 查看)
-  --fold                         工具结果初始折叠(Ctrl+O 切换)
-  --json                         一次性模式输出结构化结果
-  --events                       一次性模式把每条事件以 JSON 行写到 stdout
+Options
+  --model provider/model         default: the config's default model
+  --effort off|low|medium|high|xhigh|max   default: not sent, provider default applies
+  --compaction llm|clear|pipeline|./strategy.mjs   default llm
+  --resume <session file> | --continue   resume a session and keep appending to the same file
+  --system-prompt <file> | --append-system-prompt <file>
+  --approve all|ask              ask = one-line confirmation per tool call (UI only); default all
+  --preset name                  apply the parameter set presets.name from config; explicit flags still win
+  --memory | --no-memory         cross-session memory (memory section in AGENTS.md + remember tool); default off
+  --prompt-sections role,env,instructions,memory,skills,append   which system prompt sections, in which order
+  --instructions-as system|user  put project instructions and memory in system (default) or in the first user message
+  --execution sequential|parallel  tool execution slot: default one at a time; parallel = adjacent read-only calls run together
+  --extension <module.mjs>       load an extension module (repeatable): add tools, replace slot implementations
+  --max-steps N                  termination guard (default: no limit)
+  --subagent                     add the task tool (sub-agents)
+  --no-trace                     do not record the raw stream (default: every received line is written to <session>.trace.jsonl; view with /raw N)
+  --fold                         tool results start folded (Ctrl+O toggles)
+  --json                         one-shot mode: print a structured result
+  --events                       one-shot mode: write every event to stdout as a JSON line
   -h, --help
 
-配置
+Config
   ${DEFAULT_CONFIG_PATH}
-  环境变量 CLARI_CONFIG 可改路径;key 走 apiKeyEnv 指向的环境变量,或界面里 /key 供应商 密钥
-  会话文件缺省在 ./sessions/;配置 sessionsDir 或环境变量 CLARI_SESSIONS 可改
-  提示词模板 ~/.clari/prompts/*.md 与 <git 根>/.clari/prompts/*.md,界面里 /名 参数
-  技能 ~/.clari/skills/<名>/SKILL.md 与 <git 根>/.agents/skills/<名>/SKILL.md,进系统提示词的技能段`;
+  CLARI_CONFIG overrides the path; keys come from the env var named by apiKeyEnv, or /key provider secret in the UI
+  session files default to ./sessions/; override with sessionsDir in config or CLARI_SESSIONS
+  prompt templates: ~/.clari/prompts/*.md and <git root>/.clari/prompts/*.md; /name args in the UI
+  skills: ~/.clari/skills/<name>/SKILL.md and <git root>/.agents/skills/<name>/SKILL.md; listed in the system prompt's skills section`;
 
 export type Bootstrap = {
   config: KernelConfig;
@@ -280,14 +284,14 @@ export function applyPreset(args: CommonArgs, config: KernelConfig): CommonArgs 
   const preset = args.preset ? config.presets?.[args.preset] : undefined;
   if (args.preset && !preset) {
     throw new Error(
-      `配置里没有预设 "${args.preset}",可选:${Object.keys(config.presets ?? {}).join(" ") || "(无)"}`,
+      `no preset "${args.preset}" in config; choices: ${Object.keys(config.presets ?? {}).join(" ") || "(none)"}`,
     );
   }
   if (preset) {
     if (out.model === undefined && preset.model) out.model = preset.model;
     if (out.effort === undefined && preset.effort) {
       const level = parseEffort(preset.effort);
-      if (!level) throw new Error(`预设 ${args.preset} 的 effort "${preset.effort}" 不合法`);
+      if (!level) throw new Error(`preset ${args.preset} has invalid effort "${preset.effort}"`);
       out.effort = level;
     }
     if (!args.compactionExplicit && preset.compaction) out.compaction = preset.compaction;
@@ -380,12 +384,12 @@ export async function loadCompactionStrategy(name: string): Promise<CompactionSt
     };
     const fn = mod.default ?? mod.strategy;
     if (typeof fn !== "function") {
-      throw new Error(`压缩策略模块 ${name} 必须 default 导出一个函数`);
+      throw new Error(`compaction strategy module ${name} must default-export a function`);
     }
     return fn as CompactionStrategy;
   }
   throw new Error(
-    `未知压缩策略 "${name}",可选:${Object.keys(BUILTIN_STRATEGIES).join(" ")},或模块路径`,
+    `unknown compaction strategy "${name}"; choices: ${Object.keys(BUILTIN_STRATEGIES).join(" ")}, or a module path`,
   );
 }
 
@@ -462,10 +466,10 @@ export function openSession(
 } {
   const target = args.resume ?? (args.continue ? latestSession(dir) : undefined);
   if (target) {
-    if (!existsSync(target)) throw new Error(`会话文件不存在:${target}`);
+    if (!existsSync(target)) throw new Error(`session file not found: ${target}`);
     return { log: EventLog.load(target, { attach: true }), sessionFile: target, resumed: true };
   }
-  if (args.continue) throw new Error(`${dir}/ 下没有可恢复的会话`);
+  if (args.continue) throw new Error(`no session to resume in ${dir}/`);
   const sessionFile = newSessionPath(dir);
   return { log: new EventLog(sessionFile), sessionFile, resumed: false };
 }
@@ -506,7 +510,7 @@ export async function loadExtensions(
     const mod = (await import(pathToFileURL(resolve(p)).href)) as { default?: unknown };
     if (typeof mod.default !== "function") {
       throw new Error(
-        `扩展模块 ${p} 必须 default 导出一个函数 (ctx) => ({ tools?, slots?, onEvent? })`,
+        `extension module ${p} must default-export a function (ctx) => ({ tools?, slots?, onEvent? })`,
       );
     }
     const ext = (await (mod.default as (c: typeof ctx) => Extension | Promise<Extension>)(

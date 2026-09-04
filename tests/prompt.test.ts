@@ -60,7 +60,7 @@ describe("系统提示词组装(Q51)", () => {
     expect(text.indexOf("中层规则")).toBeLessThan(text.indexOf("叶子规则"));
     expect(text).not.toContain("同目录 CLAUDE.md");
     expect(text).not.toContain("越界规则");
-    expect(text).toContain("# 项目指令 ");
+    expect(text).toContain("# Project instructions ");
   });
 
   it("预算:超限先丢最宽泛的;只剩一份仍超限就截它", () => {
@@ -75,7 +75,7 @@ describe("系统提示词组装(Q51)", () => {
     const tiny = discoverProjectInstructions(deep, { home, budgetBytes: 6 });
     expect(tiny.files.filter((f) => !f.dropped)).toHaveLength(1);
     expect(tiny.files.at(-1)?.truncated).toBe(true);
-    expect(tiny.section?.text).toContain("已截断至 6 字节");
+    expect(tiny.section?.text).toContain("truncated to 6 bytes");
   });
 
   it("不在仓库内只看 cwd 与全局;没有文件时无该段", () => {
@@ -95,9 +95,9 @@ describe("系统提示词组装(Q51)", () => {
       env: { SHELL: "/bin/zsh" },
       git: false,
     });
-    expect(env.text).toContain("工作目录:");
-    expect(env.text).toContain("shell:/bin/zsh");
-    expect(env.text).toContain("日期:2026-09-02");
+    expect(env.text).toContain("working directory: ");
+    expect(env.text).toContain("shell: /bin/zsh");
+    expect(env.text).toContain("date: 2026-09-02");
 
     const full = buildSystemPrompt({
       base: "你是助手。",
@@ -106,7 +106,12 @@ describe("系统提示词组装(Q51)", () => {
       discover: { home },
       env: { git: false },
     });
-    expect(full.sections.map((s) => s.name)).toEqual(["角色与规则", "环境", "项目指令", "追加"]);
+    expect(full.sections.map((s) => s.name)).toEqual([
+      "Role and rules",
+      "Environment",
+      "Project instructions",
+      "Appended",
+    ]);
     expect(full.text.startsWith("你是助手。")).toBe(true);
     expect(full.text.endsWith("追加段")).toBe(true);
 
@@ -116,7 +121,7 @@ describe("系统提示词组装(Q51)", () => {
       replace: "完全自定义",
       append: "追加段",
     });
-    expect(replaced.sections.map((s) => s.name)).toEqual(["自定义", "追加"]);
+    expect(replaced.sections.map((s) => s.name)).toEqual(["Custom", "Appended"]);
     expect(replaced.text).toBe("完全自定义\n\n追加段");
   });
 });

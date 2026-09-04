@@ -30,15 +30,17 @@ const ctx = { signal: new AbortController().signal };
 
 describe("记忆节:AGENTS.md 里由工具写入的一节(Q65)", () => {
   it("拆分:人写部分与记忆节分开;记忆节到下一个二级标题为止", () => {
-    const content = `# 项目\n规则 A\n\n${MEMORY_HEADING}\n- [纠正] 2026-09-03 不要用 any\n- [偏好] 2026-09-03 回答简短\n\n## 其它\n人写的`;
+    const content = `# 项目\n规则 A\n\n${MEMORY_HEADING}\n- [correction] 2026-09-03 不要用 any\n- [preference] 2026-09-03 回答简短\n\n## 其它\n人写的`;
     const s = splitMemory(content);
-    expect(s.memory).toBe("- [纠正] 2026-09-03 不要用 any\n- [偏好] 2026-09-03 回答简短");
+    expect(s.memory).toBe(
+      "- [correction] 2026-09-03 不要用 any\n- [preference] 2026-09-03 回答简短",
+    );
     expect(s.rest).toContain("规则 A");
     expect(s.rest).toContain("## 其它");
     expect(s.rest).not.toContain(MEMORY_HEADING);
     expect(memoryEntries(content)).toEqual([
-      "[纠正] 2026-09-03 不要用 any",
-      "[偏好] 2026-09-03 回答简短",
+      "[correction] 2026-09-03 不要用 any",
+      "[preference] 2026-09-03 回答简短",
     ]);
     expect(splitMemory("没有记忆节").memory).toBeUndefined();
   });
@@ -48,17 +50,17 @@ describe("记忆节:AGENTS.md 里由工具写入的一节(Q65)", () => {
     const file = join(tmp, "AGENTS.md");
     writeFileSync(file, "# 项目\n规则 A\n");
     const day = new Date("2026-09-03T00:00:00Z");
-    appendMemory(file, "纠正", "测试要跑 pnpm check", day);
-    appendMemory(file, "偏好", "多行\n要压成一行", day);
+    appendMemory(file, "correction", "测试要跑 pnpm check", day);
+    appendMemory(file, "preference", "多行\n要压成一行", day);
     let text = readFileSync(file, "utf8");
     expect(text.startsWith("# 项目\n规则 A")).toBe(true);
     expect(text).toContain(
-      `${MEMORY_HEADING}\n- [纠正] 2026-09-03 测试要跑 pnpm check\n- [偏好] 2026-09-03 多行 要压成一行`,
+      `${MEMORY_HEADING}\n- [correction] 2026-09-03 测试要跑 pnpm check\n- [preference] 2026-09-03 多行 要压成一行`,
     );
 
     expect(forgetMemory(file, 1)).toContain("pnpm check");
     expect(memoryEntries(readFileSync(file, "utf8"))).toHaveLength(1);
-    expect(() => forgetMemory(file, 5)).toThrow("没有第 5 条");
+    expect(() => forgetMemory(file, 5)).toThrow("no memory entry 5");
 
     expect(clearMemory(file)).toBe(1);
     text = readFileSync(file, "utf8");
@@ -66,13 +68,15 @@ describe("记忆节:AGENTS.md 里由工具写入的一节(Q65)", () => {
     expect(text).not.toContain(MEMORY_HEADING);
 
     // 上限
-    for (let i = 0; i < MEMORY_MAX_LINES; i++) appendMemory(file, "参考", `第 ${i} 条`, day);
-    expect(() => appendMemory(file, "参考", "多一条", day)).toThrow("已达上限");
+    for (let i = 0; i < MEMORY_MAX_LINES; i++) appendMemory(file, "reference", `第 ${i} 条`, day);
+    expect(() => appendMemory(file, "reference", "多一条", day)).toThrow("memory is full");
     expect(memoryEntries(readFileSync(file, "utf8"))).toHaveLength(MEMORY_MAX_LINES);
     // 不存在的文件也能建
     const fresh = join(tmp, "sub", "AGENTS.md");
-    appendMemory(fresh, "项目事实", "新建", day);
-    expect(readFileSync(fresh, "utf8")).toBe(`${MEMORY_HEADING}\n- [项目事实] 2026-09-03 新建\n`);
+    appendMemory(fresh, "project-fact", "新建", day);
+    expect(readFileSync(fresh, "utf8")).toBe(
+      `${MEMORY_HEADING}\n- [project-fact] 2026-09-03 新建\n`,
+    );
   });
 
   it("remember 工具:缺省写项目文件,scope=user 写用户文件,返回文案含路径", async () => {
@@ -80,9 +84,9 @@ describe("记忆节:AGENTS.md 里由工具写入的一节(Q65)", () => {
     const project = join(tmp, "AGENTS.md");
     const user = join(tmp, "home", "AGENTS.md");
     const tool = createRememberTool({ project, user });
-    const out = await tool.execute({ text: "用 pnpm", kind: "项目事实" }, ctx);
+    const out = await tool.execute({ text: "用 pnpm", kind: "project-fact" }, ctx);
     expect(out).toContain(project);
-    await tool.execute({ text: "喜欢简短", kind: "偏好", scope: "user" }, ctx);
+    await tool.execute({ text: "喜欢简短", kind: "preference", scope: "user" }, ctx);
     expect(memoryEntries(readFileSync(project, "utf8"))).toHaveLength(1);
     expect(memoryEntries(readFileSync(user, "utf8"))[0]).toContain("喜欢简短");
     const parameters = tool.parameters as { properties: { scope: { anyOf: { const: string }[] } } };
@@ -99,11 +103,11 @@ describe("系统提示词段控制(Q66)", () => {
     mkdirSync(home, { recursive: true });
     writeFileSync(
       join(root, "AGENTS.md"),
-      `# 仓库规则\n用 pnpm\n\n${MEMORY_HEADING}\n- [纠正] 2026-09-03 别用 any\n`,
+      `# 仓库规则\n用 pnpm\n\n${MEMORY_HEADING}\n- [correction] 2026-09-03 别用 any\n`,
     );
     writeFileSync(
       join(home, "AGENTS.md"),
-      `全局规则\n\n${MEMORY_HEADING}\n- [偏好] 2026-09-03 简短\n`,
+      `全局规则\n\n${MEMORY_HEADING}\n- [preference] 2026-09-03 简短\n`,
     );
     return { root, home };
   }
@@ -123,7 +127,11 @@ describe("系统提示词段控制(Q66)", () => {
       discover: { home },
       env: { git: false },
     });
-    expect(off.sections.map((s) => s.name)).toEqual(["角色与规则", "环境", "项目指令"]);
+    expect(off.sections.map((s) => s.name)).toEqual([
+      "Role and rules",
+      "Environment",
+      "Project instructions",
+    ]);
     expect(off.text).not.toContain("别用 any");
     const on = buildSystemPrompt({
       base: "B",
@@ -132,8 +140,13 @@ describe("系统提示词段控制(Q66)", () => {
       env: { git: false },
       memory: true,
     });
-    expect(on.sections.map((s) => s.name)).toEqual(["角色与规则", "环境", "项目指令", "记忆"]);
-    expect(on.text).toContain("# 记忆 ");
+    expect(on.sections.map((s) => s.name)).toEqual([
+      "Role and rules",
+      "Environment",
+      "Project instructions",
+      "Memory",
+    ]);
+    expect(on.text).toContain("# Memory ");
     expect(on.text).toContain("别用 any");
   });
 
@@ -147,8 +160,8 @@ describe("系统提示词段控制(Q66)", () => {
       memory: true,
       sections: ["instructions", "role"],
     });
-    expect(picked.sections.map((s) => s.name)).toEqual(["项目指令", "角色与规则"]);
-    expect(picked.text.startsWith("# 项目指令")).toBe(true);
+    expect(picked.sections.map((s) => s.name)).toEqual(["Project instructions", "Role and rules"]);
+    expect(picked.text.startsWith("# Project instructions")).toBe(true);
 
     const asUser = buildSystemPrompt({
       base: "B",
@@ -158,8 +171,8 @@ describe("系统提示词段控制(Q66)", () => {
       memory: true,
       instructionsAs: "user",
     });
-    expect(asUser.sections.map((s) => s.name)).toEqual(["角色与规则", "环境"]);
-    expect(asUser.preamble.map((s) => s.name)).toEqual(["项目指令", "记忆"]);
+    expect(asUser.sections.map((s) => s.name)).toEqual(["Role and rules", "Environment"]);
+    expect(asUser.preamble.map((s) => s.name)).toEqual(["Project instructions", "Memory"]);
     expect(asUser.text).not.toContain("用 pnpm");
   });
 
@@ -181,8 +194,8 @@ describe("系统提示词段控制(Q66)", () => {
       expect(first?.type === "user/message" && first.text).toContain("别用 any");
       const start = s.log.events[0];
       expect(start?.type === "session/start" && start.sections?.map((x) => x.name)).toEqual([
-        "角色与规则",
-        "环境",
+        "Role and rules",
+        "Environment",
       ]);
     } finally {
       process.chdir(cwdBefore);
@@ -237,8 +250,10 @@ describe("预设(Q15)与参数优先级", () => {
     const c = applyPreset(parseCommonArgs([]), config);
     expect(c.memory).toBe(false);
     expect(c.promptSections).toEqual(["role", "instructions"]);
-    expect(() => applyPreset(parseCommonArgs(["--preset", "nope"]), config)).toThrow("没有预设");
-    expect(() => parseCommonArgs(["--prompt-sections", "role,bogus"])).toThrow("未知提示词段");
+    expect(() => applyPreset(parseCommonArgs(["--preset", "nope"]), config)).toThrow("no preset");
+    expect(() => parseCommonArgs(["--prompt-sections", "role,bogus"])).toThrow(
+      "unknown prompt section",
+    );
     expect(parseCommonArgs(["--instructions-as", "user"]).instructionsAs).toBe("user");
   });
 });
@@ -248,8 +263,8 @@ describe("TUI /memory 与 /prompt", () => {
     tmp = mkdtempSync(join(tmpdir(), "ak-mem-"));
     const project = join(tmp, "AGENTS.md");
     const user = join(tmp, "home", "AGENTS.md");
-    appendMemory(project, "纠正", "一", new Date("2026-09-03T00:00:00Z"));
-    appendMemory(user, "偏好", "二", new Date("2026-09-03T00:00:00Z"));
+    appendMemory(project, "correction", "一", new Date("2026-09-03T00:00:00Z"));
+    appendMemory(user, "preference", "二", new Date("2026-09-03T00:00:00Z"));
     const make = (memory: boolean) =>
       createTuiApp({
         terminal: new VirtualTerminal(100, 40),
@@ -271,23 +286,23 @@ describe("TUI /memory 与 /prompt", () => {
     const text = (app: ReturnType<typeof make>) => app.lines(100).map(stripAnsi).join("\n");
     const off = make(false);
     await off.command("/memory");
-    expect(text(off)).toContain("记忆未打开");
+    expect(text(off)).toContain("memory is off. Start with --memory");
     await off.command("/prompt");
-    expect(text(off)).toContain("系统提示词");
-    expect(text(off)).toContain("记忆:关");
+    expect(text(off)).toContain("System prompt");
+    expect(text(off)).toContain("memory: off");
     off.stop();
 
     const on = make(true);
     await on.command("/memory");
     const doc = text(on);
-    expect(doc).toContain("记忆 2 条");
-    expect(doc).toContain("[纠正] 2026-09-03 一");
-    expect(doc).toContain("[偏好] 2026-09-03 二");
+    expect(doc).toContain("Memory 2 entries");
+    expect(doc).toContain("[correction] 2026-09-03 一");
+    expect(doc).toContain("[preference] 2026-09-03 二");
     await on.command("/memory forget 2");
-    expect(text(on)).toContain("已删除:[偏好] 2026-09-03 二");
+    expect(text(on)).toContain("◇ removed: [preference] 2026-09-03 二");
     expect(memoryEntries(readFileSync(user, "utf8"))).toHaveLength(0);
     await on.command("/memory clear");
-    expect(text(on)).toContain("已清空 1 条");
+    expect(text(on)).toContain("◇ cleared 1 memories");
     expect(memoryEntries(readFileSync(project, "utf8"))).toHaveLength(0);
     on.stop();
   });

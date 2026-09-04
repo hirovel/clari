@@ -27,12 +27,12 @@ export const DEFAULT_SECTION_ORDER: PromptSectionName[] = [
 ];
 
 export const SECTION_LABELS: Record<PromptSectionName, string> = {
-  role: "角色与规则",
-  env: "环境",
-  instructions: "项目指令",
-  memory: "记忆",
-  skills: "技能",
-  append: "追加",
+  role: "Role and rules",
+  env: "Environment",
+  instructions: "Project instructions",
+  memory: "Memory",
+  skills: "Skills",
+  append: "Appended",
 };
 
 /**
@@ -167,12 +167,12 @@ export function environmentSection(
 ): PromptSection {
   const now = opts.now ?? new Date();
   const env = opts.env ?? process.env;
-  const shell = env.SHELL ?? env.ComSpec ?? "未知";
+  const shell = env.SHELL ?? env.ComSpec ?? "unknown";
   const lines = [
-    `工作目录:${resolve(cwd)}`,
-    `操作系统:${type()} ${release()}`,
-    `shell:${shell}`,
-    `日期:${now.toISOString().slice(0, 10)}`,
+    `working directory: ${resolve(cwd)}`,
+    `os: ${type()} ${release()}`,
+    `shell: ${shell}`,
+    `date: ${now.toISOString().slice(0, 10)}`,
   ];
   if (opts.git !== false) {
     const root = findGitRoot(cwd);
@@ -180,13 +180,13 @@ export function environmentSection(
       const branch = git(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]);
       const status = git(cwd, ["status", "--porcelain"]);
       lines.push(
-        `git:仓库根 ${root}${branch ? `,分支 ${branch}` : ""}${status === undefined ? "" : status ? ",有未提交改动" : ",工作区干净"}`,
+        `git: repo root ${root}${branch ? `, branch ${branch}` : ""}${status === undefined ? "" : status ? ", uncommitted changes" : ", working tree clean"}`,
       );
     } else {
-      lines.push("git:不在仓库内");
+      lines.push("git: not in a repository");
     }
   }
-  return { name: SECTION_LABELS.env, text: `# 环境\n${lines.join("\n")}` };
+  return { name: SECTION_LABELS.env, text: `# Environment\n${lines.join("\n")}` };
 }
 
 export type InstructionFile = {
@@ -258,7 +258,7 @@ export function discoverProjectInstructions(
     bytes: Buffer.byteLength(c.content, "utf8"),
     memoryBytes: c.memory ? Buffer.byteLength(c.memory, "utf8") : 0,
   }));
-  const memories = candidates.filter((c) => c.memory).map((c) => `# 记忆 ${c.path}\n${c.memory}`);
+  const memories = candidates.filter((c) => c.memory).map((c) => `# Memory ${c.path}\n${c.memory}`);
   const memory: PromptSection | undefined =
     memories.length > 0
       ? {
@@ -282,7 +282,7 @@ export function discoverProjectInstructions(
   }
   const last = kept[0];
   if (last && kept.length === 1 && last.meta.bytes > budget) {
-    last.content = `${Buffer.from(last.content, "utf8").subarray(0, budget).toString("utf8")}\n[已截断至 ${budget} 字节]`;
+    last.content = `${Buffer.from(last.content, "utf8").subarray(0, budget).toString("utf8")}\n[truncated to ${budget} bytes]`;
     last.meta.truncated = true;
   }
   const out: { section?: PromptSection; memory?: PromptSection; files: InstructionFile[] } = {
@@ -290,7 +290,9 @@ export function discoverProjectInstructions(
     ...(memory && { memory }),
   };
   if (kept.length === 0) return out;
-  const text = kept.map((k) => `# 项目指令 ${k.path}\n${k.content.trim()}`).join("\n\n");
+  const text = kept
+    .map((k) => `# Project instructions ${k.path}\n${k.content.trim()}`)
+    .join("\n\n");
   out.section = {
     name: SECTION_LABELS.instructions,
     text,
@@ -329,7 +331,7 @@ export type BuiltPrompt = {
 
 export function buildSystemPrompt(opts: BuildPromptOptions): BuiltPrompt {
   if (opts.replace !== undefined) {
-    const sections: PromptSection[] = [{ name: "自定义", text: opts.replace }];
+    const sections: PromptSection[] = [{ name: "Custom", text: opts.replace }];
     if (opts.append) sections.push({ name: SECTION_LABELS.append, text: opts.append });
     return { text: composeSystemPrompt(sections), sections, preamble: [], files: [] };
   }
