@@ -35,25 +35,61 @@ export const SECTION_LABELS: Record<PromptSectionName, string> = {
   append: "追加",
 };
 
-export type Skill = { name: string; description: string; path: string };
+/**
+ * 技能(Q80):一个目录一个 SKILL.md。frontmatter 认四个字段:name、description、
+ * disable-model-invocation(只许用户 /名 触发,不进系统提示词)、allowed-tools(用户触发的那一 turn 里这些工具免审批)、
+ * argument-hint(补全提示)。正文按需进入上下文,不预先占 token。
+ */
+export type Skill = {
+  name: string;
+  description: string;
+  /** SKILL.md 的路径。 */
+  path: string;
+  /** 技能目录;正文里的相对路径相对于它。 */
+  dir: string;
+  /** frontmatter 之后的正文。 */
+  body: string;
+  disableModelInvocation: boolean;
+  allowedTools: string[];
+  argumentHint?: string;
+};
 
-/** 解析 SKILL.md 的 frontmatter;没有 name 就用目录名。 */
+/** 解析 SKILL.md;没有 name 就用目录名。 */
 export function parseSkill(path: string, raw: string): Skill {
-  const dirName = basename(dirname(path));
-  const m = raw.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  const dir = dirname(path);
+  const m = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
   const field = (k: string) => m?.[1]?.match(new RegExp(`^${k}:\\s*(.+)$`, "m"))?.[1]?.trim();
-  return { name: field("name") || dirName, description: field("description") || "", path };
+  const body = (m ? raw.slice(m[0].length) : raw).trim();
+  const allowed = field("allowed-tools");
+  const hint = field("argument-hint");
+  return {
+    name: field("name") || basename(dir),
+    description: field("description") || "",
+    path,
+    dir,
+    body,
+    disableModelInvocation: /^(true|yes)$/i.test(field("disable-model-invocation") ?? ""),
+    allowedTools: allowed ? allowed.split(/[\s,]+/).filter(Boolean) : [],
+    ...(hint && { argumentHint: hint }),
+  };
 }
 
 /**
- * 技能发现(通用 SKILL.md 约定):用户级 ~/.clari/skills/<名>/SKILL.md,
- * 项目级 <git 根>/.agents/skills/<名>/SKILL.md;同名以先发现的为准。
- * 系统提示词里只放名字、一句描述与路径,正文由模型需要时用 read 读取,不预先占上下文。
+ * 技能发现:用户级 ~/.clari/skills 与 ~/.claude/skills,项目级 <git 根>/.agents/skills 与 <git 根>/.claude/skills;
+ * 每个目录下 <名>/SKILL.md;同名以先发现的为准。读 .claude/skills 是为了与 Claude Code 互通。
  */
 export function discoverSkills(cwd: string, opts: { home?: string; root?: string } = {}): Skill[] {
   const home = opts.home ?? clariHome();
   const root = opts.root ?? findGitRoot(cwd) ?? resolve(cwd);
-  const dirs = [join(home, "skills"), join(root, ".agents", "skills")];
+  // 用户级 .claude/skills 取 clari 用户目录的同级(~/.clari 与 ~/.claude 同在家目录);
+  // 测试用临时 home(或 CLARI_HOME)时就不会漏到真机目录。
+  const userClaude = join(dirname(home), ".claude", "skills");
+  const dirs = [
+    join(home, "skills"),
+    userClaude,
+    join(root, ".agents", "skills"),
+    join(root, ".claude", "skills"),
+  ];
   const byName = new Map<string, Skill>();
   for (const dir of dirs) {
     if (!existsSync(dir) || !statSync(dir).isDirectory()) continue;
@@ -67,14 +103,30 @@ export function discoverSkills(cwd: string, opts: { home?: string; root?: string
   return [...byName.values()];
 }
 
+/** 系统提示词里的技能清单:只放名字、描述、路径;只许用户触发的技能不列。 */
 export function skillsSection(skills: Skill[]): PromptSection | undefined {
-  if (skills.length === 0) return undefined;
-  const lines = skills.map((s) => `- ${s.name}:${s.description || "(无描述)"}  ${s.path}`);
+  const listed = skills.filter((s) => !s.disableModelInvocation);
+  if (listed.length === 0) return undefined;
+  const lines = listed.map((s) => `- ${s.name}: ${s.description || "(no description)"}  ${s.path}`);
   return {
     name: SECTION_LABELS.skills,
-    text: `# 可用技能\n以下技能按需使用:先用 read 读取对应的 SKILL.md,再按其中步骤执行;文件里的相对路径相对于该技能目录。\n${lines.join("\n")}`,
-    source: skills.map((s) => s.path).join(", "),
+    text: `# Skills\nUse a skill when it matches the task: read its SKILL.md with the read tool first, then follow it. Relative paths inside a skill are relative to its directory.\n${lines.join("\n")}`,
+    source: listed.map((s) => s.path).join(", "),
   };
+}
+
+/**
+ * 用户触发技能:/名 参数 → 一条用户消息。正文里 $ARGUMENTS / $@ 是全部参数,$1..$9 是按空格切分的第 n 个。
+ * 消息头一行说明来源与目录,模型据此解析相对路径;整条消息落盘上屏,与手打的一样。
+ */
+export function expandSkill(skill: Skill, argText: string): string {
+  const args = [...argText.matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)].map(
+    (m) => m[1] ?? m[2] ?? m[3] ?? "",
+  );
+  const body = skill.body
+    .replace(/\$ARGUMENTS|\$@/g, argText.trim())
+    .replace(/\$(\d)/g, (_, n: string) => args[Number(n) - 1] ?? "");
+  return `Skill "${skill.name}" (${skill.path}; relative paths are relative to ${skill.dir}):\n\n${body}`;
 }
 
 /** 非空段以空行相接;段内文本原样。 */

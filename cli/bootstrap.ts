@@ -28,11 +28,18 @@ import type { CompactionConfig, ExecutionPolicy, TurnDeps } from "../src/loop.js
 import { EFFORT_LEVELS, type EffortLevel, parseEffort } from "../src/provider.js";
 import { type ChildInfo, createTaskTool } from "../src/subagent.js";
 import type { Tool } from "../src/tools.js";
-import { buildSystemPrompt, findGitRoot, type PromptSection } from "./prompt.js";
+import {
+  buildSystemPrompt,
+  type DiscoverOptions,
+  findGitRoot,
+  type PromptSection,
+  type Skill,
+} from "./prompt.js";
 import { bashTool } from "./tools/bash.js";
 import { editTool, readTool, writeTool } from "./tools/fs.js";
 import { createRememberTool, type MemoryFiles } from "./tools/memory.js";
 import { globTool, grepTool, lsTool } from "./tools/search.js";
+import { createSkillTool } from "./tools/skill.js";
 import type { ModelChoice, TuiSettings } from "./tui-app.js";
 
 export const BASE_PROMPT =
@@ -76,6 +83,9 @@ export type CommonArgs = {
   promptSections?: PromptSectionName[];
   /** 项目指令与记忆放 system 还是首条 user 消息(Q66)。 */
   instructionsAs?: "system" | "user";
+  /** 技能两个旋钮(Q80),来自配置或预设:清单放 system 还是不放;模型触发时 read 还是 skill 工具。 */
+  skillsList?: "system" | "none";
+  skillsLoad?: "read" | "tool";
   /** 执行槽(Q10):sequential 缺省;parallel = 并行安全的相邻只读调用同时跑。 */
   execution?: ExecutionPolicy;
   /** 扩展模块路径(可多个):default 导出一个函数,返回要加的工具与槽实现。 */
@@ -296,6 +306,9 @@ export function applyPreset(args: CommonArgs, config: KernelConfig): CommonArgs 
   if (out.instructionsAs === undefined && prompt.instructionsAs) {
     out.instructionsAs = prompt.instructionsAs;
   }
+  const skills = { ...config.prompt?.skills, ...preset?.prompt?.skills };
+  if (skills.list) out.skillsList = skills.list;
+  if (skills.load) out.skillsLoad = skills.load;
   return out;
 }
 
@@ -394,9 +407,12 @@ export function buildTools(
   subagent: boolean,
   onChild?: (child: ChildInfo) => void,
   memory?: MemoryFiles,
+  /** skills.load = tool 时给:装一个 skill 工具,模型点名即拿到正文。 */
+  skills?: Skill[],
 ): Tool[] {
   const base: Tool[] = [readTool, writeTool, editTool, bashTool, grepTool, globTool, lsTool];
   if (memory) base.push(createRememberTool(memory));
+  if (skills?.some((s) => !s.disableModelInvocation)) base.push(createSkillTool(skills));
   if (!subagent) return base;
   return [
     ...base,
@@ -505,7 +521,12 @@ export async function loadExtensions(
 /** 系统提示词(Q51):--system-prompt 整段替换,--append-system-prompt 追加;否则 角色 → 环境 → 项目指令。 */
 type PromptArgs = Pick<
   CommonArgs,
-  "systemPromptFile" | "appendSystemPromptFile" | "memory" | "promptSections" | "instructionsAs"
+  | "systemPromptFile"
+  | "appendSystemPromptFile"
+  | "memory"
+  | "promptSections"
+  | "instructionsAs"
+  | "skillsList"
 >;
 
 const meta = (s: PromptSection) => ({
@@ -517,6 +538,8 @@ const meta = (s: PromptSection) => ({
 export function systemPromptFor(
   args: PromptArgs,
   cwd = process.cwd(),
+  /** 发现目录的覆盖(测试用:临时的用户目录与仓库根)。 */
+  discover?: DiscoverOptions,
 ): {
   text: string;
   sections: { name: string; source?: string; chars: number }[];
@@ -529,11 +552,16 @@ export function systemPromptFor(
   const built = buildSystemPrompt({
     base: BASE_PROMPT,
     cwd,
+    ...(discover && { discover }),
     ...(replace !== undefined && { replace }),
     ...(append !== undefined && { append }),
     ...(args.promptSections && { sections: args.promptSections }),
     memory: args.memory ?? false,
     ...(args.instructionsAs && { instructionsAs: args.instructionsAs }),
+    // skills.list = none:技能清单不进系统提示词,只许用户 /名 触发。
+    ...(args.skillsList === "none" && {
+      sections: (args.promptSections ?? PROMPT_SECTION_NAMES).filter((s) => s !== "skills"),
+    }),
   });
   return {
     text: built.text,

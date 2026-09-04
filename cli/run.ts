@@ -18,6 +18,7 @@ import {
   sessionsDir,
   USAGE,
 } from "./bootstrap.js";
+import { discoverSkills } from "./prompt.js";
 
 let args: ReturnType<typeof parseCommonArgs>;
 try {
@@ -70,6 +71,7 @@ const baseTools = buildTools(
   args.subagent,
   undefined,
   args.memory ? memoryFiles() : undefined,
+  args.skillsLoad === "tool" ? discoverSkills(process.cwd()) : undefined,
 );
 const tools = [
   ...baseTools.filter((t) => !ext.tools?.some((x) => x.name === t.name)),

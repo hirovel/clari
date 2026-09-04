@@ -22,6 +22,7 @@ import {
   sessionsDir,
   USAGE,
 } from "./bootstrap.js";
+import { discoverSkills } from "./prompt.js";
 import { discoverTemplates } from "./templates.js";
 import { createTuiApp, type ModelChoice } from "./tui-app.js";
 
@@ -100,6 +101,7 @@ try {
   console.error((err as Error).message);
   process.exit(1);
 }
+const skills = discoverSkills(process.cwd());
 const baseTools = buildTools(
   log,
   first,
@@ -107,6 +109,7 @@ const baseTools = buildTools(
   args.subagent,
   (child) => app?.attachChild(child),
   memory,
+  args.skillsLoad === "tool" ? skills : undefined,
 );
 // 扩展模块的工具重名时覆盖内置的。
 const tools = [
@@ -130,6 +133,7 @@ app = createTuiApp({
   compactionName: args.compaction,
   slots: { ...ext.slots, ...(args.execution && { execution: args.execution }) },
   templates: discoverTemplates(),
+  skills,
   sessionsDir: sessionDir,
   ...(memory && { memory }),
   ...(args.effort && { effort: args.effort }),

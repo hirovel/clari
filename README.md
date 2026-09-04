@@ -24,7 +24,8 @@
 - 跨会话记忆可选、默认关:`--memory` 打开后模型只能通过 `remember` 工具往 AGENTS.md 的记忆节写一行,屏幕可见、可审批;`/memory` 看删
 - 四个策略槽:终止、插话、审批、执行(`--execution parallel` 让相邻只读调用同时跑,缺省逐个;并行批记一条决策事件)
 - 留言两种投递:Enter 步边界插话,Alt+Enter 等模型做完再给;`@路径` 把文件附进消息;`/fork` 复制事件前缀成新会话
-- 提示词模板 `~/.clari/prompts/*.md` → `/名 参数`;技能 `SKILL.md` 进系统提示词的技能段;扩展模块 `--extension ./x.mjs` 加工具、换槽、订阅事件
+- 提示词模板 `~/.clari/prompts/*.md` → `/名 参数`;技能 `SKILL.md`(`~/.clari/skills`、`~/.claude/skills`、`.agents/skills`、`.claude/skills`):清单进系统提示词或只许用户 `/名 参数` 触发,正文作为一条 user 消息;`allowed-tools` 本 turn 免审批;`/skills` 列出;配置 `prompt.skills.list` / `load` 两个旋钮;扩展模块 `--extension ./x.mjs` 加工具、换槽、订阅事件
+- 会话中切策略槽:`/slots` 看当前,`/compaction` `/preservation` `/execution` `/steering` `/approve` 切换,每次切换记事件;请求失败时四行错误卡:分类、供应商原话、下一步、原始响应体在哪
 - 费用与缓存:配置里给价格就显示每步与累计费用;Anthropic 缺省挂提示缓存断点;每步显示缓存命中率
 - 生产级边界:流停滞超时与重试、bash 超时与输出上限、大文件与二进制守卫、CRLF 与宽松匹配的编辑、崩溃时还原终端并指出会话文件
 

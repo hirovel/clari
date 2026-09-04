@@ -304,7 +304,7 @@ describe("技能段", () => {
       env: { git: false },
     });
     const sec = built.sections.find((s) => s.name === "技能");
-    expect(sec?.text).toContain("- deploy:发布流程");
+    expect(sec?.text).toContain("- deploy: 发布流程");
     expect(sec?.text).not.toContain("步骤很长很长");
     // 不点名技能段就不扫目录、不注入。
     const without = buildSystemPrompt({

@@ -73,6 +73,12 @@ export type PromptConfig = {
   instructionsAs?: "system" | "user";
   /** 跨会话记忆(Q65):缺省关。开了才读 AGENTS.md 里的记忆节并装上 remember 工具。 */
   memory?: boolean;
+  /**
+   * 技能(Q80)两个旋钮。list:清单放系统提示词(缺省 system)还是不放(none,只许用户 /名 触发)。
+   * load:模型触发时怎么拿正文,read = 自己用 read 读 SKILL.md(缺省),tool = 装一个 skill 工具,正文作为工具结果返回。
+   * 用户触发固定为一条 user 消息。
+   */
+  skills?: { list?: "system" | "none"; load?: "read" | "tool" };
 };
 
 /**

@@ -55,6 +55,7 @@ import {
 } from "./cards.js";
 import { editInExternalEditor } from "./editor.js";
 import { fmtMs, fmtTok, messagesFor, RequestInspector, type SessionSource } from "./inspector.js";
+import { expandSkill, type Skill } from "./prompt.js";
 import { expandTemplate, type PromptTemplate } from "./templates.js";
 import { c, editorTheme, markdownTheme } from "./theme.js";
 import { diffLines, hunks } from "./tools/diff.js";
@@ -117,6 +118,8 @@ export type TuiAppDeps = {
   slots?: TurnDeps["slots"];
   /** 提示词模板:/名 参数 展开成一条用户消息。 */
   templates?: PromptTemplate[];
+  /** 技能(Q80):/名 参数 触发;/skills 列出。 */
+  skills?: Skill[];
   /** 会话目录,/fork 的新文件写到这里。 */
   sessionsDir?: string;
 };
@@ -185,6 +188,10 @@ const COMMANDS = [
     description: "重跑一步:丢掉最后一条助手消息及其工具结果,不加新消息,从当前投影再发一次请求",
   },
   { name: "slots", description: "Show every strategy slot and its current implementation" },
+  {
+    name: "skills",
+    description: "List skills: source, description size, model-invocable, allowed tools",
+  },
   {
     name: "compaction",
     description: "Switch compaction strategy: /compaction llm|clear|pipeline|./x.mjs|off",
@@ -300,10 +307,13 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
 
   // 审批(Q64):问一次就是一次;a 把该工具加进本会话的放行名单。拒绝以错误结果回喂模型(Q23)。
   const alwaysAllow = new Set<string>();
+  /** 用户触发的技能声明的 allowed-tools:这一 turn 内免审批,turn 结束清空。 */
+  const skillAllow = new Set<string>();
+  const skills = deps.skills ?? [];
   let approval: OverlayHandle | undefined;
   let approvalPrompt: ApprovalPrompt | undefined;
   const askApproval = (call: ToolCall): Promise<boolean> => {
-    if (alwaysAllow.has(call.name)) return Promise.resolve(true);
+    if (alwaysAllow.has(call.name) || skillAllow.has(call.name)) return Promise.resolve(true);
     return new Promise((resolve) => {
       const prompt = new ApprovalPrompt(call, (decision) => {
         approval?.hide();
@@ -943,6 +953,9 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       case "slots":
         note(slotsList());
         break;
+      case "skills":
+        note(skillsList());
+        break;
       case "model":
         switchModel(arg);
         break;
@@ -972,6 +985,22 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
         if (t) {
           note(c.faint(`· 模板 /${t.name}  ${t.path}`));
           await submit(expandTemplate(t, arg));
+          break;
+        }
+        // 技能(Q80):/名 参数 → 正文作为一条用户消息;allowed-tools 在这一 turn 免审批。
+        const sk = skills.find((x) => x.name === cmd);
+        if (sk) {
+          note(
+            c.faint(
+              `· skill /${sk.name}  ${sk.path}${sk.allowedTools.length ? `  allowed-tools: ${sk.allowedTools.join(" ")}` : ""}`,
+            ),
+          );
+          for (const name of sk.allowedTools) skillAllow.add(name);
+          try {
+            await submit(expandSkill(sk, arg));
+          } finally {
+            skillAllow.clear();
+          }
           break;
         }
         note(c.zhu(`未知命令 /${cmd}`) + c.faint("  /help 查看命令"));
@@ -1338,6 +1367,29 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       default:
         return c.zhu(`unknown slot ${slot}`);
     }
+  }
+
+  /** /skills:每个技能的来源、描述占的 token、能否被模型调用、免审批工具。 */
+  function skillsList(): string {
+    if (skills.length === 0) {
+      return c.faint(
+        "No skills. Put <name>/SKILL.md under ~/.clari/skills, ~/.claude/skills, <repo>/.agents/skills or <repo>/.claude/skills.",
+      );
+    }
+    const rows = skills.map((s) => {
+      const desc = Math.ceil(s.description.length / 4);
+      const body = Math.ceil(s.body.length / 4);
+      const flags = [
+        s.disableModelInvocation ? "user-only" : "model + user",
+        ...(s.allowedTools.length ? [`allowed-tools: ${s.allowedTools.join(" ")}`] : []),
+        ...(s.argumentHint ? [`args: ${s.argumentHint}`] : []),
+      ].join(" · ");
+      return `  ${c.jin(`/${s.name}`.padEnd(16))} ${c.ink(s.description || "(no description)")}\n${" ".repeat(19)}${c.faint(`${s.path} · listing ${desc} tok · body ${body} tok · ${flags}`)}`;
+    });
+    return [
+      `${c.soft("Skills")} ${c.ink(`${skills.length}`)}  ${c.faint("/<name> args to run one now; the model picks from the system prompt list (or the skill tool when skills.load = tool)")}`,
+      ...rows,
+    ].join("\n");
   }
 
   /** /slots:当前每个槽的实现。全部是可切换的;切换记事件。 */
