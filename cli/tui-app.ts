@@ -60,6 +60,7 @@ import {
   errorCardLines,
   firstRunLines,
   GUTTER,
+  paramsLine,
   predictedCache,
   rawRow,
   receiveBlockLines,
@@ -390,6 +391,8 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
   // 每个 request 事件下标对应一个接收卡头行节点,响应、压缩结果或失败到来时更新它。
   let lastSent: Message[] | undefined;
   let lastToolNames = "";
+  let lastParams: string | undefined;
+  let lastCard: { node: Text; lines: string[] } | undefined;
   const receiveHeads = new Map<number, Text>();
   const predictedAt = new Map<number, number>();
   let lastTurnRequestIndex = -1;
@@ -877,28 +880,28 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
         const start = log.events.find((x) => x.type === "session/start");
         const toolNames = e.tools.join(" ");
         transcript.addChild(new Spacer(1));
-        transcript.addChild(
-          new Text(
-            sendCardLines({
-              n: requestCount,
-              request: e,
-              messages,
-              ...(lastSent && { previous: lastSent }),
-              ...(wire !== undefined && { wire }),
-              defs: activeDefs,
-              ...(start?.type === "session/start" &&
-                start.sections && { sections: start.sections }),
-              ...(provenance && { provenance }),
-              width: Math.max(24, deps.terminal.columns - 52),
-              toolsUnchanged: toolNames === lastToolNames,
-              dropsThinking: agent.provider.fields?.protocol.startsWith("anthropic") ?? false,
-            }).join("\n"),
-            1,
-            0,
-          ),
-        );
+        const cardLines = sendCardLines({
+          n: requestCount,
+          request: e,
+          messages,
+          ...(lastSent && { previous: lastSent }),
+          ...(wire !== undefined && { wire }),
+          ...(lastParams !== undefined && { previousParams: lastParams }),
+          defs: activeDefs,
+          ...(start?.type === "session/start" && start.sections && { sections: start.sections }),
+          ...(provenance && { provenance }),
+          width: Math.max(24, deps.terminal.columns - 52),
+          toolsUnchanged: toolNames === lastToolNames,
+          dropsThinking: agent.provider.fields?.protocol.startsWith("anthropic") ?? false,
+        });
+        // 旧的 Request 卡折成两行(头 + changed,Q85):当步的信息在新卡上,全文永远在检视器。
+        if (lastCard) lastCard.node.setText(lastCard.lines.slice(0, 2).join("\n"));
+        const cardNode = new Text(cardLines.join("\n"), 1, 0);
+        lastCard = { node: cardNode, lines: cardLines };
+        transcript.addChild(cardNode);
         predictedAt.set(lastRequestIndex, predictedCache(lastSent, messages));
         lastToolNames = toolNames;
+        lastParams = paramsLine(wire);
         if (e.reason === "compaction") lastCompactionRequestIndex = lastRequestIndex;
         else {
           lastTurnRequestIndex = lastRequestIndex;

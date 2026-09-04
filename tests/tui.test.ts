@@ -202,11 +202,12 @@ describe("TUI 壳", () => {
     // 请求卡:头行、changed 行、messages 行(条数与合计);响应卡:头行与 usage 行(实测用量)。
     expect(doc).toContain("Request #1");
     expect(doc).toContain("first request · 2 messages");
-    expect(doc).toContain("messages   2 · ≈");
+    expect(doc).not.toContain("messages   2 · ≈"); // 旧卡折成两行(头 + changed)
     expect(doc).toContain("Response #1");
     expect(doc).toContain("in 1.2k (estimated ≈");
     expect(doc).toContain("Request #2");
     expect(doc).toContain("messages   4 · ≈");
+    expect(doc).toContain("same       params · system · tools");
     expect(doc).toContain("行10"); // 默认完整显示(Q34)
     // 思考缺省折成一行:首行 + 种类与行数;第二行不显示。
     expect(doc).toContain("thinking   先拿到输出");

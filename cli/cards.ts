@@ -179,6 +179,8 @@ export type SendCardInput = {
   previous?: Message[];
   /** provider.wire 的返回;没有就说明参数不可见。 */
   wire?: unknown;
+  /** 上一次请求的参数行(paramsLine 的结果);相同就折进 same 行。 */
+  previousParams?: string;
   defs: ToolDef[];
   /** 系统提示词分段(来自 session/start)。 */
   sections?: { name: string; source?: string; chars: number }[];
@@ -245,24 +247,32 @@ export function sendCardLines(input: SendCardInput): string[] {
   ];
   const rows = messageRows(messages, input.previous, input.provenance);
   lines.push(g("changed", changedLine(input, rows)));
-  lines.push(g("params", c.faint(paramsLine(input.wire))));
+
+  // params / system / tools 一轮之后基本不变:没变的不再逐行印,合成一行 same(Q85)。第一次请求全印。
+  const params = paramsLine(input.wire);
+  const sameParams = input.previous !== undefined && input.previousParams === params;
+  if (!sameParams) lines.push(g("params", c.faint(params)));
 
   const sys = messages.find((m) => m.role === "system");
-  if (sys) {
+  const prevSys = input.previous?.find((m) => m.role === "system");
+  const sameSystem = sys !== undefined && prevSys !== undefined && prevSys.content === sys.content;
+  if (sys && !sameSystem) {
     const secs = input.sections ?? [];
     const total = estimateTokens(sys.content);
-    const prevSys = input.previous?.find((m) => m.role === "system");
-    const same = prevSys ? (prevSys.content === sys.content ? "same" : "changed") : "";
     const detail =
       secs.length > 0
         ? secs.map((s) => `${s.name} ${fmtTok(Math.ceil(s.chars / 4))}`).join(" · ")
         : firstLine(sys.content, width);
     lines.push(
-      g("system", c.faint([`${fmtTok(total)} tok`, ...(same ? [same] : []), detail].join(" · "))),
+      g(
+        "system",
+        c.faint([`${fmtTok(total)} tok`, ...(prevSys ? ["changed"] : []), detail].join(" · ")),
+      ),
     );
   }
 
-  if (defs.length > 0) {
+  const sameTools = input.previous !== undefined && input.toolsUnchanged && defs.length > 0;
+  if (defs.length > 0 && !sameTools) {
     const defTok = defs.reduce((s, d) => s + estimateTokens(JSON.stringify(d)), 0);
     lines.push(
       g(
@@ -271,13 +281,21 @@ export function sendCardLines(input: SendCardInput): string[] {
           [
             `${defs.length}`,
             `${fmtTok(defTok)} tok`,
-            ...(input.previous ? [input.toolsUnchanged ? "same" : "changed"] : []),
+            ...(input.previous ? ["changed"] : []),
             defs.map((d) => d.name).join(" "),
           ].join(" · "),
         ),
       ),
     );
   }
+
+  const same = [
+    ...(sameParams ? ["params"] : []),
+    ...(sameSystem ? ["system"] : []),
+    ...(sameTools ? ["tools"] : []),
+  ];
+  if (same.length > 0)
+    lines.push(g("same", c.faint(`${same.join(" · ")} · as in the previous request`)));
 
   const total = messages.reduce((s, m) => s + messageTokens(m), 0);
   lines.push(
