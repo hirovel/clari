@@ -7,6 +7,7 @@ import {
   type AssistantTurn,
   clampEffort,
   type EffortLevel,
+  type FieldTable,
   fetchModelIds,
   linkedAbort,
   mergeRetry,
@@ -174,7 +175,12 @@ export function feedAnthropicEvent(acc: AnthropicAcc, ev: AnthropicEvent): strin
   }
 }
 
-export function finishAnthropicAcc(acc: AnthropicAcc, aborted: boolean, model = ""): AssistantTurn {
+export function finishAnthropicAcc(
+  acc: AnthropicAcc,
+  aborted: boolean,
+  model = "",
+  opts: { mode?: ThinkingMode } = {},
+): AssistantTurn {
   const toolCalls: ToolCall[] = [...acc.blocks.entries()]
     .sort(([a], [b]) => a - b)
     .map(([, b]) => ({ id: b.id, name: b.name, args: safeParse(b.argsJson) }));
@@ -204,12 +210,41 @@ export function finishAnthropicAcc(acc: AnthropicAcc, aborted: boolean, model = 
     toolCalls: aborted ? [] : toolCalls,
     stopReason,
     ...(usage && { usage }),
-    ...(reasoning && { reasoning }),
+    // 预算模式(4.6 及更早)返回的是全文;自适应模式(4.7 起)只返回摘要或空串,模型读的正文在签名块里。
+    ...(reasoning && {
+      reasoning,
+      reasoningKind: (opts.mode === "budget" ? "full" : "summary") as "full" | "summary",
+    }),
     ...(blocks.length > 0 && {
       opaque: { kind: "anthropic-thinking", model, blocks } satisfies AnthropicOpaque,
     }),
   };
 }
+
+export const ANTHROPIC_FIELDS: FieldTable = {
+  protocol: "anthropic(messages)",
+  sends: [
+    "model · max_tokens · stream: true",
+    "system[{type: text, text, cache_control?}]:投影里的 system 消息抽到顶层,缺省挂缓存断点",
+    "messages[].content 块:thinking{thinking, signature} / redacted_thinking{data}(来自事件 opaque,只在同模型时回传)",
+    "messages[].content 块:text / tool_use{id, name, input} / tool_result{tool_use_id, content, is_error};最后一块挂 cache_control",
+    "tools[{name, description, input_schema}]",
+    "thinking{type: adaptive|enabled+budget_tokens|disabled} + output_config.effort:按强度级别与 thinkingMode",
+    "extraBody 里的任何键,逐字合并",
+  ],
+  reads: [
+    "message_start.message.usage:input_tokens + cache_creation_input_tokens + cache_read_input_tokens → inputTokens;后两项单列",
+    "content_block_start:text / tool_use{id, name} / thinking / redacted_thinking{data}",
+    "content_block_delta:text_delta → text;input_json_delta → 工具参数;thinking_delta → reasoning;signature_delta → 签名",
+    "message_delta.delta.stop_reason → stopReason(max_tokens → 截断);message_delta.usage.output_tokens → outputTokens",
+    "error → 流内错误",
+  ],
+  ignores: [
+    "message_stop、ping、message.id、message.model、stop_sequence",
+    "stop_details(refusal 分类)、citations、server tool 结果块、container",
+    "thinking 文本在 4.7 起只是摘要或空串(display 参数决定),真正的推理正文在签名块里,客户端读不到",
+  ],
+};
 
 function safeParse(s: string): unknown {
   if (!s.trim()) return {};
@@ -385,8 +420,10 @@ export function anthropic(opts: AnthropicOptions): Provider {
       ...opts.extraBody,
     };
   };
+  const mode = opts.thinkingMode ?? "adaptive";
   return {
     model: opts.model,
+    fields: ANTHROPIC_FIELDS,
     wire,
     listModels: () => fetchModelIds(`${baseUrl}/v1/models`, headers),
     async complete(
@@ -442,9 +479,9 @@ export function anthropic(opts: AnthropicOptions): Provider {
                 retryable: !acc.text,
               });
             }
-            return finishAnthropicAcc(acc, false, opts.model);
+            return finishAnthropicAcc(acc, false, opts.model, { mode });
           } catch (err) {
-            if (signal?.aborted) return finishAnthropicAcc(acc, true, opts.model);
+            if (signal?.aborted) return finishAnthropicAcc(acc, true, opts.model, { mode });
             throw stallToError(err, Boolean(acc.text || thinkingText(acc)));
           }
         },

@@ -158,6 +158,7 @@ const COMMANDS = [
   },
   { name: "model", description: "切换模型:/model 供应商/模型;不带参数列出可选" },
   { name: "models", description: "向供应商查询当前可用模型,对照配置标出下线与新增" },
+  { name: "fields", description: "当前协议往请求里放哪些字段、从响应里读哪些、明知存在但不读哪些" },
   { name: "effort", description: "强度级别:/effort off|low|medium|high|xhigh|max;auto 恢复不传" },
   { name: "key", description: "设置供应商 key:/key deepseek sk-…(写入配置文件)" },
   { name: "default", description: "把当前模型设为缺省" },
@@ -795,6 +796,9 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       case "models":
         await listRemoteModels();
         break;
+      case "fields":
+        note(renderFields());
+        break;
       case "effort":
         setEffort(arg);
         break;
@@ -981,6 +985,22 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       hideLoader();
       updateStatus();
     }
+  }
+
+  /** /fields:当前适配器的三张字段表。数据是适配器自己维护的静态清单,与代码同步。 */
+  function renderFields(): string {
+    const f = agent.provider.fields;
+    if (!f) return c.faint("当前 provider 没有提供字段清单");
+    const block = (title: string, rows: string[]) => [
+      c.jin(title),
+      ...rows.map((r) => `  ${c.soft("·")} ${c.ink(r)}`),
+    ];
+    return [
+      `${c.soft("协议")} ${c.ink(f.protocol)}  ${c.faint(`模型 ${info.model} · 逐字节正文见 Ctrl+R → 线路 JSON`)}`,
+      ...block("发送", f.sends),
+      ...block("读取", f.reads),
+      ...block("明知存在但不读", f.ignores),
+    ].join("\n");
   }
 
   /** /prompt:系统提示词的段构成与位置(Q66)。数据来自 session/start,与模型看到的同源。 */

@@ -12,6 +12,7 @@ export type Message =
       content: string;
       toolCalls: ToolCall[];
       reasoning?: string;
+      reasoningKind?: "full" | "summary";
       /** 适配器私有回传物(Q53),原样透传。 */
       opaque?: unknown;
     }
@@ -73,6 +74,7 @@ export function deriveMessages(events: readonly AgentEvent[]): Message[] {
           content: e.text,
           toolCalls: e.toolCalls,
           ...(e.reasoning && { reasoning: e.reasoning }),
+          ...(e.reasoningKind && { reasoningKind: e.reasoningKind }),
           ...(e.opaque !== undefined && { opaque: e.opaque }),
         });
         break;

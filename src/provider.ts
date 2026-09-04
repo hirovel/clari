@@ -18,6 +18,8 @@ export type AssistantTurn = {
   usage?: Usage;
   /** thinking 模型的推理内容(可读文本);带工具的多轮里 DeepSeek 要求原样回传。 */
   reasoning?: string;
+  /** reasoning 是模型读回去的全文,还是只给人看的摘要(正文在 opaque 里)。 */
+  reasoningKind?: "full" | "summary";
   /**
    * 适配器私有回传物(Q53):必须在下一轮原样送回、内核不解释的东西。
    * Anthropic 是带签名的 thinking 块;适配器写、同一适配器读,内核只搬运。
@@ -69,8 +71,21 @@ export type CompleteOptions = {
   effort?: EffortLevel;
 };
 
+/**
+ * 字段清单:这个适配器往请求里放哪些字段、从响应里读哪些、明知存在但不读哪些。
+ * 静态数据,与代码同步维护;界面 /fields 与文档都从这里取,不另写一份。
+ */
+export type FieldTable = {
+  protocol: string;
+  sends: string[];
+  reads: string[];
+  ignores: string[];
+};
+
 export interface Provider {
   readonly model: string;
+  /** 字段清单(可选但建议实现):让"到底发了什么、读了什么"一条命令可查。 */
+  readonly fields?: FieldTable;
   complete(messages: Message[], tools: ToolDef[], opts?: CompleteOptions): Promise<AssistantTurn>;
   /**
    * 给定消息与工具,返回将要发出的请求正文(不含鉴权头)。纯函数,与 complete 实际发送的逐字节一致。
@@ -228,9 +243,38 @@ export function finishAcc(acc: StreamAcc, aborted: boolean): AssistantTurn {
     toolCalls: aborted ? [] : toolCalls,
     stopReason,
     ...(acc.usage && { usage: acc.usage }),
-    ...(acc.reasoning && { reasoning: acc.reasoning }),
+    // reasoning_content 是模型下一轮真正读回去的全文,不是摘要。
+    ...(acc.reasoning && { reasoning: acc.reasoning, reasoningKind: "full" as const }),
   };
 }
+
+export const OPENAI_COMPAT_FIELDS: FieldTable = {
+  protocol: "openai(chat completions)",
+  sends: [
+    "model · stream: true · stream_options.include_usage: true",
+    "messages[].role / content(投影)",
+    "messages[].reasoning_content:配置 reasoningField 时每条助手消息都带,取自事件 reasoning;没有就发空串",
+    "messages[].tool_calls[{id, type: function, function{name, arguments}}]",
+    "role: tool 的 tool_call_id + content",
+    "tools[{type: function, function{name, description, parameters}}]",
+    "reasoning_effort(openai 方言;off → none)/ thinking{type} + reasoning_effort(deepseek 方言)",
+    "max_completion_tokens(openai 方言)/ max_tokens(其余):配置了 maxTokens 才发",
+    "extraBody 里的任何键,逐字合并",
+  ],
+  reads: [
+    "choices[0].delta.content → text",
+    "choices[0].delta.reasoning_content → reasoning(全文,可编辑)",
+    "choices[0].delta.tool_calls[{index, id, function{name, arguments}}] → toolCalls",
+    "choices[0].finish_reason → stopReason(length → 截断)",
+    "usage.prompt_tokens / completion_tokens → inputTokens / outputTokens",
+    "usage.prompt_cache_hit_tokens 或 prompt_tokens_details.cached_tokens → cacheReadTokens",
+    "usage.completion_tokens_details.reasoning_tokens → reasoningTokens",
+  ],
+  ignores: [
+    "choices[].delta.refusal、logprobs、system_fingerprint、id、created",
+    "GPT 在此协议上不返回任何推理内容,只有 reasoning_tokens 一个数字;要看推理摘要用 openai-responses 协议",
+  ],
+};
 
 function safeParse(s: string): unknown {
   try {
@@ -336,6 +380,7 @@ export function openaiCompat(opts: OpenAICompatOptions): Provider {
   });
   return {
     model: opts.model,
+    fields: OPENAI_COMPAT_FIELDS,
     wire,
     listModels: () => fetchModelIds(`${baseUrl}/models`, headers),
     async complete(messages, tools, { onDelta, onReasoning, signal, onRetry, onRaw, effort } = {}) {

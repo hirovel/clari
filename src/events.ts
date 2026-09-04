@@ -52,6 +52,12 @@ export type AgentEvent =
        */
       reasoning?: string;
       /**
+       * reasoning 是什么:full = 模型真正读回去的那份全文(DeepSeek、Anthropic 预算模式);
+       * summary = 只是给人看的摘要,模型读的正文在 opaque 里(Anthropic 自适应模式、OpenAI Responses)。
+       * 决定了这段思考能不能被编辑来引导模型:只有 full 改了才有意义。
+       */
+      reasoningKind?: "full" | "summary";
+      /**
        * 适配器私有回传物(Q53):下一轮必须原样送回、内核不解释的东西(如 Anthropic 带签名的 thinking 块)。
        * 模型可见(它会进入请求),所以必须入日志;写它和读它的是同一个适配器。
        */

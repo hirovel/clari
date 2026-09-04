@@ -469,8 +469,27 @@ export function receivedLines(rec: RequestRecord, raw: string[] | undefined): st
     if (r.usage) lines.push(`${c.soft("用量")} ${c.ink(JSON.stringify(r.usage))}`);
     lines.push("");
     if (r.reasoning) {
-      lines.push(c.jin("思考"));
+      lines.push(
+        c.jin(
+          r.reasoningKind === "summary"
+            ? "思考(摘要:只给人看,模型读的正文在私有回传物里,不可编辑)"
+            : r.reasoningKind === "full"
+              ? "思考(全文:下一轮原样回传给模型,可编辑)"
+              : "思考",
+        ),
+      );
       lines.push(...indent(r.reasoning).map((l) => c.faint(c.italic(l))));
+      lines.push("");
+    }
+    if (r.opaque !== undefined) {
+      const o = r.opaque as { kind?: string; blocks?: unknown[]; items?: unknown[] };
+      const n = o.blocks?.length ?? o.items?.length ?? 0;
+      lines.push(c.jin("私有回传物(opaque)"));
+      lines.push(
+        c.faint(
+          `    ${o.kind ?? "未知"} · ${n} 项 · ${JSON.stringify(r.opaque).length} 字符 · 下一轮原样送回,内核不解释;全文见写入分区的事件 JSON`,
+        ),
+      );
       lines.push("");
     }
     lines.push(c.jin("文本"));

@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import type { EffortLevel, OpenAIDialect, Provider } from "./provider.js";
 import { openaiCompat } from "./provider.js";
 import { anthropic, type ThinkingMode } from "./providers/anthropic.js";
+import { openaiResponses } from "./providers/openai-responses.js";
 
 /** 每百万 token 的价格(美元)。缺哪项就不计哪项;整个缺省 = 不显示费用。 */
 export type ModelPrice = {
@@ -32,7 +33,10 @@ export type ModelConfig = {
 };
 
 export type ProviderConfig = {
-  protocol: "openai" | "anthropic";
+  /** openai = chat completions(DeepSeek、多数中转站);openai-responses = GPT 系推理摘要可见的那条;anthropic = Messages。 */
+  protocol: "openai" | "openai-responses" | "anthropic";
+  /** openai-responses:推理摘要档位,缺省 auto;none 不要摘要。 */
+  reasoningSummary?: "auto" | "concise" | "detailed" | "none";
   baseUrl: string;
   /** 直接写在配置里的 key(可选;推荐用 apiKeyEnv)。 */
   apiKey?: string;
@@ -143,9 +147,11 @@ export const CONFIG_TEMPLATE: KernelConfig = {
       ],
     },
     openai: {
-      protocol: "openai",
+      // GPT 系走 Responses 协议:推理摘要可见,推理正文加密回传;中转站多数只支持 chat completions,另起一条 protocol: openai。
+      protocol: "openai-responses",
       baseUrl: "https://api.openai.com/v1",
       apiKeyEnv: "OPENAI_API_KEY",
+      reasoningSummary: "auto",
       contextWindow: 400000,
       models: [
         { name: "gpt-5.5", effortLevels: ["off", "low", "medium", "high", "xhigh"] },
@@ -225,8 +231,12 @@ function validate(raw: unknown, path: string): KernelConfig {
     throw new Error(`配置文件缺少 default 或 providers 字段: ${path}`);
   }
   for (const [name, p] of Object.entries(c.providers)) {
-    if (p.protocol !== "openai" && p.protocol !== "anthropic") {
-      throw new Error(`供应商 ${name} 的 protocol 必须是 openai 或 anthropic`);
+    if (
+      p.protocol !== "openai" &&
+      p.protocol !== "anthropic" &&
+      p.protocol !== "openai-responses"
+    ) {
+      throw new Error(`供应商 ${name} 的 protocol 必须是 openai、openai-responses 或 anthropic`);
     }
     if (typeof p.baseUrl !== "string" || !Array.isArray(p.models)) {
       throw new Error(`供应商 ${name} 缺少 baseUrl 或 models`);
@@ -336,6 +346,13 @@ export function createProvider(r: Resolved, apiKey: string): Provider {
       ...shared,
       ...(thinkingMode && { thinkingMode }),
       ...(r.provider.promptCache !== undefined && { promptCache: r.provider.promptCache }),
+    });
+  }
+  if (r.provider.protocol === "openai-responses") {
+    return openaiResponses({
+      baseUrl: r.provider.baseUrl,
+      ...shared,
+      ...(r.provider.reasoningSummary && { reasoningSummary: r.provider.reasoningSummary }),
     });
   }
   return openaiCompat({
