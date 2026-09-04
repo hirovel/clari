@@ -115,8 +115,20 @@ export type AgentEvent =
       error: string;
       status?: number;
     }
-  /** 请求最终失败(重试用尽或不可重试)。只给人看;循环随后抛出。 */
-  | { type: "request/error"; at: string; error: string; status?: number }
+  /**
+   * 请求最终失败(重试用尽或不可重试)。只给人看;循环随后抛出。
+   * kind 是分类(鉴权、模型不存在、限流、溢出、请求错误、服务端、网络、流、打断),界面据此给下一步;
+   * provider 是供应商响应体里的原话;body 是响应体原文(截到 4 KiB),排查软件自身问题时看它。
+   */
+  | {
+      type: "request/error";
+      at: string;
+      error: string;
+      status?: number;
+      kind?: string;
+      provider?: string;
+      body?: string;
+    }
   /**
    * 策略槽做出的、改变了走向的决定。只给人看。
    * 内核按端到端原则只有这几处会"做决定",全部记录下来,检视器据此证明中间层没有藏聪明。

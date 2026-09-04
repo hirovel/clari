@@ -8,7 +8,12 @@ import { type AgentEvent, now, type ToolCall } from "./events.js";
 import type { EventLog } from "./log.js";
 import { deriveMessages, type Message } from "./messages.js";
 import type { AssistantTurn, EffortLevel, Provider, ToolDef } from "./provider.js";
-import { isContextOverflow, ProviderError } from "./providers/errors.js";
+import {
+  classifyError,
+  isContextOverflow,
+  ProviderError,
+  providerMessage,
+} from "./providers/errors.js";
 import { type Tool, validateArgs } from "./tools.js";
 
 // ---------- 策略槽(Q27:全部是开放接口,内置实现无特权,自定义实现从外部注入) ----------
@@ -319,11 +324,16 @@ function logRetry(log: EventLog, info: { attempt: number; delayMs: number; error
 
 function logRequestError(log: EventLog, err: unknown): void {
   const status = statusOf(err);
+  const provider = providerMessage(err);
+  const body = err instanceof ProviderError ? err.body?.slice(0, 4096) : undefined;
   log.append({
     type: "request/error",
     at: now(),
     error: (err as Error).message,
     ...(status !== undefined && { status }),
+    kind: classifyError(err),
+    ...(provider && { provider }),
+    ...(body && { body }),
   });
 }
 

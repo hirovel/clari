@@ -36,11 +36,13 @@ import {
   parseEffort,
   type ToolDef,
 } from "../src/provider.js";
+import { classifyError, type ErrorKind, hintFor } from "../src/providers/errors.js";
 import type { ChildInfo } from "../src/subagent.js";
 import type { Tool } from "../src/tools.js";
 import { expandFileRefs } from "./attachments.js";
 import { forkSession, SESSIONS_DIR } from "./bootstrap.js";
 import {
+  errorCardLines,
   predictedCache,
   reasoningTitle,
   receiveBlockLines,
@@ -739,10 +741,23 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
         if (e.slot === "execution")
           note(c.faint(`· 并行执行 ${e.parallel} 个调用:${e.tools.join(", ")}`));
         break;
-      case "request/error":
-        // 循环随后抛出,submit 的 catch 负责呈现;这里只把接收卡头行标成失败。
-        setReceiveHead(lastRequestIndex, requestCount, { error: e.error });
+      case "request/error": {
+        // 接收卡头行标成失败,下面画错误卡:分类、供应商原话、下一步、原始体在哪。
+        const req = log.events[lastRequestIndex];
+        const kind = (e.kind ?? classifyError(new Error(e.error))) as ErrorKind;
+        // 头行只写分类与状态码;原话与下一步在错误卡里,不重复。
+        setReceiveHead(lastRequestIndex, requestCount, {
+          error: `${kind}${e.status !== undefined ? ` · HTTP ${e.status}` : ""}`,
+        });
+        const lines = errorCardLines(e, {
+          n: requestCount,
+          providerName: info.providerName,
+          ...(req?.type === "request" && { model: req.model }),
+          hint: hintFor(kind, { providerName: info.providerName, model: info.model }),
+        });
+        transcript.addChild(new Text(lines.join("\n"), 1, 0));
         break;
+      }
       case "compaction": {
         if (e.usage) {
           const n = log.events
@@ -826,7 +841,8 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       const outcome = await pending;
       if (typeof outcome === "object") note(c.jin(`◇ 循环停止:${outcome.stopped}`));
     } catch (err) {
-      note(c.zhu(`✗ 请求失败:${(err as Error).message}`));
+      // 请求层的失败已由 request/error 事件画成错误卡;这里只兜住循环之外的异常。
+      if (log.events.at(-1)?.type !== "request/error") note(c.zhu(`✗ ${(err as Error).message}`));
     } finally {
       hideLoader();
       updateStatus();

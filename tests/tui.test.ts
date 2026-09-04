@@ -452,7 +452,8 @@ describe("TUI 壳", () => {
     const { app } = boot(provider);
     await app.submit("x");
     const doc = text(app);
-    expect(doc).toContain("✗ 请求失败:网络断了");
+    expect(doc).toContain("Request #1 failed");
+    expect(doc).toContain("网络断了");
     expect(doc).toContain("○ 空闲");
     app.stop();
   });

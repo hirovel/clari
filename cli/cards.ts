@@ -250,3 +250,32 @@ export function reasoningTitle(kind: "full" | "summary" | undefined): string {
   if (kind === "full") return "思考(全文;下一轮原样回传,可编辑引导)";
   return "思考";
 }
+
+type RequestErrorEvent = Extract<AgentEvent, { type: "request/error" }>;
+
+/**
+ * 错误卡:一次请求最终失败时的四行。分类与状态码、供应商原话、下一步、原始响应体在哪。
+ * 英文,与界面一致;原话原样,不转述。
+ */
+export function errorCardLines(
+  e: RequestErrorEvent,
+  ctx: { n: number; providerName?: string; model?: string; hint: string },
+): string[] {
+  const kind = e.kind ?? "unknown";
+  const status = e.status !== undefined ? ` · HTTP ${e.status}` : "";
+  const lines = [
+    `${c.zhu(BAR)} ${c.bold(c.zhu(`Request #${ctx.n} failed`))}  ${c.soft(`${kind}${status}`)}`,
+  ];
+  if (e.provider) lines.push(row("provider", e.provider));
+  else lines.push(row("error", firstLine(e.error, 120)));
+  lines.push(row("next", ctx.hint));
+  lines.push(
+    row(
+      "raw",
+      e.body
+        ? `${e.body.length} chars of response body saved · Ctrl+R → request #${ctx.n} → received`
+        : `no response body (network or stream failure) · Ctrl+R → request #${ctx.n} → received`,
+    ),
+  );
+  return lines;
+}
