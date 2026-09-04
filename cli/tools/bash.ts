@@ -23,7 +23,8 @@ export function createBashTool(
     description:
       "Run a bash command in the current working directory; returns stdout and stderr combined. " +
       `Default timeout ${defaultTimeout} s; raise the timeout parameter for long tasks. ` +
-      "When output exceeds the limit, a truncation policy keeps part of it; the full output is written to a temp file whose path is appended.",
+      "Output past the limit is truncated and the full output is saved to a temp file whose path is appended. " +
+      "For reading and searching files prefer read, grep and glob; use bash for builds, tests, git and other commands.",
     parameters: Type.Object({
       command: Type.String({ description: "bash command to run" }),
       timeout: Type.Optional(

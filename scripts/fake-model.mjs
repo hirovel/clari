@@ -64,7 +64,7 @@ const server = createServer((req, res) => {
       return;
     }
     if (toolResults.length === 0) {
-      sse(res, [...textChunks("先看一下目录。"), toolCall("call_1", "ls", { path: "." }), finish("tool_calls", promptTokens, 20)]);
+      sse(res, [...textChunks("先看一下目录。"), toolCall("call_1", "read", { path: "." }), finish("tool_calls", promptTokens, 20)]);
       return;
     }
     if (toolResults.length === 1) {

@@ -1,4 +1,4 @@
-// 只读三工具(Q56):grep / glob / ls。内核不知道它们,从 CLI 层注入。
+// 只读两工具(Q56, Q88):grep / glob。内核不知道它们,从 CLI 层注入;目录列举并入 read。
 // 立场取自 pi:模型在这些工具名上被训练过,给工具即给"先搜后读"的引导,不必写提示词规则。
 import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync, statSync } from "node:fs";
@@ -104,8 +104,9 @@ export function createGrepTool(opts: { useRipgrep?: boolean; maxResults?: number
   return defineTool({
     name: "grep",
     description:
-      "Search a directory or file by regex; returns path:line:content. Use it to locate, then read for context. " +
-      "At most 200 results; lines cut to 500 characters.",
+      "Search file contents by regular expression; returns path:line:content, at most 200 results, lines cut to 500 characters. " +
+      "Skips .git, node_modules and build output. Use it to locate, then read for context. " +
+      "Prefer it over grep in bash; for match counts or context lines, run rg in bash.",
     parameters: Type.Object({
       pattern: Type.String({ description: "regular expression (JS syntax)" }),
       path: Type.Optional(
@@ -188,7 +189,9 @@ export const grepTool = createGrepTool();
 
 export const globTool = defineTool({
   name: "glob",
-  description: "List files by glob pattern, e.g. src/**/*.ts. Returns relative paths, at most 500.",
+  description:
+    "List files matching a glob pattern, e.g. src/**/*.ts; returns relative paths, at most 500, skipping .git, node_modules and build output. " +
+    "Use it to find files by name; use grep to find files by content.",
   parameters: Type.Object({
     pattern: Type.String({
       description: "glob pattern: ** any depth, * one segment, ? one character",
@@ -207,25 +210,5 @@ export const globTool = defineTool({
     return (
       shown.join("\n") + (all.length > 500 ? `\n[showing first 500 of ${all.length} results]` : "")
     );
-  },
-});
-
-export const lsTool = defineTool({
-  name: "ls",
-  description: "List a directory: directories end with /, files show their size.",
-  parameters: Type.Object({
-    path: Type.Optional(Type.String({ description: "directory, default current directory" })),
-  }),
-  concurrency: "parallel",
-  async execute(args) {
-    const dir = resolve(args.path ?? ".");
-    const entries = readdirSync(dir)
-      .map((name) => {
-        const st = statSync(join(dir, name));
-        return { name, dir: st.isDirectory(), size: st.size };
-      })
-      .sort((a, b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name));
-    if (entries.length === 0) return "(empty directory)";
-    return entries.map((e) => (e.dir ? `${e.name}/` : `${e.name}  ${e.size} B`)).join("\n");
   },
 });

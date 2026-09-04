@@ -311,10 +311,9 @@ export function createFetchTool(opts: FetchToolOptions = {}) {
   return defineTool({
     name: "fetch",
     description:
-      "Fetch a URL over http(s) and return its content as text. HTML is converted to markdown (headings, lists, links, tables, code blocks); " +
-      "JSON is pretty-printed; other text is returned as-is; binary content is refused. GitHub blob and gist pages are rewritten to their raw form. " +
-      "Redirects to another host are reported, not followed. Long pages are truncated; continue with offset (pages are cached for 15 minutes, so paging is free). " +
-      "Set raw=true to get the body unconverted.",
+      "Fetch a URL over http(s) and return its content as text. HTML is converted to markdown; JSON is pretty-printed; other text is returned as-is; binary content is refused. " +
+      "GitHub blob and gist pages are rewritten to their raw form. Redirects to another host are reported, not followed. " +
+      "Long pages are truncated; continue with offset (pages are cached for 15 minutes, so paging is free). Set raw=true to get the body unconverted.",
     parameters: Type.Object({
       url: Type.String({ description: "http or https URL" }),
       offset: Type.Optional(Type.Number({ description: "starting line number, 1-based" })),

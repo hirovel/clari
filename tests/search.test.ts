@@ -8,7 +8,6 @@ import {
   globTool,
   globToRegExp,
   grepFiles,
-  lsTool,
   walkFiles,
 } from "../cli/tools/search.js";
 
@@ -78,13 +77,6 @@ describe("只读工具(Q56)", () => {
       { signal: new AbortController().signal },
     );
     expect(files.split("\n")).toEqual(["src/a.ts", "src/deep/b.ts"]);
-
-    const listing = await lsTool.execute(
-      { path: join(root, "src") },
-      { signal: new AbortController().signal },
-    );
-    expect(listing.split("\n")[0]).toBe("deep/");
-    expect(listing).toContain("a.ts  ");
   });
 });
 

@@ -1,15 +1,18 @@
 // 文件三工具:read / write / edit。内核对它们一无所知(Q2),从 CLI 层注入。
 // read 的截断策略可换(Q28):默认保头,自定义策略经 createReadTool 注入。
+// read 传目录即列举(Q88):目录列举工具在各家退场,并进 read 省一个工具名。
+// 描述文案的写法(Q88):每条说清输出形状、硬限制、失败原因与该换哪个工具;不写行为以外的话。
 import {
   closeSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   readSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { defineTool } from "../../src/tools.js";
 import { capLineLength, keepHead, type TruncationPolicy } from "./truncate.js";
@@ -36,10 +39,12 @@ export function createReadTool(opts: { truncate?: TruncationPolicy; maxLineChars
   return defineTool({
     name: "read",
     description:
-      "Read a text file. Returns numbered lines. When the output exceeds the limit, a truncation policy keeps part of it and notes the offset to continue from; " +
-      "overlong lines are cut to a fixed character count.",
+      "Read a text file as numbered lines, or list a directory (one entry per line; directories end with /, files show their size). " +
+      "Output past the limit is truncated and the note gives the offset to continue from; overlong lines are cut. " +
+      "Use offset and limit to read only the part you need, and read several files in one turn when you know which ones. " +
+      "Text only: binary files and images are refused.",
     parameters: Type.Object({
-      path: Type.String({ description: "file path, relative or absolute" }),
+      path: Type.String({ description: "file or directory path, relative or absolute" }),
       offset: Type.Optional(Type.Number({ description: "starting line number, 1-based" })),
       limit: Type.Optional(Type.Number({ description: "maximum number of lines to return" })),
     }),
@@ -47,8 +52,7 @@ export function createReadTool(opts: { truncate?: TruncationPolicy; maxLineChars
     async execute(args) {
       const path = resolve(args.path);
       const st = statSync(path);
-      if (st.isDirectory())
-        throw new Error(`${args.path} is a directory; use ls or glob to list it.`);
+      if (st.isDirectory()) return listDirectory(path);
       if (st.size > MAX_READ_BYTES) {
         throw new Error(
           `file is ${Math.round(st.size / 1024 / 1024)} MB, exceeds the single-read limit of ${MAX_READ_BYTES / 1024 / 1024} MB. Use bash head/sed/grep to take the part you need.`,
@@ -71,12 +75,26 @@ export function createReadTool(opts: { truncate?: TruncationPolicy; maxLineChars
   });
 }
 
+/** 目录列举:目录在前并以 / 结尾,文件带字节数;空目录说明。 */
+export function listDirectory(dir: string): string {
+  const entries = readdirSync(dir)
+    .map((name) => {
+      const st = statSync(join(dir, name));
+      return { name, dir: st.isDirectory(), size: st.size };
+    })
+    .sort((a, b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name));
+  if (entries.length === 0) return "(empty directory)";
+  return entries.map((e) => (e.dir ? `${e.name}/` : `${e.name}  ${e.size} B`)).join("\n");
+}
+
 /** 默认实例:保头截断 —— 文件开头是结构所在。 */
 export const readTool = createReadTool();
 
 export const writeTool = defineTool({
   name: "write",
-  description: "Write a text file, replacing its contents. Creates missing directories.",
+  description:
+    "Write a text file, replacing its contents; creates missing directories. " +
+    "For a change inside an existing file use edit; write is for new files and full rewrites.",
   parameters: Type.Object({
     path: Type.String({ description: "file path" }),
     content: Type.String({ description: "complete file content" }),
@@ -141,12 +159,15 @@ export function fuzzyReplace(
 export const editTool = defineTool({
   name: "edit",
   description:
-    "Make one exact replacement in a file. oldText must occur exactly once in the file; otherwise the call fails and says why. " +
-    "If the exact match fails, it retries ignoring trailing whitespace and quote style; a fuzzy hit is noted in the result.",
+    "Replace text in a file. oldText must match the file exactly, indentation included, and occur exactly once; " +
+    "keep it as short as it can be while still unique. Set replaceAll to change every occurrence, e.g. for a rename. " +
+    "When the exact match fails, one retry ignores trailing whitespace and quote style and the result says so. " +
+    "No match or several matches fail with the reason.",
   parameters: Type.Object({
     path: Type.String({ description: "file path" }),
-    oldText: Type.String({ description: "original text to replace; must be unique" }),
+    oldText: Type.String({ description: "text to replace; must be unique unless replaceAll" }),
     newText: Type.String({ description: "replacement text" }),
+    replaceAll: Type.Optional(Type.Boolean({ description: "replace every occurrence" })),
   }),
   async execute(args) {
     const path = resolve(args.path);
@@ -158,9 +179,16 @@ export const editTool = defineTool({
     const newText = args.newText.replaceAll("\r\n", "\n");
     if (!oldText) throw new Error("oldText must not be empty.");
     const count = content.split(oldText).length - 1;
+    if (args.replaceAll && count > 0) {
+      const all = content.replaceAll(oldText, () => newText);
+      if (all === content)
+        throw new Error("replacement is identical to the original; nothing written.");
+      writeFileSync(path, crlf ? all.replaceAll("\n", "\r\n") : all, "utf8");
+      return `replaced ${count} occurrences in ${args.path}.`;
+    }
     if (count > 1) {
       throw new Error(
-        `oldText occurs ${count} times in ${args.path}, not unique. Provide more context.`,
+        `oldText occurs ${count} times in ${args.path}, not unique. Provide more context, or set replaceAll to change every occurrence.`,
       );
     }
     let next: string;

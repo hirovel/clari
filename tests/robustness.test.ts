@@ -170,8 +170,13 @@ describe("文件工具的边界", () => {
     await expect(readTool.execute({ path: file }, ctx)).rejects.toThrow(/binary/);
   });
 
-  it("read:目录 → 报错指向 ls", async () => {
-    await expect(readTool.execute({ path: dir }, ctx)).rejects.toThrow(/is a directory/);
+  it("read:目录 → 列举条目,目录在前带 /,文件带字节数(Q88)", async () => {
+    const sub = join(dir, "listing");
+    mkdirSync(join(sub, "deep"), { recursive: true });
+    writeFileSync(join(sub, "a.txt"), "abc");
+    const listing = await readTool.execute({ path: sub }, ctx);
+    expect(listing.split("\n")).toEqual(["deep/", "a.txt  3 B"]);
+    expect(await readTool.execute({ path: join(sub, "deep") }, ctx)).toBe("(empty directory)");
   });
 
   it("read:空文件正常返回", async () => {

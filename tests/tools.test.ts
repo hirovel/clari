@@ -61,10 +61,23 @@ describe("editTool", () => {
     );
   });
 
-  it("多处匹配→报错并给出次数", async () => {
+  it("多处匹配→报错并给出次数,提示 replaceAll", async () => {
     const path = tempFile("aa aa");
     await expect(editTool.execute({ path, oldText: "aa", newText: "x" }, ctx)).rejects.toThrow(
-      "occurs 2 times",
+      /occurs 2 times.*replaceAll/,
     );
+  });
+
+  it("replaceAll→全部替换并报次数;没有命中仍走 not found(Q88)", async () => {
+    const path = tempFile("foo(a); foo(b);\nbar();");
+    const out = await editTool.execute(
+      { path, oldText: "foo(", newText: "baz(", replaceAll: true },
+      ctx,
+    );
+    expect(out).toBe(`replaced 2 occurrences in ${path}.`);
+    expect(readFileSync(path, "utf8")).toBe("baz(a); baz(b);\nbar();");
+    await expect(
+      editTool.execute({ path, oldText: "nope", newText: "x", replaceAll: true }, ctx),
+    ).rejects.toThrow("not found");
   });
 });

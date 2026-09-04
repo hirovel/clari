@@ -18,7 +18,7 @@ export type ApprovalConfig = {
 /** 内置缺省:只读工具放行,其余问人,cwd 之外必问。 */
 export const DEFAULT_APPROVAL: ApprovalConfig = {
   default: "ask",
-  allow: ["read", "grep", "glob", "ls", "skill", "task", "remember"],
+  allow: ["read", "grep", "glob", "skill", "task", "remember"],
   deny: [],
   outsideCwd: "ask",
 };
@@ -29,7 +29,7 @@ export type Verdict = { verdict: "allow" | "ask" | "deny"; reason: string };
 export type ApproveDecision = boolean | { allowed: boolean; reason?: string };
 
 /** 路径类工具的路径参数名。 */
-const PATH_TOOLS = new Set(["read", "write", "edit", "ls", "glob", "grep"]);
+const PATH_TOOLS = new Set(["read", "write", "edit", "glob", "grep"]);
 
 /** 规则模式匹配的对象:bash 是整条命令;路径类工具是路径;其它工具没有模式,只按名匹配。 */
 export function subjectOf(call: ToolCall): string | undefined {

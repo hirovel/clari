@@ -40,7 +40,7 @@ import { bashTool } from "./tools/bash.js";
 import { createFetchTool, type FetchConfig } from "./tools/fetch.js";
 import { editTool, readTool, writeTool } from "./tools/fs.js";
 import { createRememberTool, type MemoryFiles } from "./tools/memory.js";
-import { globTool, grepTool, lsTool } from "./tools/search.js";
+import { globTool, grepTool } from "./tools/search.js";
 import { createSkillTool } from "./tools/skill.js";
 import type { ModelChoice, TuiSettings } from "./tui-app.js";
 
@@ -441,7 +441,6 @@ export function buildTools(
     bashTool,
     grepTool,
     globTool,
-    lsTool,
     createFetchTool({ ...(fetchConfig && { config: fetchConfig }) }),
   ];
   if (memory) base.push(createRememberTool(memory));
