@@ -109,22 +109,14 @@ export type KernelConfig = {
   sessionsDir?: string;
 };
 
-/**
- * 用户目录:CLARI_HOME 指定;否则 ~/.clari;新目录不存在而旧目录 ~/.agent-kernel 存在时沿用旧目录(改名前的用户不用搬家)。
- */
+/** 用户目录:环境变量 CLARI_HOME 指定,否则 ~/.clari。 */
 export function clariHome(env = process.env): string {
-  if (env.CLARI_HOME?.trim()) return env.CLARI_HOME.trim();
-  const fresh = join(homedir(), ".clari");
-  const legacy = join(homedir(), ".agent-kernel");
-  if (!existsSync(fresh) && existsSync(legacy)) return legacy;
-  return fresh;
+  return env.CLARI_HOME?.trim() || join(homedir(), ".clari");
 }
 
-/** 配置文件路径;环境变量 CLARI_CONFIG 可改(多套配置、测试用);旧名 KERNEL_CONFIG 仍认。 */
+/** 配置文件路径;环境变量 CLARI_CONFIG 可改(多套配置、测试用)。 */
 export const DEFAULT_CONFIG_PATH =
-  process.env.CLARI_CONFIG?.trim() ||
-  process.env.KERNEL_CONFIG?.trim() ||
-  join(clariHome(), "config.json");
+  process.env.CLARI_CONFIG?.trim() || join(clariHome(), "config.json");
 
 export const CONFIG_TEMPLATE: KernelConfig = {
   default: "deepseek-v4-pro",
