@@ -19,7 +19,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { Agent, type DeliverAs } from "../src/agent.js";
 import { contextBreakdown } from "../src/context.js";
-import { costOf, fmtCost, type Price, usageTotals } from "../src/cost.js";
+import { fmtCost, type Price, usageTotals } from "../src/cost.js";
 import { type AgentEvent, now, type ToolCall } from "../src/events.js";
 import type { EventLog } from "../src/log.js";
 import {
@@ -28,6 +28,7 @@ import {
   recordingProvider,
   type TurnDeps,
 } from "../src/loop.js";
+import { editState, type Message } from "../src/messages.js";
 import {
   EFFORT_LEVELS,
   type EffortLevel,
@@ -39,7 +40,9 @@ import type { ChildInfo } from "../src/subagent.js";
 import type { Tool } from "../src/tools.js";
 import { expandFileRefs } from "./attachments.js";
 import { forkSession, SESSIONS_DIR } from "./bootstrap.js";
-import { fmtMs, fmtTok, RequestInspector, type SessionSource } from "./inspector.js";
+import { reasoningTitle, receiveBlockLines, receiveHead, sendCardLines } from "./cards.js";
+import { editInExternalEditor } from "./editor.js";
+import { fmtMs, fmtTok, messagesFor, RequestInspector, type SessionSource } from "./inspector.js";
 import { expandTemplate, type PromptTemplate } from "./templates.js";
 import { c, editorTheme, markdownTheme } from "./theme.js";
 import { diffLines, hunks } from "./tools/diff.js";
@@ -156,6 +159,13 @@ const COMMANDS = [
     name: "fork",
     description: "分叉会话:/fork 复制到最后一条用户消息之前;/fork N 复制前 N 条事件到新文件",
   },
+  {
+    name: "edit",
+    description:
+      "编辑上下文:/edit N [text|reasoning|content|system] [新文本];不给文本则开外部编辑器。原文永远留在事件里",
+  },
+  { name: "drop", description: "丢弃一条消息:/drop N [备注];助手消息连同它的工具结果一起不再发送" },
+  { name: "edits", description: "列出本会话的全部编辑与丢弃" },
   { name: "model", description: "切换模型:/model 供应商/模型;不带参数列出可选" },
   { name: "models", description: "向供应商查询当前可用模型,对照配置标出下线与新增" },
   { name: "fields", description: "当前协议往请求里放哪些字段、从响应里读哪些、明知存在但不读哪些" },
@@ -222,24 +232,31 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
   let childMode: ChildMode = "tail";
   type ResultRecord = { name: string; content: string; isError: boolean; durationMs?: number };
   const resultNodes: ({ node: Text } & ResultRecord)[] = [];
-  const reasoningNodes: { node: Text; text: string }[] = [];
+  const reasoningNodes: { node: Text; text: string; kind?: "full" | "summary" }[] = [];
 
   // 请求层记录(Q48):发出每个请求时用的 provider,以及开 trace 时收到的原始流。都不进日志。
   const providersAt = new Map<number, Provider>();
   const rawAt = new Map<number, string[]>();
   let requestCount = 0;
   let lastRequestIndex = -1;
-  let lastRequest: Extract<AgentEvent, { type: "request" }> | undefined;
 
   // 子 agent(Q62):每个子一个视图块,挂在父会话里对应 task 调用行的下面。
   const childViews: ChildView[] = [];
   const childSlots = new Map<string, Container>();
 
   // 推理内容不隐藏(Q34):thinking 模型的思考过程以淡字实时呈现。
-  const renderReasoning = (s: string) =>
+  const renderReasoning = (s: string, kind?: "full" | "summary") =>
     showReasoning
-      ? `${c.faint("思考")}\n${c.faint(c.italic(indent(s.trim())))}`
-      : c.faint("思考(已隐藏,Ctrl+T 显示)");
+      ? `${c.faint(reasoningTitle(kind))}\n${c.faint(c.italic(indent(s.trim())))}`
+      : c.faint(`${reasoningTitle(kind)}(已隐藏,Ctrl+T 显示)`);
+
+  // 发送卡 / 接收卡(可见性的核心):上一次正常步发出的消息是"未变 / 新增"的比较基线;
+  // 每个 request 事件下标对应一个接收卡头行节点,响应、压缩结果或失败到来时更新它。
+  let lastSent: Message[] | undefined;
+  let lastToolNames = "";
+  const receiveHeads = new Map<number, Text>();
+  let lastTurnRequestIndex = -1;
+  let lastCompactionRequestIndex = -1;
 
   const onRaw = (line: string): void => {
     if (deps.trace) {
@@ -385,27 +402,23 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
 
   function toggleReasoning(): void {
     showReasoning = !showReasoning;
-    for (const r of reasoningNodes) r.node.setText(renderReasoning(r.text));
+    for (const r of reasoningNodes) r.node.setText(renderReasoning(r.text, r.kind));
     if (reasoningView) reasoningView.setText(renderReasoning(reasoningBuffer));
     note(c.faint(showReasoning ? "· 思考已显示" : "· 思考已隐藏(Ctrl+T 显示)"));
   }
 
-  /** 一步请求的一行小结:估算 vs 实测、缓存、输出、耗时、停止原因。检视器展开全部细节。 */
-  function requestSummary(e: Extract<AgentEvent, { type: "assistant/message" }>): string {
-    if (!lastRequest) return "";
-    const u = e.usage;
-    // 缓存命中率 = 命中 / 全部输入;前缀没变就该接近 100%,骤降说明前缀被改动了。
-    const hit =
-      u?.cacheReadTokens !== undefined && u.inputTokens > 0
-        ? `(缓存 ${fmtTok(u.cacheReadTokens)} · ${Math.round((u.cacheReadTokens / u.inputTokens) * 100)}%)`
-        : "";
-    const measured = u
-      ? `→ 实测 ${fmtTok(u.inputTokens)}${hit} · +${fmtTok(u.outputTokens)}`
-      : "→ 无用量";
-    const price = u ? priceFor(lastRequest.model) : undefined;
-    const cost = u && price ? ` · ${fmtCost(costOf(u, price))}` : "";
-    return c.faint(
-      `· #${requestCount}  ${lastRequest.messages} 条消息 ≈${fmtTok(lastRequest.estimatedTokens)} ${measured}${cost} · ${fmtMs(e.latencyMs)} · ${e.stopReason}`,
+  /** 更新某次请求的接收卡头行;n 是它的请求序号。 */
+  function setReceiveHead(
+    requestIndex: number,
+    n: number,
+    fill: Partial<Parameters<typeof receiveHead>[0]>,
+  ): void {
+    const node = receiveHeads.get(requestIndex);
+    const req = log.events[requestIndex];
+    if (!node || req?.type !== "request") return;
+    const price = priceFor(req.model);
+    node.setText(
+      receiveHead({ n, estimated: req.estimatedTokens, ...(price && { price }), ...fill }),
     );
   }
 
@@ -572,16 +585,26 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
         transcript.addChild(new Text(`${c.zhu("›")} ${c.bold(c.ink(e.text))}`, 1, 0));
         break;
       case "assistant/message": {
+        // 接收卡头行:停止原因、耗时、实测用量、缓存命中率、费用。
+        setReceiveHead(lastTurnRequestIndex, requestCount, { response: e });
         if (reasoningView) {
           if (e.reasoning) {
-            reasoningView.setText(renderReasoning(e.reasoning));
-            reasoningNodes.push({ node: reasoningView, text: e.reasoning });
+            reasoningView.setText(renderReasoning(e.reasoning, e.reasoningKind));
+            reasoningNodes.push({
+              node: reasoningView,
+              text: e.reasoning,
+              ...(e.reasoningKind && { kind: e.reasoningKind }),
+            });
           } else transcript.removeChild(reasoningView);
           reasoningView = undefined;
           reasoningBuffer = "";
         } else if (e.reasoning) {
-          const node = new Text(renderReasoning(e.reasoning), 1, 0);
-          reasoningNodes.push({ node, text: e.reasoning });
+          const node = new Text(renderReasoning(e.reasoning, e.reasoningKind), 1, 0);
+          reasoningNodes.push({
+            node,
+            text: e.reasoning,
+            ...(e.reasoningKind && { kind: e.reasoningKind }),
+          });
           transcript.addChild(node);
         }
         if (streaming) {
@@ -594,9 +617,6 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
           transcript.addChild(new Markdown(e.text, 1, 0, markdownTheme, { color: c.ink }));
         }
         if (e.usage) lastUsage = e.usage;
-        // 每步一行请求小结(Q48):紧跟响应正文,放在工具调用之前,让"调用 → 结果"连在一起。
-        const summary = requestSummary(e);
-        if (summary) note(summary);
         if (e.toolCalls.length > 0) transcript.addChild(new Spacer(1));
         for (const tc of e.toolCalls) {
           transcript.addChild(
@@ -616,6 +636,8 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
             transcript.addChild(slot);
           }
         }
+        // 响应里除思考与文本之外的块:私有回传物(签名思考块、加密推理项)。
+        for (const l of receiveBlockLines(e)) transcript.addChild(new Text(l, 1, 0));
         if (e.stopReason === "aborted") note(c.faint("— 已打断 —"));
         if (e.stopReason === "length") note(c.jin("◇ 输出被截断,已要求模型重发"));
         break;
@@ -635,12 +657,56 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
         if (child) child.finish(!e.isError);
         break;
       }
-      case "request":
+      case "request": {
         requestCount += 1;
         lastRequestIndex = log.events.length - 1;
-        lastRequest = e;
         providersAt.set(lastRequestIndex, agent.provider);
+        // 发送卡:这次实际发出的消息(正常步 = 之前事件的投影;摘要请求 = 记录的 body),
+        // 与上一次正常步比出"未变 / 新增",参数来自 provider.wire,与线路正文同源。
+        const rec = {
+          index: lastRequestIndex,
+          request: e,
+          n: requestCount,
+          retries: [],
+          before: [],
+        };
+        const messages = messagesFor(log.events, rec);
+        const activeDefs = defs().filter((d) => e.tools.includes(d.name));
+        const level = e.effort ? parseEffort(e.effort) : undefined;
+        const wire = agent.provider.wire?.(messages, activeDefs, level ? { effort: level } : {});
+        const start = log.events.find((x) => x.type === "session/start");
+        const toolNames = e.tools.join(" ");
+        transcript.addChild(new Spacer(1));
+        transcript.addChild(
+          new Text(
+            sendCardLines({
+              n: requestCount,
+              request: e,
+              messages,
+              ...(lastSent && { previous: lastSent }),
+              ...(wire !== undefined && { wire }),
+              defs: activeDefs,
+              ...(start?.type === "session/start" &&
+                start.sections && { sections: start.sections }),
+              toolsUnchanged: toolNames === lastToolNames,
+            }).join("\n"),
+            1,
+            0,
+          ),
+        );
+        lastToolNames = toolNames;
+        if (e.reason === "compaction") lastCompactionRequestIndex = lastRequestIndex;
+        else {
+          lastTurnRequestIndex = lastRequestIndex;
+          lastSent = messages;
+        }
+        // 接收卡头行先占位,响应到了再填。思考与正文节点随后接在它下面。
+        const headNode = new Text("", 1, 0);
+        receiveHeads.set(lastRequestIndex, headNode);
+        transcript.addChild(headNode);
+        setReceiveHead(lastRequestIndex, requestCount, {});
         break;
+      }
       case "retry":
         note(
           c.faint(
@@ -654,15 +720,22 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
           note(c.faint(`· 并行执行 ${e.parallel} 个调用:${e.tools.join(", ")}`));
         break;
       case "request/error":
-        // 循环随后抛出,submit 的 catch 负责呈现,这里不重复。
+        // 循环随后抛出,submit 的 catch 负责呈现;这里只把接收卡头行标成失败。
+        setReceiveHead(lastRequestIndex, requestCount, { error: e.error });
         break;
       case "compaction": {
+        if (e.usage) {
+          const n = log.events
+            .slice(0, lastCompactionRequestIndex + 1)
+            .filter((x) => x.type === "request").length;
+          setReceiveHead(lastCompactionRequestIndex, n, { compaction: e });
+        }
         const parts: string[] = [];
         if (e.summary !== undefined)
           parts.push(`摘要覆盖事件 ${e.coversFrom ?? 1}-${e.coversUpTo}`);
         if (e.cleared?.length) parts.push(`清除 ${e.cleared.length} 条工具结果`);
         const cost = e.usage
-          ? `  摘要请求 #${requestCount} · ${fmtTok(e.usage.inputTokens)}→${fmtTok(e.usage.outputTokens)} tok · ${fmtMs(e.latencyMs)}`
+          ? `  摘要请求 · ${fmtTok(e.usage.inputTokens)}→${fmtTok(e.usage.outputTokens)} tok · ${fmtMs(e.latencyMs)}`
           : "";
         const who = e.strategy ? `(${e.strategy})` : "";
         note(
@@ -790,6 +863,15 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       case "fork":
         note(forkCommand(arg));
         break;
+      case "edit":
+        note(editCommand(arg));
+        break;
+      case "drop":
+        note(dropCommand(arg));
+        break;
+      case "edits":
+        note(editsList());
+        break;
       case "model":
         switchModel(arg);
         break;
@@ -824,6 +906,122 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
         note(c.zhu(`未知命令 /${cmd}`) + c.faint("  /help 查看命令"));
       }
     }
+  }
+
+  // ---------- 编辑上下文(Q74):改的是投影,不是历史 ----------
+
+  type EditField = "text" | "reasoning" | "content" | "system";
+
+  /** 目标事件允许改哪些字段,以及各字段当前(投影里)的值。 */
+  function editable(
+    target: number,
+  ): { fields: EditField[]; current: (f: EditField) => string } | string {
+    const e = log.events[target];
+    if (!e) return `没有事件 #${target}(共 ${log.events.length} 条,Ctrl+R → Tab 事件视图看下标)`;
+    const cur = editState(log.events).edits.get(target) ?? {};
+    switch (e.type) {
+      case "assistant/message":
+        return {
+          fields: ["text", "reasoning"],
+          current: (f) =>
+            f === "reasoning" ? (cur.reasoning ?? e.reasoning ?? "") : (cur.text ?? e.text),
+        };
+      case "user/message":
+        return { fields: ["content"], current: () => cur.content ?? e.text };
+      case "tool/result":
+        return { fields: ["content"], current: () => cur.content ?? e.content };
+      case "session/start":
+        return { fields: ["system"], current: () => cur.system ?? e.system };
+      default:
+        return `事件 #${target} 是 ${e.type},不进入模型上下文,没有可改的字段`;
+    }
+  }
+
+  /** 编辑的后果,保存时一并打印:缓存前缀失效、回传物丢弃、Anthropic 之后思考块全丢。 */
+  function editConsequences(target: number): string[] {
+    const out = [`从事件 #${target} 起的前缀与上次不再相同,下一请求的缓存命中率会掉`];
+    const e = log.events[target];
+    if (e?.type === "assistant/message" && e.opaque !== undefined)
+      out.push("这条消息的私有回传物不再发送");
+    if (agent.provider.fields?.protocol.startsWith("anthropic")) {
+      out.push("Anthropic 的思考块签名绑定前缀:之后所有消息的思考块都不再回传");
+    }
+    return out;
+  }
+
+  function editCommand(arg: string): string {
+    if (agent.running) return c.zhu("运行中不能编辑,先 Esc 打断");
+    const m = arg.match(/^(\d+)(?:\s+(text|reasoning|content|system))?(?:\s+([\s\S]+))?$/);
+    if (!m)
+      return c.faint(
+        "用法:/edit N [text|reasoning|content|system] [新文本];不给文本则开外部编辑器",
+      );
+    const target = Number(m[1]);
+    const info = editable(target);
+    if (typeof info === "string") return c.zhu(info);
+    const field = (m[2] as EditField | undefined) ?? (info.fields[0] as EditField);
+    if (!info.fields.includes(field)) {
+      return c.zhu(`事件 #${target} 没有字段 ${field},可改:${info.fields.join(" / ")}`);
+    }
+    const e = log.events[target];
+    if (field === "reasoning" && e?.type === "assistant/message" && e.reasoningKind !== "full") {
+      return c.zhu(
+        `事件 #${target} 的思考是${e.reasoningKind === "summary" ? "摘要" : "未标注来源"}:模型读的正文在回传物里,改摘要它看不见。要引导它,追加一条消息(直接输入),或换 DeepSeek 一类回传全文思考的模型`,
+      );
+    }
+    let value = m[3]?.trim();
+    if (!value) {
+      // 长文本走外部编辑器:先让出终端,编辑器退出后再接管。
+      tui.stop();
+      const next = editInExternalEditor(info.current(field), {
+        suffix: field === "reasoning" ? ".txt" : ".md",
+      });
+      tui.start();
+      if (next === undefined) return c.faint("· 未改动,取消");
+      value = next;
+    }
+    log.append({ type: "context/edit", at: now(), target, field, value });
+    return [
+      c.jin(`◇ 已编辑事件 #${target} 的 ${field}(${value.length} 字)`),
+      ...editConsequences(target).map((s) => c.faint(`  · ${s}`)),
+      c.faint("  · 原文仍在事件里;Ctrl+R → 发送分区看改后的投影,事件视图看 context/edit"),
+    ].join("\n");
+  }
+
+  function dropCommand(arg: string): string {
+    if (agent.running) return c.zhu("运行中不能编辑,先 Esc 打断");
+    const m = arg.match(/^(\d+)(?:\s+([\s\S]+))?$/);
+    if (!m) return c.faint("用法:/drop N [备注]");
+    const target = Number(m[1]);
+    const e = log.events[target];
+    if (!e) return c.zhu(`没有事件 #${target}`);
+    if (e.type !== "user/message" && e.type !== "assistant/message") {
+      return c.zhu(`只能丢弃用户消息或助手消息(连同它的工具结果);#${target} 是 ${e.type}`);
+    }
+    const note = m[2]?.trim();
+    log.append({ type: "context/drop", at: now(), target, ...(note && { note }) });
+    const withResults =
+      e.type === "assistant/message" && e.toolCalls.length > 0
+        ? `,连同它的 ${e.toolCalls.length} 个工具结果`
+        : "";
+    return [
+      c.jin(`◇ 已丢弃事件 #${target}${withResults}`),
+      ...editConsequences(target).map((s) => c.faint(`  · ${s}`)),
+    ].join("\n");
+  }
+
+  function editsList(): string {
+    const rows = log.events
+      .map((e, i) => ({ e, i }))
+      .filter(({ e }) => e.type === "context/edit" || e.type === "context/drop");
+    if (rows.length === 0) return c.faint("没有编辑。/edit N 改一条,/drop N 丢一条");
+    return rows
+      .map(({ e, i }) =>
+        e.type === "context/edit"
+          ? `  ${c.jin(`#${i}`)} ${c.ink(`编辑 #${e.target}.${e.field}`)} ${c.faint(`${e.value.length} 字 ${e.at.slice(11, 19)}`)}`
+          : `  ${c.jin(`#${i}`)} ${c.ink(`丢弃 #${(e as { target: number }).target}`)} ${c.faint(e.at.slice(11, 19))}`,
+      )
+      .join("\n");
   }
 
   /** /fork:复制事件前缀到新文件。事件即真相,分叉就是复制前缀,原文件不动。 */

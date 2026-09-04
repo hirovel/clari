@@ -5,8 +5,8 @@ import type { AgentEvent, ToolCall } from "./events.js";
  * 它只描述"模型将看到什么",翻译成 OpenAI/Anthropic 格式是适配器的事。
  */
 export type Message =
-  | { role: "system"; content: string }
-  | { role: "user"; content: string }
+  | { role: "system"; content: string; edited?: true }
+  | { role: "user"; content: string; edited?: true }
   | {
       role: "assistant";
       content: string;
@@ -15,8 +15,47 @@ export type Message =
       reasoningKind?: "full" | "summary";
       /** 适配器私有回传物(Q53),原样透传。 */
       opaque?: unknown;
+      /** 这条消息被 context/edit 改过(Q74):回传物已丢弃;适配器据此决定之后的思考块要不要丢。 */
+      edited?: true;
     }
-  | { role: "tool"; callId: string; name: string; content: string; isError: boolean };
+  | {
+      role: "tool";
+      callId: string;
+      name: string;
+      content: string;
+      isError: boolean;
+      edited?: true;
+    };
+
+/** 编辑状态(Q74):每个目标事件各字段的最新值,以及被丢弃的事件下标。 */
+export function editState(events: readonly AgentEvent[]): {
+  edits: Map<number, Partial<Record<"text" | "reasoning" | "content" | "system", string>>>;
+  dropped: Set<number>;
+} {
+  const edits = new Map<
+    number,
+    Partial<Record<"text" | "reasoning" | "content" | "system", string>>
+  >();
+  const dropped = new Set<number>();
+  for (const e of events) {
+    if (e.type === "context/edit") {
+      const cur = edits.get(e.target) ?? {};
+      cur[e.field] = e.value;
+      edits.set(e.target, cur);
+    } else if (e.type === "context/drop") {
+      dropped.add(e.target);
+      const t = events[e.target];
+      if (t?.type === "assistant/message") {
+        // 丢一条带调用的助手消息,它的应答也得一起走,否则序列非法。
+        const ids = new Set(t.toolCalls.map((c) => c.id));
+        events.forEach((x, i) => {
+          if (x.type === "tool/result" && ids.has(x.callId)) dropped.add(i);
+        });
+      }
+    }
+  }
+  return { edits, dropped };
+}
 
 export const CLEARED_PLACEHOLDER = "[此工具结果已被清除以节省上下文;原文完整保留在会话日志中]";
 
@@ -53,43 +92,62 @@ export function compactionState(events: readonly AgentEvent[]): {
  */
 export function deriveMessages(events: readonly AgentEvent[]): Message[] {
   const c = compactionState(events);
+  const ed = editState(events);
   const messages: Message[] = [];
   for (let i = 0; i < events.length; i++) {
     if (c.summary && i === c.coversFrom) {
       messages.push({ role: "user", content: `[会话前段已压缩,以下为摘要]\n${c.summary}` });
     }
     if (c.summary && i >= c.coversFrom && i < c.coversUpTo) continue;
+    if (ed.dropped.has(i)) continue;
     const e = events[i];
     if (!e) continue;
+    const edit = ed.edits.get(i);
     switch (e.type) {
       case "session/start":
-        messages.push({ role: "system", content: e.system });
-        break;
-      case "user/message":
-        messages.push({ role: "user", content: e.text });
-        break;
-      case "assistant/message":
         messages.push({
-          role: "assistant",
-          content: e.text,
-          toolCalls: e.toolCalls,
-          ...(e.reasoning && { reasoning: e.reasoning }),
-          ...(e.reasoningKind && { reasoningKind: e.reasoningKind }),
-          ...(e.opaque !== undefined && { opaque: e.opaque }),
+          role: "system",
+          content: edit?.system ?? e.system,
+          ...(edit?.system !== undefined && { edited: true }),
         });
         break;
+      case "user/message":
+        messages.push({
+          role: "user",
+          content: edit?.content ?? e.text,
+          ...(edit?.content !== undefined && { edited: true }),
+        });
+        break;
+      case "assistant/message": {
+        const edited = edit?.text !== undefined || edit?.reasoning !== undefined;
+        const reasoning = edit?.reasoning ?? e.reasoning;
+        messages.push({
+          role: "assistant",
+          content: edit?.text ?? e.text,
+          toolCalls: e.toolCalls,
+          ...(reasoning && { reasoning }),
+          ...(e.reasoningKind && { reasoningKind: e.reasoningKind }),
+          // 改过的消息不带回传物:签名或密文与改后的内容不再对应,发回去只会被拒。
+          ...(!edited && e.opaque !== undefined && { opaque: e.opaque }),
+          ...(edited && { edited: true }),
+        });
+        break;
+      }
       case "tool/result":
         messages.push({
           role: "tool",
           callId: e.callId,
           name: e.name,
-          content: c.cleared.has(i) ? CLEARED_PLACEHOLDER : e.content,
+          content: c.cleared.has(i) ? CLEARED_PLACEHOLDER : (edit?.content ?? e.content),
           isError: e.isError,
+          ...(edit?.content !== undefined && { edited: true }),
         });
         break;
       case "session/interrupt":
       case "session/model":
       case "compaction":
+      case "context/edit":
+      case "context/drop":
       case "request":
       case "retry":
       case "request/error":

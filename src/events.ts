@@ -132,6 +132,23 @@ export type AgentEvent =
   | { type: "decision"; at: string; slot: "termination"; steps: number; reason: string }
   /** 执行槽把一批工具调用并行跑了(只在并行策略下、且批内多于一个调用时记)。 */
   | { type: "decision"; at: string; slot: "execution"; parallel: number; tools: string[] }
+  /**
+   * 编辑上下文(Q74):追加事件,不改写历史。投影把目标事件的某个字段换成新值;原文永远留在数组里。
+   * 被编辑的消息不再带私有回传物(签名或密文与改后的内容不再对应);Anthropic 还会丢弃之后所有消息的思考块。
+   * reasoning 只在该消息 reasoningKind 为 full 时允许编辑(摘要改了模型也看不见)。
+   */
+  | {
+      type: "context/edit";
+      at: string;
+      /** 目标事件下标。 */
+      target: number;
+      /** 改哪个字段:text / reasoning 对 assistant;content 对 tool/result 与 user/message;system 对 session/start。 */
+      field: "text" | "reasoning" | "content" | "system";
+      value: string;
+      note?: string;
+    }
+  /** 丢弃一条消息(Q74):user/message,或 assistant/message 连同它的全部工具结果。投影跳过它们。 */
+  | { type: "context/drop"; at: string; target: number; note?: string }
   | {
       /**
        * 压缩(Q31):追加事件,永不改写历史。投影读取它决定跳过什么、注入什么。

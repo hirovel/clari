@@ -282,7 +282,10 @@ export function toAnthropicWire(
 } {
   let systemText: string | undefined;
   const out: { role: "user" | "assistant"; content: WireBlock[] }[] = [];
+  // 思考块的签名绑定它之前的整个前缀(Q74):前面任何一条消息被改过,后面的思考块就都不再回传。
+  let prefixEdited = false;
   for (const m of messages) {
+    if (m.edited) prefixEdited = true;
     switch (m.role) {
       case "system":
         systemText = systemText ? `${systemText}\n\n${m.content}` : m.content;
@@ -292,7 +295,11 @@ export function toAnthropicWire(
         break;
       case "assistant": {
         const content: WireBlock[] = [];
-        if (isAnthropicOpaque(m.opaque) && (!opts.model || m.opaque.model === opts.model)) {
+        if (
+          !prefixEdited &&
+          isAnthropicOpaque(m.opaque) &&
+          (!opts.model || m.opaque.model === opts.model)
+        ) {
           content.push(...m.opaque.blocks);
         }
         if (m.content) content.push({ type: "text", text: m.content });

@@ -133,7 +133,7 @@ describe("会话恢复(Q54)", () => {
     expect(doc).toContain("› 第一轮");
     expect(doc).toContain("第一轮回复");
     expect(doc).toContain("已恢复会话");
-    expect(doc).toContain("· #1"); // 历史请求小结也在
+    expect(doc).toContain("发送 #1"); // 历史请求的发送卡也在
     expect(log.events.filter((e) => e.type === "session/start")).toHaveLength(1);
     expect(log.events.filter((e) => e.type === "session/model")).toHaveLength(0);
 

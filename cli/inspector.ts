@@ -14,7 +14,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { estimateTokens } from "../src/context.js";
 import type { AgentEvent } from "../src/events.js";
-import { compactionState, deriveMessages, type Message } from "../src/messages.js";
+import { compactionState, deriveMessages, editState, type Message } from "../src/messages.js";
 import { type Provider, parseEffort, type ToolDef } from "../src/provider.js";
 import { c } from "./theme.js";
 
@@ -72,6 +72,8 @@ export function collectRequests(events: readonly AgentEvent[]): RequestRecord[] 
       case "decision":
       case "session/interrupt":
       case "session/model":
+      case "context/edit":
+      case "context/drop":
         pending.push(e);
         break;
       default:
@@ -325,6 +327,14 @@ export function decisionLines(rec: RequestRecord): string[] {
       case "session/model":
         lines.push(`${c.jin("◇")} 切换模型:${e.model}`);
         break;
+      case "context/edit":
+        lines.push(
+          `${c.zhu("◇")} 用户编辑了事件 #${e.target} 的 ${e.field}(${e.value.length} 字${e.note ? `;${e.note}` : ""})`,
+        );
+        break;
+      case "context/drop":
+        lines.push(`${c.zhu("◇")} 用户丢弃了事件 #${e.target}${e.note ? `(${e.note})` : ""}`);
+        break;
       default:
         break;
     }
@@ -361,7 +371,7 @@ export function sentLines(
   messages.forEach((m, i) => {
     const tok = messageTokens(m);
     lines.push(
-      `${c.jin(`[${i + 1}] ${roleLabel(m)}`)}  ${c.soft(`${tok} tok · ${pctOf(tok, total)}`)}`,
+      `${c.jin(`[${i + 1}] ${roleLabel(m)}`)}  ${c.soft(`${tok} tok · ${pctOf(tok, total)}`)}${m.edited ? c.zhu("  ✎ 已编辑(原文见事件视图)") : ""}`,
     );
     // 系统提示词按段拆开(Q51):角色、环境、项目指令各占多少。
     if (m.role === "system" && sections && sections.length > 0) {
@@ -527,9 +537,12 @@ export function messagesFor(events: readonly AgentEvent[], rec: RequestRecord): 
 }
 
 const PROJECTED = new Set(["session/start", "user/message", "assistant/message", "tool/result"]);
+const SHAPES = new Set(["compaction", "context/edit", "context/drop"]);
 
 function visibility(e: AgentEvent): string {
-  return PROJECTED.has(e.type) ? "模型可见" : "只给人看";
+  if (PROJECTED.has(e.type)) return "模型可见";
+  if (SHAPES.has(e.type)) return "改变投影";
+  return "只给人看";
 }
 
 function jsonLines(e: AgentEvent, pad: string): string[] {
@@ -571,8 +584,11 @@ export function eventRow(events: readonly AgentEvent[], i: number, selected: boo
   const e = events[i];
   if (!e) return "";
   const state = compactionState(events);
+  const ed = editState(events);
   let flag = "";
-  if (e.type === "tool/result" && state.cleared.has(i)) flag = "  已清除→占位";
+  if (ed.dropped.has(i)) flag = "  已丢弃";
+  else if (ed.edits.has(i)) flag = `  已编辑(${Object.keys(ed.edits.get(i) ?? {}).join(",")})`;
+  else if (e.type === "tool/result" && state.cleared.has(i)) flag = "  已清除→占位";
   else if (state.summary && i >= state.coversFrom && i < state.coversUpTo) flag = "  已被摘要覆盖";
   const size = JSON.stringify(e).length;
   const body = `${`#${i}`.padEnd(5)} ${clock(e.at)}  ${e.type.padEnd(18)} ${String(size).padStart(7)} 字符  ${visibility(e)}${flag}`;
@@ -590,8 +606,14 @@ export function eventLines(events: readonly AgentEvent[], i: number): string[] {
   const e = events[i];
   if (!e) return [c.faint("(无此事件)")];
   const state = compactionState(events);
+  const ed = editState(events);
   const notes: string[] = [visibility(e)];
-  if (e.type === "tool/result" && state.cleared.has(i)) {
+  if (ed.dropped.has(i)) notes.push("投影时已被丢弃(原文仍在这里)");
+  else if (ed.edits.has(i)) {
+    notes.push(
+      `投影时字段 ${Object.keys(ed.edits.get(i) ?? {}).join(",")} 已换成编辑后的值(原文仍在这里;编辑事件见后面的 context/edit)`,
+    );
+  } else if (e.type === "tool/result" && state.cleared.has(i)) {
     notes.push("投影时已换成占位文本(原文仍在这里)");
   } else if (state.summary && i >= state.coversFrom && i < state.coversUpTo) {
     notes.push("投影时已被摘要取代(原文仍在这里)");

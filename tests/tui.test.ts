@@ -199,9 +199,13 @@ describe("TUI 壳", () => {
     });
     await app.submit("跑");
     let doc = text(app);
-    expect(doc).toContain("· #1  2 条消息");
+    // 发送卡:参数、消息结构、合计;接收卡头行:停止原因、耗时、实测用量。
+    expect(doc).toContain("发送 #1");
+    expect(doc).toContain("2 条消息");
+    expect(doc).toContain("接收 #1");
     expect(doc).toContain("→ 实测 1.2k");
-    expect(doc).toContain("· #2  4 条消息");
+    expect(doc).toContain("发送 #2");
+    expect(doc).toContain("4 条消息");
     expect(doc).toContain("行10"); // 默认完整显示(Q34)
     expect(doc).toContain("先拿到输出");
 
