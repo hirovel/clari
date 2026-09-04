@@ -115,6 +115,7 @@ const baseTools = buildTools(
   (child) => app?.attachChild(child),
   memory,
   args.skillsLoad === "tool" ? skills : undefined,
+  boot.config.fetch,
 );
 // 扩展模块的工具重名时覆盖内置的。
 const tools = [

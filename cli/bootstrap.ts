@@ -37,6 +37,7 @@ import {
   type Skill,
 } from "./prompt.js";
 import { bashTool } from "./tools/bash.js";
+import { createFetchTool, type FetchConfig } from "./tools/fetch.js";
 import { editTool, readTool, writeTool } from "./tools/fs.js";
 import { createRememberTool, type MemoryFiles } from "./tools/memory.js";
 import { globTool, grepTool, lsTool } from "./tools/search.js";
@@ -430,8 +431,19 @@ export function buildTools(
   memory?: MemoryFiles,
   /** skills.load = tool 时给:装一个 skill 工具,模型点名即拿到正文。 */
   skills?: Skill[],
+  /** fetch 工具的安全边界(Q86);不给用缺省(拒私网、30 秒、5 MB)。 */
+  fetchConfig?: FetchConfig,
 ): Tool[] {
-  const base: Tool[] = [readTool, writeTool, editTool, bashTool, grepTool, globTool, lsTool];
+  const base: Tool[] = [
+    readTool,
+    writeTool,
+    editTool,
+    bashTool,
+    grepTool,
+    globTool,
+    lsTool,
+    createFetchTool({ ...(fetchConfig && { config: fetchConfig }) }),
+  ];
   if (memory) base.push(createRememberTool(memory));
   if (skills?.some((s) => !s.disableModelInvocation)) base.push(createSkillTool(skills));
   if (!subagent) return base;

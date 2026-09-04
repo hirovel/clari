@@ -74,6 +74,7 @@ const baseTools = buildTools(
   undefined,
   args.memory ? memoryFiles() : undefined,
   args.skillsLoad === "tool" ? discoverSkills(process.cwd()) : undefined,
+  boot.config.fetch,
 );
 const tools = [
   ...baseTools.filter((t) => !ext.tools?.some((x) => x.name === t.name)),

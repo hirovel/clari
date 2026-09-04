@@ -35,6 +35,7 @@ const PATH_TOOLS = new Set(["read", "write", "edit", "ls", "glob", "grep"]);
 export function subjectOf(call: ToolCall): string | undefined {
   const a = (call.args ?? {}) as Record<string, unknown>;
   if (call.name === "bash") return typeof a.command === "string" ? a.command : undefined;
+  if (call.name === "fetch") return typeof a.url === "string" ? a.url : undefined;
   if (PATH_TOOLS.has(call.name)) return typeof a.path === "string" ? a.path : ".";
   return undefined;
 }

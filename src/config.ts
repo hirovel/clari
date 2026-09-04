@@ -119,6 +119,14 @@ export type KernelConfig = {
   sessionsDir?: string;
   /** 审批规则(Q84):缺省只读工具放行、其余问人、cwd 之外必问。 */
   approval?: ApprovalConfig;
+  /** fetch 工具的安全边界(Q86):私网放行、超时、字节上限、重定向次数。 */
+  fetch?: {
+    allowPrivate?: boolean;
+    timeoutMs?: number;
+    maxBytes?: number;
+    maxRedirects?: number;
+    userAgent?: string;
+  };
 };
 
 /** 用户目录:环境变量 CLARI_HOME 指定,否则 ~/.clari。 */
