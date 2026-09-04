@@ -502,6 +502,11 @@ export function receivedLines(rec: RequestRecord, raw: string[] | undefined): st
       lines.push(...indent(r.reasoning).map((l) => c.faint(c.italic(l))));
       lines.push("");
     }
+    if (r.extras && Object.keys(r.extras).length > 0) {
+      lines.push(c.jin("extras(供应商元数据,不解释)"));
+      lines.push(...indent(JSON.stringify(r.extras, null, 2)).map((l) => c.faint(l)));
+      lines.push("");
+    }
     if (r.opaque !== undefined) {
       const o = r.opaque as { kind?: string; blocks?: unknown[]; items?: unknown[] };
       const n = o.blocks?.length ?? o.items?.length ?? 0;
@@ -957,6 +962,18 @@ export class RequestInspector implements Component {
   }
 
   private messageSelected = 0;
+
+  /** 直接定位到第 n 次请求的某个分区(/raw N → 接收分区)。没有该请求返回 false。 */
+  showRequest(n: number, section: Section): boolean {
+    const idx = this.records().findIndex((r) => r.n === n);
+    if (idx < 0) return false;
+    this.sessionIndex = 0;
+    this.selected = idx;
+    this.section = section;
+    this.mode = "detail";
+    this.scroll = 0;
+    return true;
+  }
 
   /** 直接进入组装视图(Ctrl+E / /context)。 */
   showComposition(): void {

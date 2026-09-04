@@ -25,6 +25,8 @@ export type AnthropicEvent =
   | {
       type: "message_start";
       message: {
+        id?: string;
+        model?: string;
         usage?: {
           input_tokens?: number;
           cache_creation_input_tokens?: number;
@@ -55,7 +57,7 @@ export type AnthropicEvent =
   | { type: "content_block_stop"; index: number }
   | {
       type: "message_delta";
-      delta: { stop_reason?: string | null };
+      delta: { stop_reason?: string | null; stop_sequence?: string | null };
       usage?: { output_tokens?: number };
     }
   | { type: "message_stop" }
@@ -93,10 +95,12 @@ export type AnthropicAcc = {
   cacheWriteTokens?: number;
   outputTokens?: number;
   error?: string;
+  /** 不解释的响应元数据(Q82):id、服务模型、原始 stop_reason、stop_sequence。 */
+  extras: Record<string, unknown>;
 };
 
 export function newAnthropicAcc(): AnthropicAcc {
-  return { text: "", blocks: new Map(), thinking: new Map() };
+  return { text: "", blocks: new Map(), thinking: new Map(), extras: {} };
 }
 
 /** 已累积的思考文本(给人看的那份)。 */
@@ -111,6 +115,8 @@ export function thinkingText(acc: AnthropicAcc): string {
 export function feedAnthropicEvent(acc: AnthropicAcc, ev: AnthropicEvent): string {
   switch (ev.type) {
     case "message_start": {
+      if (ev.message.id) acc.extras.id = ev.message.id;
+      if (ev.message.model) acc.extras.model = ev.message.model;
       // Anthropic 的 input_tokens 不含缓存部分;占用窗口的是三者之和。
       const u = ev.message.usage;
       if (
@@ -164,7 +170,11 @@ export function feedAnthropicEvent(acc: AnthropicAcc, ev: AnthropicEvent): strin
       return "";
     }
     case "message_delta":
-      if (ev.delta.stop_reason) acc.stopReason = ev.delta.stop_reason;
+      if (ev.delta.stop_reason) {
+        acc.stopReason = ev.delta.stop_reason;
+        acc.extras.stop_reason = ev.delta.stop_reason;
+      }
+      if (ev.delta.stop_sequence) acc.extras.stop_sequence = ev.delta.stop_sequence;
       if (ev.usage?.output_tokens !== undefined) acc.outputTokens = ev.usage.output_tokens;
       return "";
     case "error":
@@ -218,6 +228,7 @@ export function finishAnthropicAcc(
     ...(blocks.length > 0 && {
       opaque: { kind: "anthropic-thinking", model, blocks } satisfies AnthropicOpaque,
     }),
+    ...(Object.keys(acc.extras).length > 0 && { extras: acc.extras }),
   };
 }
 
@@ -238,9 +249,10 @@ export const ANTHROPIC_FIELDS: FieldTable = {
     "content_block_delta:text_delta → text;input_json_delta → 工具参数;thinking_delta → reasoning;signature_delta → 签名",
     "message_delta.delta.stop_reason → stopReason(max_tokens → 截断);message_delta.usage.output_tokens → outputTokens",
     "error → 流内错误",
+    "message.id · message.model · stop_reason 原文 · stop_sequence → extras(不解释,原样存)",
   ],
   ignores: [
-    "message_stop、ping、message.id、message.model、stop_sequence",
+    "message_stop、ping",
     "stop_details(refusal 分类)、citations、server tool 结果块、container",
     "thinking 文本在 4.7 起只是摘要或空串(display 参数决定),真正的推理正文在签名块里,客户端读不到",
   ],

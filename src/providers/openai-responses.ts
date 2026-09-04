@@ -60,6 +60,8 @@ export type ResponsesEvent = {
     content?: { type: string; text?: string }[];
   };
   response?: {
+    id?: string;
+    model?: string;
     status?: string;
     incomplete_details?: { reason?: string };
     error?: { message?: string; code?: string };
@@ -91,10 +93,12 @@ export type ResponsesAcc = {
   incompleteReason?: string;
   usage?: Usage;
   error?: string;
+  /** 不解释的响应元数据(Q82):id、服务模型、status、incomplete_details。 */
+  extras: Record<string, unknown>;
 };
 
 export function newResponsesAcc(): ResponsesAcc {
-  return { items: new Map() };
+  return { items: new Map(), extras: {} };
 }
 
 function itemAt(acc: ResponsesAcc, index: number, type = ""): Item {
@@ -158,6 +162,10 @@ export function feedResponsesEvent(acc: ResponsesAcc, ev: ResponsesEvent): strin
     case "response.failed": {
       const r = ev.response;
       acc.status = r?.status ?? ev.type.replace("response.", "");
+      if (r?.id) acc.extras.id = r.id;
+      if (r?.model) acc.extras.model = r.model;
+      acc.extras.status = acc.status;
+      if (r?.incomplete_details) acc.extras.incomplete_details = r.incomplete_details;
       if (r?.incomplete_details?.reason) acc.incompleteReason = r.incomplete_details.reason;
       if (r?.error?.message) acc.error = `${r.error.code ?? "error"}: ${r.error.message}`;
       const u = r?.usage;
@@ -236,6 +244,7 @@ export function finishResponsesAcc(acc: ResponsesAcc, aborted: boolean, model = 
       items.length > 0 && {
         opaque: { kind: "openai-reasoning", model, items } satisfies OpenAIReasoningOpaque,
       }),
+    ...(Object.keys(acc.extras).length > 0 && { extras: acc.extras }),
   };
 }
 
@@ -342,6 +351,7 @@ export const OPENAI_RESPONSES_FIELDS: FieldTable = {
     "reasoning 项的 encrypted_content + id → opaque(原样回传)",
     "response.completed / incomplete / failed:usage.input_tokens / output_tokens / input_tokens_details.cached_tokens / output_tokens_details.reasoning_tokens;incomplete_details.reason = max_output_tokens → 截断",
     "error → 流内错误",
+    "response.id · response.model · status · incomplete_details → extras(不解释,原样存)",
   ],
   ignores: [
     "response.created / in_progress、content_part 事件、annotations、refusal 内容块、web_search 等内置工具项",

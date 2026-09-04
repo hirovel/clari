@@ -64,6 +64,11 @@ export type AgentEvent =
       opaque?: unknown;
       /** 从发出请求到收齐响应的毫秒数。只给人看。 */
       latencyMs?: number;
+      /**
+       * 供应商返回的、内核不解释的元数据(Q82):响应 id、实际服务的模型、原始停止原因、stop_sequence、
+       * system_fingerprint 之类。只给人看;原样保存,排查"软件自己处理出问题"时对照 raw 用。
+       */
+      extras?: Record<string, unknown>;
     }
   | {
       type: "tool/result";

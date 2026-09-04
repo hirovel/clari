@@ -16,6 +16,8 @@ export type AssistantTurn = {
   toolCalls: ToolCall[];
   stopReason: StopReason;
   usage?: Usage;
+  /** 供应商返回的、不解释的元数据(响应 id、服务模型、原始停止原因等)。只给人看。 */
+  extras?: Record<string, unknown>;
   /** thinking 模型的推理内容(可读文本);带工具的多轮里 DeepSeek 要求原样回传。 */
   reasoning?: string;
   /** reasoning 是模型读回去的全文,还是只给人看的摘要(正文在 opaque 里)。 */
@@ -153,6 +155,9 @@ export function openaiEffortParams(
 
 /** OpenAI 兼容协议流式 chunk 的最小类型。只声明用到的字段,未声明的一律不读。 */
 export type SseChunk = {
+  id?: string;
+  model?: string;
+  system_fingerprint?: string | null;
   choices?: {
     delta?: {
       content?: string | null;
@@ -183,16 +188,24 @@ export type StreamAcc = {
   toolCalls: { id: string; name: string; argsJson: string }[];
   finishReason?: string;
   usage?: Usage;
+  /** 不解释的响应元数据(Q82)。 */
+  extras: Record<string, unknown>;
 };
 
 export function newAcc(): StreamAcc {
-  return { text: "", reasoning: "", toolCalls: [] };
+  return { text: "", reasoning: "", toolCalls: [], extras: {} };
 }
 
 /** 喂入一个已解析的 SSE chunk(data: 后面的 JSON 对象)。返回本 chunk 的文本增量。 */
 export function feedChunk(acc: StreamAcc, chunk: SseChunk): string {
   const choice = chunk.choices?.[0];
   let delta = "";
+  // 元数据每个 chunk 都带,记一次即可;finish_reason 原文另存,内核归一后的 stopReason 是另一回事。
+  if (chunk.id && acc.extras.id === undefined) acc.extras.id = chunk.id;
+  if (chunk.model && acc.extras.model === undefined) acc.extras.model = chunk.model;
+  if (chunk.system_fingerprint && acc.extras.system_fingerprint === undefined)
+    acc.extras.system_fingerprint = chunk.system_fingerprint;
+  if (choice?.finish_reason) acc.extras.finish_reason = choice.finish_reason;
   if (choice?.delta?.content) {
     delta = choice.delta.content;
     acc.text += delta;
@@ -250,6 +263,7 @@ export function finishAcc(acc: StreamAcc, aborted: boolean): AssistantTurn {
     ...(acc.usage && { usage: acc.usage }),
     // reasoning_content 是模型下一轮真正读回去的全文,不是摘要。
     ...(acc.reasoning && { reasoning: acc.reasoning, reasoningKind: "full" as const }),
+    ...(Object.keys(acc.extras).length > 0 && { extras: acc.extras }),
   };
 }
 
@@ -274,9 +288,10 @@ export const OPENAI_COMPAT_FIELDS: FieldTable = {
     "usage.prompt_tokens / completion_tokens → inputTokens / outputTokens",
     "usage.prompt_cache_hit_tokens 或 prompt_tokens_details.cached_tokens → cacheReadTokens",
     "usage.completion_tokens_details.reasoning_tokens → reasoningTokens",
+    "id · model · system_fingerprint · finish_reason 原文 → extras(不解释,原样存)",
   ],
   ignores: [
-    "choices[].delta.refusal、logprobs、system_fingerprint、id、created",
+    "choices[].delta.refusal、logprobs、created",
     "GPT 在此协议上不返回任何推理内容,只有 reasoning_tokens 一个数字;要看推理摘要用 openai-responses 协议",
   ],
 };

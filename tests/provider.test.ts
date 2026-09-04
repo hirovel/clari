@@ -16,6 +16,7 @@ describe("stream accumulation", () => {
       toolCalls: [],
       stopReason: "end",
       usage: { inputTokens: 10, outputTokens: 2 },
+      extras: { finish_reason: "stop" },
     });
   });
 

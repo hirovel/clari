@@ -104,7 +104,7 @@ export function parseCommonArgs(argv: string[]): CommonArgs {
   const out: CommonArgs = {
     compaction: "llm",
     subagent: false,
-    trace: false,
+    trace: true,
     fold: false,
     continue: false,
     json: false,
@@ -157,6 +157,9 @@ export function parseCommonArgs(argv: string[]): CommonArgs {
         break;
       case "--trace":
         out.trace = true;
+        break;
+      case "--no-trace":
+        out.trace = false;
         break;
       case "--fold":
         out.fold = true;
@@ -250,7 +253,7 @@ export const USAGE = `用法
   --extension <模块.mjs>         装载扩展模块(可多次):加工具、换槽实现
   --max-steps N                  终止保底(缺省不设上限)
   --subagent                     装上 task 工具(子 agent)
-  --trace                        逐行记录原始流,并写 <会话>.trace.jsonl
+  --no-trace                     不记录原始流(缺省逐行记录收到的每一行,写 <会话>.trace.jsonl,/raw N 查看)
   --fold                         工具结果初始折叠(Ctrl+O 切换)
   --json                         一次性模式输出结构化结果
   --events                       一次性模式把每条事件以 JSON 行写到 stdout

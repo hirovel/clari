@@ -1,10 +1,10 @@
 // TUI 入口:参数、配置、供应商匹配、工具与压缩组装(见 bootstrap.ts),然后把界面交给 tui-app。
 // 用法:pnpm tui [-- --model <供应商/模型>] [--effort <级别>] [--compaction llm|clear|pipeline]
 //                [--resume <会话文件> | --continue] [--system-prompt <文件>] [--append-system-prompt <文件>]
-//                [--subagent] [--trace] [--fold]
+//                [--subagent] [--no-trace] [--fold]
 //   --effort   强度级别 off|low|medium|high|xhigh|max;缺省不传,用供应商默认
 //   --resume   恢复会话并沿用同一文件继续;--continue 取 sessions/ 下最近一次
-//   --trace    逐行记录收到的原始流:检视器"接收"分区可看,并写入 <会话>.trace.jsonl
+//   --no-trace 不记录原始流(缺省逐行记录:检视器"接收"分区、/raw N 可看,并写入 <会话>.trace.jsonl)
 //   --fold     工具结果初始折叠(Ctrl+O 随时切换;缺省完整显示)
 //   --approve ask  每个工具调用在界面里问一次(y 允许 / n 拒绝 / a 本会话总是允许该工具);缺省 all 不问
 import { appendFileSync } from "node:fs";

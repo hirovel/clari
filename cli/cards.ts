@@ -241,7 +241,23 @@ export function receiveBlockLines(e: AssistantEvent): string[] {
       ),
     );
   }
+  // 供应商元数据(Q82):不解释,原样列出;与内核归一后的 stopReason 并排,两者不一致就能看见。
+  if (e.extras && Object.keys(e.extras).length > 0) {
+    lines.push(
+      row(
+        "extras",
+        Object.entries(e.extras)
+          .map(([k, v]) => `${k} ${typeof v === "string" ? v : JSON.stringify(v)}`)
+          .join(" · "),
+      ),
+    );
+  }
   return lines;
+}
+
+/** 接收卡尾行:这次响应的原始流有几行、去哪看。有它就永远能对照"解析出来的"与"收到的"。 */
+export function rawRow(lineCount: number, n: number): string {
+  return row("raw", `${lineCount} lines · /raw ${n} · Ctrl+R → request #${n} → received`);
 }
 
 /** 思考块的标题:全文与摘要必须让人一眼分清,这决定了它能不能被编辑来引导模型。 */

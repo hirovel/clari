@@ -56,6 +56,7 @@ describe("Anthropic 流式累积", () => {
       toolCalls: [{ id: "tu_1", name: "read", args: { path: "a.ts" } }],
       stopReason: "tool",
       usage: { inputTokens: 120, outputTokens: 30 },
+      extras: { stop_reason: "tool_use" },
     });
   });
 

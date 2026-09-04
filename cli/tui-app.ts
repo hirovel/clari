@@ -48,6 +48,7 @@ import { forkSession, loadCompactionStrategy, SESSIONS_DIR } from "./bootstrap.j
 import {
   errorCardLines,
   predictedCache,
+  rawRow,
   reasoningTitle,
   receiveBlockLines,
   receiveHead,
@@ -196,6 +197,11 @@ const COMMANDS = [
   },
   { name: "slots", description: "Show every strategy slot and its current implementation" },
   {
+    name: "tools",
+    description: "Tool definitions sent with every request: name, tokens, concurrency, params",
+  },
+  { name: "raw", description: "Raw stream of request N as received, line by line: /raw N" },
+  {
     name: "skills",
     description: "List skills: source, description size, model-invocable, allowed tools",
   },
@@ -223,6 +229,9 @@ const COMMANDS = [
 
 /** 引导线:子 agent 的每一行都带它,一眼分清层级;不是框线(Q45)。 */
 const GUIDE = `  ${c.faint("┆")} `;
+
+/** 内存里保留的原始流行数上限;超过就整桶淘汰最旧请求的 raw(磁盘旁路文件不受影响)。 */
+const RAW_LINE_CAP = 100_000;
 
 export function createTuiApp(deps: TuiAppDeps): TuiApp {
   const { log, tools, compaction } = deps;
@@ -281,6 +290,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
   // 请求层记录(Q48):发出每个请求时用的 provider,以及开 trace 时收到的原始流。都不进日志。
   const providersAt = new Map<number, Provider>();
   const rawAt = new Map<number, string[]>();
+  let rawLines = 0;
   let requestCount = 0;
   let lastRequestIndex = -1;
 
@@ -308,6 +318,13 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       const bucket = rawAt.get(lastRequestIndex) ?? [];
       bucket.push(line);
       rawAt.set(lastRequestIndex, bucket);
+      // 缺省开(Q82),内存里只留最近 RAW_LINE_CAP 行:整桶淘汰最旧的请求,磁盘旁路文件不删。
+      rawLines++;
+      while (rawLines > RAW_LINE_CAP && rawAt.size > 1) {
+        const oldest = rawAt.keys().next().value as number;
+        rawLines -= rawAt.get(oldest)?.length ?? 0;
+        rawAt.delete(oldest);
+      }
     }
     deps.onRaw?.(lastRequestIndex, line);
   };
@@ -602,9 +619,10 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     requestRender: () => tui.requestRender(),
   });
 
-  function openInspector(): void {
+  function openInspector(opts: { keep?: boolean } = {}): void {
     if (overlay) return;
-    inspector.reset();
+    // keep:调用方已经定好位(如 /raw N),不回到列表。
+    if (!opts.keep) inspector.reset();
     overlay = tui.showOverlay(inspector, { width: "100%", maxHeight: "100%", anchor: "top-left" });
     tui.requestRender();
   }
@@ -693,6 +711,11 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
         }
         // 响应里除思考与文本之外的块:私有回传物(签名思考块、加密推理项)。
         for (const l of receiveBlockLines(e)) transcript.addChild(new Text(l, 1, 0));
+        // 原始流缺省开(Q82):每张接收卡尾行说明收了几行、去哪看。
+        if (deps.trace) {
+          const raw = rawAt.get(lastTurnRequestIndex);
+          if (raw) transcript.addChild(new Text(rawRow(raw.length, requestCount), 1, 0));
+        }
         if (e.stopReason === "aborted") note(c.faint("— 已打断 —"));
         if (e.stopReason === "length") note(c.jin("◇ 输出被截断,已要求模型重发"));
         break;
@@ -927,6 +950,28 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
         openInspector();
         inspector.showComposition();
         tui.requestRender();
+        break;
+      case "raw": {
+        // /raw N:第 N 次请求的原始流,直接落到检视器接收分区。
+        const n = Number(arg);
+        if (!Number.isInteger(n) || n < 1) {
+          note(
+            c.faint(
+              `Usage: /raw N  (1..${requestCount}); raw capture is ${deps.trace ? "on" : "off (--no-trace)"}`,
+            ),
+          );
+          break;
+        }
+        if (!inspector.showRequest(n, 6)) {
+          note(c.zhu(`No request #${n} (${requestCount} so far)`));
+          break;
+        }
+        openInspector({ keep: true });
+        tui.requestRender();
+        break;
+      }
+      case "tools":
+        note(toolsList());
         break;
       case "context":
         note(renderContext());
@@ -1379,6 +1424,26 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       default:
         return c.zhu(`unknown slot ${slot}`);
     }
+  }
+
+  /** /tools:随请求发出的每个工具定义:名字、定义占的 token、并行安全、描述首行。 */
+  function toolsList(): string {
+    const total = tools.reduce(
+      (s, t) => s + Math.ceil(JSON.stringify(defs().find((d) => d.name === t.name)).length / 4),
+      0,
+    );
+    const rows = tools.map((t) => {
+      const def = defs().find((d) => d.name === t.name);
+      const tok = Math.ceil(JSON.stringify(def).length / 4);
+      const params = Object.keys(
+        (t.parameters as { properties?: Record<string, unknown> }).properties ?? {},
+      );
+      return `  ${c.jin(t.name.padEnd(10))} ${c.soft(String(tok).padStart(5))} ${c.faint("tok")}  ${c.faint((t.concurrency === "parallel" ? "parallel" : "sequential").padEnd(10))} ${c.ink(t.description.split("\n")[0]?.slice(0, 70) ?? "")}\n${" ".repeat(13)}${c.faint(`params: ${params.join(", ") || "(none)"}`)}`;
+    });
+    return [
+      `${c.soft("Tools")} ${c.ink(`${tools.length}`)}  ${c.faint(`≈${total} tok of definitions sent with every request · full JSON in Ctrl+R → tool definitions`)}`,
+      ...rows,
+    ].join("\n");
   }
 
   /** /skills:每个技能的来源、描述占的 token、能否被模型调用、免审批工具。 */

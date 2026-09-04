@@ -12,12 +12,12 @@
 ## 现在能做什么
 
 - 读、写、编辑文件,跑命令,grep / glob / ls,派生子 agent
-- 三种协议(OpenAI chat completions、OpenAI Responses、Anthropic Messages),配置驱动的模型能力数据,`extraBody` 透传新参数,`/models` 实时发现模型下线,`/fields` 列出当前协议发什么、读什么、不读什么
+- 三种协议(OpenAI chat completions、OpenAI Responses、Anthropic Messages),配置驱动的模型能力数据,`extraBody` 透传新参数,`/models` 实时发现模型下线,`/fields` 列出当前协议发什么、读什么、不读什么,供应商元数据(响应 id、服务模型、原始停止原因)原样存进 `extras`
 - 主屏每次请求一张发送卡(参数、系统段、工具、未变前缀、新增消息、合计)与一张接收卡(停止原因、耗时、实测与缓存命中率、费用,之下是思考、正文、调用、回传物);思考块标明是全文还是摘要
 - 编辑上下文:`/edit N [字段] [文本]`、`/drop N`、`/retry`,追加事件改投影,原文永远留在数组里;全文思考(DeepSeek 一类)可改来引导模型,摘要思考(Claude、GPT)拒绝并指向追加消息;每次改动的后果(哪几条重算、丢几个思考块、缓存预计与实测)在卡片上明示
 - 自动 / 手动压缩,三种内置策略(LLM 摘要、清除旧工具结果、两者串联),外部策略模块 `--compaction ./my-strategy.mjs`
 - 会话恢复 `--continue`,一次性模式 `pnpm once -- "任务" --json`(策略 A/B 的执行器)
-- 请求检视器(Ctrl+R):一行一请求 → 概要 / 决策 / 发送 / 工具定义 / 线路 JSON / 接收 / 写入
+- 请求检视器(Ctrl+R):一行一请求 → 概要 / 决策 / 发送 / 工具定义 / 线路 JSON / 接收(含原始流,缺省记录,`/raw N` 直达)/ 写入;`/tools` 列出随请求发出的工具定义与 token
 - 事件视图:内核维护的全部事件逐条查看;压缩对照:原文 ↔ 摘要,带 token 与压缩比;组装视图(Ctrl+E):模型下一步看到的每条消息从哪个事件来、经过了哪些阶段(摘要 / 清除 / 编辑 / 丢弃)、落在线路正文的第几条;组装槽 `slots.assemble` 可换投影,差异照样记进请求事件
 - 子 agent 视图:嵌套引导线、一行进度加尾窗、检视器一键切到子会话
 - 系统提示词按段组装(角色 / 环境 / 项目指令 / 记忆 / 追加),`--prompt-sections` 选段与顺序,`--instructions-as` 决定放 system 还是首条 user 消息,`/prompt` 看各段占比;`--preset 名` 一键套用配置里的参数组合
@@ -73,7 +73,7 @@ key 从不进日志、不进请求正文、不进检视器;线路 JSON 分区看
 常用:
 
 ```bash
-pnpm tui -- --model anthropic/claude-sonnet-5 --effort high --trace
+pnpm tui -- --model anthropic/claude-sonnet-5 --effort high
 pnpm tui -- --continue
 pnpm once -- "把 src 下的 TODO 归类" --json
 pnpm replay sessions/<文件>.jsonl --request 3
