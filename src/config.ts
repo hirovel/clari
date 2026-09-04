@@ -155,6 +155,10 @@ export type KernelConfig = {
     maxBytes?: number;
     maxRedirects?: number;
     userAgent?: string;
+    /** 会话内缓存存活毫秒数,缺省 15 分钟;0 关。 */
+    cacheTtlMs?: number;
+    /** 每主机每分钟最多几次真实请求,缺省 10;0 不限。 */
+    perHostPerMinute?: number;
   };
 };
 
