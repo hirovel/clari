@@ -1,7 +1,6 @@
 // 两个入口(tui.ts 交互、run.ts 一次性)共用的组装:参数、配置、模型、工具、压缩、会话文件、系统提示词。
 // 只做拼装,不含界面。
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
@@ -11,6 +10,7 @@ import {
   pipeline,
 } from "../src/compaction.js";
 import {
+  clariHome,
   createProvider,
   DEFAULT_CONFIG_PATH,
   type KernelConfig,
@@ -248,10 +248,10 @@ export const USAGE = `用法
 
 配置
   ${DEFAULT_CONFIG_PATH}
-  环境变量 KERNEL_CONFIG 可改路径;key 走 apiKeyEnv 指向的环境变量,或界面里 /key 供应商 密钥
-  会话文件缺省在 ./sessions/;配置 sessionsDir 或环境变量 KERNEL_SESSIONS 可改
-  提示词模板 ~/.agent-kernel/prompts/*.md 与 <git 根>/.agent-kernel/prompts/*.md,界面里 /名 参数
-  技能 ~/.agent-kernel/skills/<名>/SKILL.md 与 <git 根>/.agents/skills/<名>/SKILL.md,进系统提示词的技能段`;
+  环境变量 CLARI_CONFIG 可改路径;key 走 apiKeyEnv 指向的环境变量,或界面里 /key 供应商 密钥
+  会话文件缺省在 ./sessions/;配置 sessionsDir 或环境变量 CLARI_SESSIONS 可改
+  提示词模板 ~/.clari/prompts/*.md 与 <git 根>/.clari/prompts/*.md,界面里 /名 参数
+  技能 ~/.clari/skills/<名>/SKILL.md 与 <git 根>/.agents/skills/<名>/SKILL.md,进系统提示词的技能段`;
 
 export type Bootstrap = {
   config: KernelConfig;
@@ -381,11 +381,8 @@ export async function buildCompaction(
   return { strategy: await loadCompactionStrategy(name), window, reserveTokens };
 }
 
-/** 记忆文件(Q65):项目级 = git 根(或 cwd)的 AGENTS.md;用户级 = ~/.agent-kernel/AGENTS.md。 */
-export function memoryFiles(
-  cwd = process.cwd(),
-  home = join(homedir(), ".agent-kernel"),
-): MemoryFiles {
+/** 记忆文件(Q65):项目级 = git 根(或 cwd)的 AGENTS.md;用户级 = ~/.clari/AGENTS.md。 */
+export function memoryFiles(cwd = process.cwd(), home = clariHome()): MemoryFiles {
   const projectRoot = findGitRoot(cwd) ?? resolve(cwd);
   return { project: join(projectRoot, "AGENTS.md"), user: join(home, "AGENTS.md") };
 }
@@ -413,9 +410,9 @@ export function buildTools(
   ];
 }
 
-/** 会话目录:环境变量 KERNEL_SESSIONS > 配置 sessionsDir > ./sessions。 */
+/** 会话目录:环境变量 CLARI_SESSIONS > 配置 sessionsDir > ./sessions。 */
 export function sessionsDir(config?: Pick<KernelConfig, "sessionsDir">): string {
-  return process.env.KERNEL_SESSIONS?.trim() || config?.sessionsDir || SESSIONS_DIR;
+  return process.env.CLARI_SESSIONS?.trim() || config?.sessionsDir || SESSIONS_DIR;
 }
 
 /** 最近一次会话文件(按文件名排序,文件名即时间戳)。 */

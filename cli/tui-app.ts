@@ -338,7 +338,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
 
   function updateHeader(): void {
     header.setText(
-      `${c.bold(c.jin("agent-kernel"))}  ${c.ink(info.model)}  ${c.faint(`${info.providerName} · ${info.sessionFile}`)}`,
+      `${c.bold(c.jin("clari"))}  ${c.ink(info.model)}  ${c.faint(`${info.providerName} · ${info.sessionFile}`)}`,
     );
   }
 

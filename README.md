@@ -1,4 +1,4 @@
-# agent-kernel
+# clari
 
 一个从零手写的通用 agent 内核与终端界面。内核只维护一个只追加的事件数组;模型看到的消息、屏幕上的每一行、上下文统计、压缩对照,全部是这个数组的投影。
 
@@ -24,7 +24,7 @@
 - 跨会话记忆可选、默认关:`--memory` 打开后模型只能通过 `remember` 工具往 AGENTS.md 的记忆节写一行,屏幕可见、可审批;`/memory` 看删
 - 四个策略槽:终止、插话、审批、执行(`--execution parallel` 让相邻只读调用同时跑,缺省逐个;并行批记一条决策事件)
 - 留言两种投递:Enter 步边界插话,Alt+Enter 等模型做完再给;`@路径` 把文件附进消息;`/fork` 复制事件前缀成新会话
-- 提示词模板 `~/.agent-kernel/prompts/*.md` → `/名 参数`;技能 `SKILL.md` 进系统提示词的技能段;扩展模块 `--extension ./x.mjs` 加工具、换槽、订阅事件
+- 提示词模板 `~/.clari/prompts/*.md` → `/名 参数`;技能 `SKILL.md` 进系统提示词的技能段;扩展模块 `--extension ./x.mjs` 加工具、换槽、订阅事件
 - 费用与缓存:配置里给价格就显示每步与累计费用;Anthropic 缺省挂提示缓存断点;每步显示缓存命中率
 - 生产级边界:流停滞超时与重试、bash 超时与输出上限、大文件与二进制守卫、CRLF 与宽松匹配的编辑、崩溃时还原终端并指出会话文件
 
@@ -35,7 +35,7 @@ pnpm install
 pnpm tui
 ```
 
-首次运行会生成 `~/.agent-kernel/config.json`(环境变量 `KERNEL_CONFIG` 可改路径)。`pnpm tui -- --help` 列出全部选项。
+首次运行会生成 `~/.clari/config.json`(环境变量 `CLARI_CONFIG` 可改路径)。`pnpm tui -- --help` 列出全部选项。
 
 ### 没有 key 先看效果
 
@@ -52,7 +52,7 @@ pnpm demo tui      # 同一个假模型,打开界面;Ctrl+R 看检视器
 
 1. 配置文件里该供应商的 `apiKey` 字段(界面里 `/key deepseek sk-xxx` 会写到这里)。
 2. `apiKeyEnv` 指向的环境变量,模板里是 `DEEPSEEK_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`。PowerShell 里 `$env:DEEPSEEK_API_KEY = "sk-xxx"` 只对当前窗口有效;要长期生效用 `setx DEEPSEEK_API_KEY sk-xxx` 再开新窗口。
-3. 换一套配置:`KERNEL_CONFIG=路径` 指向另一个 config.json。
+3. 换一套配置:`CLARI_CONFIG=路径` 指向另一个 config.json。
 
 key 从不进日志、不进请求正文、不进检视器;线路 JSON 分区看到的是不含鉴权头的正文。
 

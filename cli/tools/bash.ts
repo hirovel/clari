@@ -34,7 +34,7 @@ export function createBashTool(
       const shell = findBash();
       if (!shell) {
         throw new Error(
-          "找不到 bash。可选方案:1. 安装 Git for Windows;2. 设环境变量 KERNEL_SHELL 指向 bash 可执行文件。",
+          "找不到 bash。可选方案:1. 安装 Git for Windows;2. 设环境变量 CLARI_SHELL 指向 bash 可执行文件。",
         );
       }
       const timeoutS = args.timeout ?? defaultTimeout;
@@ -71,7 +71,7 @@ function applyTruncation(output: string, truncate: TruncationPolicy): string {
 }
 
 function findBash(): string | null {
-  if (process.env.KERNEL_SHELL) return process.env.KERNEL_SHELL;
+  if (process.env.CLARI_SHELL) return process.env.CLARI_SHELL;
   if (process.platform !== "win32") return "bash";
   const gitBash = join(process.env.ProgramFiles ?? "C:\\Program Files", "Git", "bin", "bash.exe");
   if (existsSync(gitBash)) return gitBash;

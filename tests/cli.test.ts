@@ -1,4 +1,4 @@
-// 真实入口:用子进程跑 cli/run.ts,配置从临时文件读(KERNEL_CONFIG),模型是本机假服务器。
+// 真实入口:用子进程跑 cli/run.ts,配置从临时文件读(CLARI_CONFIG),模型是本机假服务器。
 // 覆盖 bootstrap → 配置 → 供应商 → 会话文件 → 输出的整条链路;没有 key、要帮助、正常一跑三种情形。
 import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -78,7 +78,7 @@ describe("真实入口(子进程)", () => {
     tmp = mkdtempSync(join(tmpdir(), "ak-cli-"));
     const cfg = join(tmp, "config.json");
     for (const entry of [RUN, TUI]) {
-      const r = await run(entry, ["--help"], { cwd: tmp, env: { KERNEL_CONFIG: cfg } });
+      const r = await run(entry, ["--help"], { cwd: tmp, env: { CLARI_CONFIG: cfg } });
       expect(r.code, r.stderr).toBe(0);
       expect(r.stdout).toContain("用法");
       expect(r.stdout).toContain("--compaction");
@@ -92,7 +92,7 @@ describe("真实入口(子进程)", () => {
     expect(existsSync(cfg)).toBe(false);
     const r = await run(RUN, ["你好"], {
       cwd: tmp,
-      env: { KERNEL_CONFIG: cfg, DEEPSEEK_API_KEY: "", ANTHROPIC_API_KEY: "", OPENAI_API_KEY: "" },
+      env: { CLARI_CONFIG: cfg, DEEPSEEK_API_KEY: "", ANTHROPIC_API_KEY: "", OPENAI_API_KEY: "" },
     });
     expect(r.code).toBe(1);
     expect(r.stderr).toContain("没有可用的 API key");
@@ -115,7 +115,7 @@ describe("真实入口(子进程)", () => {
     );
     const ok = await run(RUN, ["你好", "--json", "--effort", "low"], {
       cwd: tmp,
-      env: { KERNEL_CONFIG: cfg },
+      env: { CLARI_CONFIG: cfg },
     });
     expect(ok.code, ok.stderr).toBe(0);
     const out = JSON.parse(ok.stdout) as Record<string, unknown>;
@@ -133,13 +133,13 @@ describe("真实入口(子进程)", () => {
 
     const bad = await run(RUN, ["你好", "--effort", "ultra"], {
       cwd: tmp,
-      env: { KERNEL_CONFIG: cfg },
+      env: { CLARI_CONFIG: cfg },
     });
     expect(bad.code).toBe(2);
     expect(bad.stderr).toContain("未知强度级别");
 
     // 纯文本模式:回复到 stdout,会话路径到 stderr
-    const plain = await run(RUN, ["再来"], { cwd: tmp, env: { KERNEL_CONFIG: cfg } });
+    const plain = await run(RUN, ["再来"], { cwd: tmp, env: { CLARI_CONFIG: cfg } });
     expect(plain.code, plain.stderr).toBe(0);
     expect(plain.stdout.trim()).toBe("收到:再来");
     expect(plain.stderr).toContain("[会话:");

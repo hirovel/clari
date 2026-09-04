@@ -4,9 +4,9 @@
 // 调查共识直接采用:项目指令文件按目录层级根在前、cwd 在后拼接;向上搜索止于 git 根;总预算加降级;替换与追加并存。
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { homedir, release, type } from "node:os";
+import { release, type } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
-import type { PromptSectionName } from "../src/config.js";
+import { clariHome, type PromptSectionName } from "../src/config.js";
 import { splitMemory } from "./tools/memory.js";
 
 export type PromptSection = {
@@ -46,12 +46,12 @@ export function parseSkill(path: string, raw: string): Skill {
 }
 
 /**
- * 技能发现(通用 SKILL.md 约定):用户级 ~/.agent-kernel/skills/<名>/SKILL.md,
+ * 技能发现(通用 SKILL.md 约定):用户级 ~/.clari/skills/<名>/SKILL.md,
  * 项目级 <git 根>/.agents/skills/<名>/SKILL.md;同名以先发现的为准。
  * 系统提示词里只放名字、一句描述与路径,正文由模型需要时用 read 读取,不预先占上下文。
  */
 export function discoverSkills(cwd: string, opts: { home?: string; root?: string } = {}): Skill[] {
-  const home = opts.home ?? join(homedir(), ".agent-kernel");
+  const home = opts.home ?? clariHome();
   const root = opts.root ?? findGitRoot(cwd) ?? resolve(cwd);
   const dirs = [join(home, "skills"), join(root, ".agents", "skills")];
   const byName = new Map<string, Skill>();
@@ -149,7 +149,7 @@ export type InstructionFile = {
 };
 
 export type DiscoverOptions = {
-  /** 全局指令文件所在目录;缺省 ~/.agent-kernel。 */
+  /** 全局指令文件所在目录;缺省 ~/.clari。 */
   home?: string;
   /** 总预算(字节),缺省 32 KiB。 */
   budgetBytes?: number;
@@ -173,7 +173,7 @@ export function discoverProjectInstructions(
 ): { section?: PromptSection; memory?: PromptSection; files: InstructionFile[] } {
   const filenames = opts.filenames ?? DEFAULT_INSTRUCTION_FILES;
   const budget = opts.budgetBytes ?? DEFAULT_INSTRUCTION_BUDGET;
-  const home = opts.home ?? join(homedir(), ".agent-kernel");
+  const home = opts.home ?? clariHome();
   const start = resolve(cwd);
   const root = opts.root ? resolve(opts.root) : (findGitRoot(start) ?? start);
 

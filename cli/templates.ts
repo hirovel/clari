@@ -1,9 +1,9 @@
-// 提示词模板:一个 .md 文件就是一条斜杠命令。用户级在 ~/.agent-kernel/prompts,项目级在 <git 根>/.agent-kernel/prompts。
+// 提示词模板:一个 .md 文件就是一条斜杠命令。用户级在 ~/.clari/prompts,项目级在 <git 根>/.clari/prompts。
 // 正文里 $ARGUMENTS / $@ 是全部参数,$1..$9 是按空格切分的第 n 个;可选 frontmatter 只认 description。
 // 展开结果作为普通用户消息进日志,与手打的一样落盘、上屏。
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { homedir } from "node:os";
 import { basename, join } from "node:path";
+import { clariHome } from "../src/config.js";
 import { findGitRoot } from "./prompt.js";
 
 export type PromptTemplate = {
@@ -27,13 +27,10 @@ export function parseTemplate(path: string, raw: string): PromptTemplate {
 }
 
 /** 发现顺序:用户级 → 项目级;同名以项目级为准。 */
-export function discoverTemplates(
-  cwd = process.cwd(),
-  home = join(homedir(), ".agent-kernel"),
-): PromptTemplate[] {
+export function discoverTemplates(cwd = process.cwd(), home = clariHome()): PromptTemplate[] {
   const dirs = [join(home, "prompts")];
   const root = findGitRoot(cwd) ?? cwd;
-  dirs.push(join(root, ".agent-kernel", "prompts"));
+  dirs.push(join(root, ".clari", "prompts"));
   const byName = new Map<string, PromptTemplate>();
   for (const dir of dirs) {
     if (!existsSync(dir) || !statSync(dir).isDirectory()) continue;

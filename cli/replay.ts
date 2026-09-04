@@ -107,7 +107,7 @@ if (flags.includes("--messages")) {
 }
 
 console.log(`\n${"─".repeat(72)}`);
-const b = contextBreakdown(log.events, Number(process.env.KERNEL_CONTEXT_WINDOW ?? 131072));
+const b = contextBreakdown(log.events, Number(process.env.CLARI_CONTEXT_WINDOW ?? 131072));
 console.log(`构成(估算 ${b.estimatedTokens} tok,占窗口 ${Math.round(b.usedShare * 100)}%):`);
 for (const p of b.parts) {
   console.log(

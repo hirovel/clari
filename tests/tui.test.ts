@@ -67,7 +67,7 @@ describe("TUI 壳", () => {
     await app.submit("读一下");
     const doc = text(app);
 
-    expect(doc).toContain("agent-kernel");
+    expect(doc).toContain("clari");
     expect(doc).toContain("fake-model");
     expect(doc).toContain("› 读一下");
     expect(doc).toContain("⚙ echo");
@@ -82,7 +82,7 @@ describe("TUI 壳", () => {
     // 整条渲染管线:经差分渲染写入模拟终端后,屏幕上确实有内容
     app.tui.renderNow(true);
     const screen = (await term.screen()).join("\n");
-    expect(screen).toContain("agent-kernel");
+    expect(screen).toContain("clari");
     expect(screen).toContain("读一下");
     app.stop();
   });

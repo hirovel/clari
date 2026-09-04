@@ -105,13 +105,26 @@ export type KernelConfig = {
   prompt?: PromptConfig;
   /** 命名预设(Q15)。 */
   presets?: Record<string, Preset>;
-  /** 会话文件目录;缺省工作目录下的 sessions/。环境变量 KERNEL_SESSIONS 优先。 */
+  /** 会话文件目录;缺省工作目录下的 sessions/。环境变量 CLARI_SESSIONS 优先。 */
   sessionsDir?: string;
 };
 
-/** 配置文件路径;环境变量 KERNEL_CONFIG 可改(多套配置、测试用)。 */
+/**
+ * 用户目录:CLARI_HOME 指定;否则 ~/.clari;新目录不存在而旧目录 ~/.agent-kernel 存在时沿用旧目录(改名前的用户不用搬家)。
+ */
+export function clariHome(env = process.env): string {
+  if (env.CLARI_HOME?.trim()) return env.CLARI_HOME.trim();
+  const fresh = join(homedir(), ".clari");
+  const legacy = join(homedir(), ".agent-kernel");
+  if (!existsSync(fresh) && existsSync(legacy)) return legacy;
+  return fresh;
+}
+
+/** 配置文件路径;环境变量 CLARI_CONFIG 可改(多套配置、测试用);旧名 KERNEL_CONFIG 仍认。 */
 export const DEFAULT_CONFIG_PATH =
-  process.env.KERNEL_CONFIG?.trim() || join(homedir(), ".agent-kernel", "config.json");
+  process.env.CLARI_CONFIG?.trim() ||
+  process.env.KERNEL_CONFIG?.trim() ||
+  join(clariHome(), "config.json");
 
 export const CONFIG_TEMPLATE: KernelConfig = {
   default: "deepseek-v4-pro",

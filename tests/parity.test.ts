@@ -250,11 +250,11 @@ describe("提示词模板", () => {
     const home = mkdtempSync(join(tmpdir(), "ak-home-"));
     const proj = mkdtempSync(join(tmpdir(), "ak-proj-"));
     mkdirSync(join(home, "prompts"), { recursive: true });
-    mkdirSync(join(proj, ".agent-kernel", "prompts"), { recursive: true });
+    mkdirSync(join(proj, ".clari", "prompts"), { recursive: true });
     mkdirSync(join(proj, ".git"));
     writeFileSync(join(home, "prompts", "a.md"), "用户级 A");
     writeFileSync(join(home, "prompts", "b.md"), "用户级 B");
-    writeFileSync(join(proj, ".agent-kernel", "prompts", "a.md"), "项目级 A");
+    writeFileSync(join(proj, ".clari", "prompts", "a.md"), "项目级 A");
     const found = discoverTemplates(proj, home);
     expect(found.map((t) => [t.name, t.body])).toEqual([
       ["a", "项目级 A"],
