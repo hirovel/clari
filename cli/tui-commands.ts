@@ -3,7 +3,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import type { DeliverAs } from "../src/agent.js";
 import { contextBreakdown } from "../src/context.js";
-import { fmtCost, usageTotals } from "../src/cost.js";
+import { fmtCost } from "../src/cost.js";
 import { now } from "../src/events.js";
 import { recordingProvider } from "../src/loop.js";
 import { EFFORT_LEVELS, parseEffort } from "../src/provider.js";
@@ -371,7 +371,7 @@ export function renderContext(ctx: TuiContext): string {
   ];
   if (b.measuredTokens !== undefined)
     lines.push(c.faint(`last request measured ${b.measuredTokens} tok in`));
-  const totals = usageTotals(log.events, ctx.priceFor);
+  const totals = ctx.usage.totals();
   if (totals.requests > 0) {
     lines.push(
       c.faint(

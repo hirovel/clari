@@ -33,11 +33,30 @@ export function firstLine(s: string, max = 60): string {
   return l.length > max ? `${l.slice(0, max)}…` : l;
 }
 
+// 消息对象在一次投影里是固定的,按对象记住 token 数与 JSON 形态:
+// 发送卡对同一条消息要算好几次,长会话回放时这两处是二次方的主项(重构块 4)。
+const tokenMemo = new WeakMap<Message, number>();
+const keyMemo = new WeakMap<Message, string>();
+
 function messageTokens(m: Message): number {
+  const hit = tokenMemo.get(m);
+  if (hit !== undefined) return hit;
   const base = estimateTokens(m.content);
-  return m.role === "assistant"
-    ? base + m.toolCalls.reduce((n, tc) => n + estimateTokens(JSON.stringify(tc.args)) + 8, 0)
-    : base;
+  const n =
+    m.role === "assistant"
+      ? base + m.toolCalls.reduce((s, tc) => s + estimateTokens(JSON.stringify(tc.args)) + 8, 0)
+      : base;
+  tokenMemo.set(m, n);
+  return n;
+}
+
+/** 消息的比较键:JSON 全文,按对象缓存;两次投影里内容相同的消息键相同。 */
+function messageKey(m: Message): string {
+  const hit = keyMemo.get(m);
+  if (hit !== undefined) return hit;
+  const k = JSON.stringify(m);
+  keyMemo.set(m, k);
+  return k;
 }
 
 /** 请求正文里除消息与工具之外的顶层参数,压成一行:布尔 true 只写键名,对象压成紧凑 JSON。 */
@@ -58,19 +77,32 @@ export function paramsLine(wire: unknown): string {
   return parts.join(" · ") || "(none)";
 }
 
-/** 相同前缀有多长:逐条比 JSON。缓存命中的上限就是它。 */
+/** 相同前缀有多长:逐条比 JSON(按对象缓存)。缓存命中的上限就是它。 */
 export function unchangedPrefix(prev: Message[] | undefined, cur: Message[]): number {
   if (!prev) return 0;
   let i = 0;
-  while (i < prev.length && i < cur.length && JSON.stringify(prev[i]) === JSON.stringify(cur[i]))
+  while (i < prev.length && i < cur.length) {
+    const a = prev[i] as Message;
+    const b = cur[i] as Message;
+    if (a !== b && messageKey(a) !== messageKey(b)) break;
     i++;
+  }
   return i;
 }
 
-/** 发送卡算出的、给接收卡对照用的预计值。 */
-export function predictedCache(previous: Message[] | undefined, messages: Message[]): number {
-  const keep = unchangedPrefix(previous, messages);
-  return messages.slice(0, keep).reduce((s, m) => s + messageTokens(m), 0);
+function tokensOf(messages: Message[], upTo = messages.length): number {
+  let s = 0;
+  for (let i = 0; i < upTo && i < messages.length; i++) s += messageTokens(messages[i] as Message);
+  return s;
+}
+
+/** 发送卡算出的、给接收卡对照用的预计值。keep 已算过就传进来。 */
+export function predictedCache(
+  previous: Message[] | undefined,
+  messages: Message[],
+  keep = unchangedPrefix(previous, messages),
+): number {
+  return tokensOf(messages, keep);
 }
 
 export type MessageState = "same" | "new" | "edited" | "summary" | "cleared";
@@ -88,19 +120,32 @@ export function roleWord(m: Message): string {
   return m.role === "tool" ? `tool ${m.name}${m.isError ? " ✗" : ""}` : m.role;
 }
 
+const previewMemo = new WeakMap<Message, string>();
+
 export function previewOf(m: Message): string {
+  const hit = previewMemo.get(m);
+  if (hit !== undefined) return hit;
+  const p = previewOfFresh(m);
+  previewMemo.set(m, p);
+  return p;
+}
+
+function previewOfFresh(m: Message): string {
   return m.role === "assistant" && !m.content && m.toolCalls.length > 0
     ? `⚙ ${m.toolCalls.map((t) => t.name).join(" ")}`
     : firstLine(m.content);
 }
 
 /** 每条消息相对上一次请求的状态:前缀相同就是 same;之后按来历判摘要、清除、编辑,其余是新增。 */
-export function messageRows(
+export type MessageMark = { idx: number; state: MessageState };
+
+/** 每条消息的编号与状态:changed 行只需要这两项,折叠的旧卡不必再算角色、token 与预览。 */
+export function messageMarks(
   messages: Message[],
   previous: Message[] | undefined,
   provenance?: { event: number; stages: string[] }[],
-): MessageRow[] {
-  const keep = unchangedPrefix(previous, messages);
+  keep = unchangedPrefix(previous, messages),
+): MessageMark[] {
   return messages.map((m, i) => {
     const stages = provenance?.[i]?.stages ?? [];
     let state: MessageState = "new";
@@ -108,13 +153,19 @@ export function messageRows(
     else if (stages.some((s) => s.startsWith("summary"))) state = "summary";
     else if (stages.includes("cleared")) state = "cleared";
     else if (stages.some((s) => s.startsWith("edited")) || m.edited) state = "edited";
-    return {
-      idx: provenance?.[i]?.event ?? i + 1,
-      role: roleWord(m),
-      tok: messageTokens(m),
-      state,
-      preview: previewOf(m),
-    };
+    return { idx: provenance?.[i]?.event ?? i + 1, state };
+  });
+}
+
+export function messageRows(
+  messages: Message[],
+  previous: Message[] | undefined,
+  provenance?: { event: number; stages: string[] }[],
+  keep = unchangedPrefix(previous, messages),
+): MessageRow[] {
+  return messageMarks(messages, previous, provenance, keep).map((mark, i) => {
+    const m = messages[i] as Message;
+    return { ...mark, role: roleWord(m), tok: messageTokens(m), preview: previewOf(m) };
   });
 }
 
@@ -190,6 +241,11 @@ export type SendCardInput = {
   dropsThinking?: boolean;
   /** 消息首行的可用宽度。 */
   width?: number;
+  /**
+   * 只要头两行(头 + changed):回放历史时,除最后一次之外的 Request 卡一画出来就会被折成两行(Q85),
+   * 参数、系统段、工具与消息表算了也不显示。
+   */
+  collapsed?: boolean;
 };
 
 export function requestKind(r: RequestEvent): string {
@@ -201,14 +257,17 @@ export function requestKind(r: RequestEvent): string {
 }
 
 /** "changed" 行:一次请求相对上一次变了什么,以及那要付出什么。永远是 Request 卡的第一行。 */
-export function changedLine(input: SendCardInput, rows: MessageRow[]): string {
+export function changedLine(
+  input: SendCardInput,
+  rows: MessageMark[],
+  keep = unchangedPrefix(input.previous, input.messages),
+): string {
   const { messages } = input;
-  const total = messages.reduce((s, m) => s + messageTokens(m), 0);
+  const total = tokensOf(messages);
   if (!input.previous) {
     return `${c.jin("first request")} · ${messages.length} messages  ${c.faint("→ nothing to compare with yet")}`;
   }
-  const keep = unchangedPrefix(input.previous, messages);
-  const cache = messages.slice(0, keep).reduce((s, m) => s + messageTokens(m), 0);
+  const cache = tokensOf(messages, keep);
   const changed = rows.filter((r) => r.state !== "same");
   const count = (state: MessageState) => changed.filter((r) => r.state === state);
   const parts: string[] = [];
@@ -245,8 +304,19 @@ export function sendCardLines(input: SendCardInput): string[] {
   const lines: string[] = [
     `${c.bold(c.jin(`Request #${n}`))}   ${c.soft(`${r.model} · ${requestKind(r)}${r.effort ? ` · effort ${r.effort}` : ""}`)}`,
   ];
-  const rows = messageRows(messages, input.previous, input.provenance);
-  lines.push(g("changed", changedLine(input, rows)));
+  // 相同前缀只算一次,行表、changed 行、预计缓存都用它。
+  const keep = unchangedPrefix(input.previous, messages);
+  if (input.collapsed) {
+    lines.push(
+      g(
+        "changed",
+        changedLine(input, messageMarks(messages, input.previous, input.provenance, keep), keep),
+      ),
+    );
+    return lines;
+  }
+  const rows = messageRows(messages, input.previous, input.provenance, keep);
+  lines.push(g("changed", changedLine(input, rows, keep)));
 
   // params / system / tools 一轮之后基本不变:没变的不再逐行印,合成一行 same(Q85)。第一次请求全印。
   const params = paramsLine(input.wire);
@@ -297,7 +367,7 @@ export function sendCardLines(input: SendCardInput): string[] {
   if (same.length > 0)
     lines.push(g("same", c.faint(`${same.join(" · ")} · as in the previous request`)));
 
-  const total = messages.reduce((s, m) => s + messageTokens(m), 0);
+  const total = tokensOf(messages);
   lines.push(
     g(
       "messages",

@@ -28,7 +28,10 @@ export type Message =
     };
 
 /** 编辑状态(Q74):每个目标事件各字段的最新值,以及被丢弃的事件下标。 */
-export function editState(events: readonly AgentEvent[]): {
+export function editState(
+  events: readonly AgentEvent[],
+  upTo = events.length,
+): {
   edits: Map<number, Partial<Record<"text" | "reasoning" | "content" | "system", string>>>;
   dropped: Set<number>;
 } {
@@ -37,7 +40,9 @@ export function editState(events: readonly AgentEvent[]): {
     Partial<Record<"text" | "reasoning" | "content" | "system", string>>
   >();
   const dropped = new Set<number>();
-  for (const e of events) {
+  for (let k = 0; k < upTo; k++) {
+    const e = events[k];
+    if (!e) continue;
     if (e.type === "context/edit") {
       const cur = edits.get(e.target) ?? {};
       cur[e.field] = e.value;
@@ -48,9 +53,10 @@ export function editState(events: readonly AgentEvent[]): {
       if (t?.type === "assistant/message") {
         // 丢一条带调用的助手消息,它的应答也得一起走,否则序列非法。
         const ids = new Set(t.toolCalls.map((c) => c.id));
-        events.forEach((x, i) => {
-          if (x.type === "tool/result" && ids.has(x.callId)) dropped.add(i);
-        });
+        for (let i = 0; i < upTo; i++) {
+          const x = events[i];
+          if (x?.type === "tool/result" && ids.has(x.callId)) dropped.add(i);
+        }
       }
     }
   }
@@ -60,7 +66,10 @@ export function editState(events: readonly AgentEvent[]): {
 export const CLEARED_PLACEHOLDER = "[此工具结果已被清除以节省上下文;原文完整保留在会话日志中]";
 
 /** 从事件里汇总当前生效的压缩状态:摘要覆盖范围 + 被清除的工具结果下标。 */
-export function compactionState(events: readonly AgentEvent[]): {
+export function compactionState(
+  events: readonly AgentEvent[],
+  upTo = events.length,
+): {
   summary?: string;
   coversFrom: number;
   coversUpTo: number;
@@ -70,8 +79,9 @@ export function compactionState(events: readonly AgentEvent[]): {
   let coversFrom = 1;
   let coversUpTo = 0;
   const cleared = new Set<number>();
-  for (const e of events) {
-    if (e.type !== "compaction") continue;
+  for (let i = 0; i < upTo; i++) {
+    const e = events[i];
+    if (e?.type !== "compaction") continue;
     if (e.summary && (e.coversUpTo ?? 0) > coversUpTo) {
       summary = e.summary;
       coversUpTo = e.coversUpTo ?? 0;
@@ -114,24 +124,44 @@ export type Composition = {
 };
 
 /**
+ * 原样投影的消息按事件对象缓存:同一事件在两次投影里给出同一个消息对象。
+ * 投影仍是纯函数(缓存的就是它会算出的值);界面比对两次请求的相同前缀时走对象相等的快路径,
+ * 长会话回放从二次方降到近线性。改过、被清除、被摘要合成的消息不缓存。消息对象一律只读。
+ */
+const verbatim = new WeakMap<AgentEvent, Message>();
+function remember(e: AgentEvent, m: Message): Message {
+  verbatim.set(e, m);
+  return m;
+}
+
+/**
  * 上下文组装(Q81):事件数组 → 模型可见的消息序列,带每条的来历。
  * 阶段固定且逐条可见:投影(事件→消息)→ 压缩(覆盖区跳过、切点注入摘要、清除占位)→ 编辑(换字段、丢弃)。
  * 纯函数,同一日志永远同一结果;deriveMessages 只是它的 messages 一列。
  */
-export function composeContext(events: readonly AgentEvent[]): Composition {
-  const c = compactionState(events);
-  const ed = editState(events);
+export function composeContext(
+  events: readonly AgentEvent[],
+  /** 只看前 upTo 条:回放历史请求时不用复制前缀。 */
+  upTo = events.length,
+): Composition {
+  const c = compactionState(events, upTo);
+  const ed = editState(events, upTo);
   const messages: Message[] = [];
   const provenance: Provenance[] = [];
   const omitted: Composition["omitted"] = [];
-  const summaryEvent = events.findIndex(
-    (e) => e.type === "compaction" && e.summary !== undefined && e.coversUpTo === c.coversUpTo,
-  );
+  let summaryEvent = -1;
+  for (let i = 0; i < upTo; i++) {
+    const e = events[i];
+    if (e?.type === "compaction" && e.summary !== undefined && e.coversUpTo === c.coversUpTo) {
+      summaryEvent = i;
+      break;
+    }
+  }
   const push = (m: Message, event: number, stages: string[]) => {
     messages.push(m);
     provenance.push({ event, stages });
   };
-  for (let i = 0; i < events.length; i++) {
+  for (let i = 0; i < upTo; i++) {
     if (c.summary && i === c.coversFrom) {
       // 摘要是合成的消息,它改变了此后所有消息的前缀:与编辑同等对待(Q76),
       // Anthropic 适配器据此不再回传之后的思考块(签名绑定前缀,否则新账号 400)。
@@ -156,60 +186,58 @@ export function composeContext(events: readonly AgentEvent[]): Composition {
     switch (e.type) {
       case "session/start":
         push(
-          {
-            role: "system",
-            content: edit?.system ?? e.system,
-            ...(edit?.system !== undefined && { edited: true }),
-          },
+          edit?.system !== undefined
+            ? { role: "system", content: edit.system, edited: true }
+            : (verbatim.get(e) ?? remember(e, { role: "system", content: e.system })),
           i,
           editedStages,
         );
         break;
       case "user/message":
         push(
-          {
-            role: "user",
-            content: edit?.content ?? e.text,
-            ...(edit?.content !== undefined && { edited: true }),
-          },
+          edit?.content !== undefined
+            ? { role: "user", content: edit.content, edited: true }
+            : (verbatim.get(e) ?? remember(e, { role: "user", content: e.text })),
           i,
           editedStages,
         );
         break;
       case "assistant/message": {
         const edited = edit?.text !== undefined || edit?.reasoning !== undefined;
+        const hit = edited ? undefined : verbatim.get(e);
         const reasoning = edit?.reasoning ?? e.reasoning;
-        push(
-          {
-            role: "assistant",
-            content: edit?.text ?? e.text,
-            toolCalls: e.toolCalls,
-            ...(reasoning && { reasoning }),
-            ...(e.reasoningKind && { reasoningKind: e.reasoningKind }),
-            // 改过的消息不带回传物:签名或密文与改后的内容不再对应,发回去只会被拒。
-            ...(!edited && e.opaque !== undefined && { opaque: e.opaque }),
-            ...(edited && { edited: true }),
-          },
-          i,
-          [...editedStages, ...(edited && e.opaque !== undefined ? ["opaque-dropped"] : [])],
-        );
+        const m: Message = hit ?? {
+          role: "assistant",
+          content: edit?.text ?? e.text,
+          toolCalls: e.toolCalls,
+          ...(reasoning && { reasoning }),
+          ...(e.reasoningKind && { reasoningKind: e.reasoningKind }),
+          // 改过的消息不带回传物:签名或密文与改后的内容不再对应,发回去只会被拒。
+          ...(!edited && e.opaque !== undefined && { opaque: e.opaque }),
+          ...(edited && { edited: true }),
+        };
+        if (!edited && !hit) remember(e, m);
+        push(m, i, [
+          ...editedStages,
+          ...(edited && e.opaque !== undefined ? ["opaque-dropped"] : []),
+        ]);
         break;
       }
       case "tool/result": {
         // 被清除换成占位文本,同样是改了前缀。
         const cleared = c.cleared.has(i);
-        push(
-          {
-            role: "tool",
-            callId: e.callId,
-            name: e.name,
-            content: cleared ? CLEARED_PLACEHOLDER : (edit?.content ?? e.content),
-            isError: e.isError,
-            ...((cleared || edit?.content !== undefined) && { edited: true }),
-          },
-          i,
-          [...(cleared ? ["cleared"] : []), ...editedStages],
-        );
+        const changed = cleared || edit?.content !== undefined;
+        const hit = changed ? undefined : verbatim.get(e);
+        const m: Message = hit ?? {
+          role: "tool",
+          callId: e.callId,
+          name: e.name,
+          content: cleared ? CLEARED_PLACEHOLDER : (edit?.content ?? e.content),
+          isError: e.isError,
+          ...(changed && { edited: true }),
+        };
+        if (!changed && !hit) remember(e, m);
+        push(m, i, [...(cleared ? ["cleared"] : []), ...editedStages]);
         break;
       }
       case "session/interrupt":

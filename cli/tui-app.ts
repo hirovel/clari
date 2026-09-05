@@ -24,7 +24,7 @@ import {
 import { Agent, type DeliverAs } from "../src/agent.js";
 import type { ApprovalConfig } from "../src/approval.js";
 import type { ToolPromptsConfig } from "../src/config.js";
-import { fmtCost, type Price, usageTotals } from "../src/cost.js";
+import { fmtCost, type Price, UsageAccumulator } from "../src/cost.js";
 import { type AgentEvent, now } from "../src/events.js";
 import type { EventLog } from "../src/log.js";
 import { type CompactionConfig, compactionThreshold, type TurnDeps } from "../src/loop.js";
@@ -271,6 +271,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     req: {
       count: 0,
       lastIndex: -1,
+      finalRequestIndex: log.events.reduce((last, e, i) => (e.type === "request" ? i : last), -1),
       lastTurnIndex: -1,
       lastCompactionIndex: -1,
       providersAt: new Map(),
@@ -283,6 +284,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       lastParams: undefined,
       lastCard: undefined,
     },
+    usage: new UsageAccumulator((model) => ctx.priceFor(model)),
     approval,
     slots: {
       state: initialSlotState(deps, approval),
@@ -390,8 +392,8 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       const tone = used >= 0.7 ? c.zhu : c.jin;
       tokens = `${tone(bar)} ${c.faint(`${pct(Math.max(0, 1 - used))} until auto-compaction · ${usage.inputTokens}→${usage.outputTokens} tok`)}`;
     }
-    // 会话累计(含压缩摘要请求):输入、输出、缓存命中、费用。数据全部来自事件数组。
-    const totals = usageTotals(log.events, ctx.priceFor);
+    // 会话累计(含压缩摘要请求):输入、输出、缓存命中、费用。增量累计,每条事件到来时 render 喂进去。
+    const totals = ctx.usage.totals();
     const sum =
       totals.requests > 0
         ? c.faint(

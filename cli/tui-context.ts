@@ -13,7 +13,7 @@ import type {
 import type { Agent } from "../src/agent.js";
 import type { ApprovalConfig } from "../src/approval.js";
 import type { ToolPromptsConfig } from "../src/config.js";
-import type { Price } from "../src/cost.js";
+import type { Price, UsageAccumulator } from "../src/cost.js";
 import type { EventLog } from "../src/log.js";
 import type { CompactionConfig } from "../src/loop.js";
 import type { Message } from "../src/messages.js";
@@ -65,6 +65,8 @@ export type ViewState = {
 export type RequestState = {
   count: number;
   lastIndex: number;
+  /** 启动时日志里最后一个 request 事件的下标;回放时之前的请求卡只画两行。之后的新请求都比它大。 */
+  finalRequestIndex: number;
   /** 最近一次正常步(非压缩)的 request 事件下标。 */
   lastTurnIndex: number;
   lastCompactionIndex: number;
@@ -117,6 +119,8 @@ export type TuiContext = {
   model: { info: TuiInfo; effortLevels: EffortLevel[] | undefined; contextWindow: number };
   view: ViewState;
   req: RequestState;
+  /** 会话累计用量与费用,render 每条事件喂一次;状态栏与 /context 读它,不重扫事件数组。 */
+  usage: UsageAccumulator;
   approval: ApprovalState;
   slots: SlotState;
   children: { views: ChildView[]; slots: Map<string, Container> };

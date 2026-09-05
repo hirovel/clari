@@ -36,39 +36,54 @@ export type UsageTotals = {
   cost?: number;
 };
 
-/** 会话累计:正常步的 assistant 用量 + 压缩摘要请求的用量,两者都花钱。 */
-export function usageTotals(
-  events: readonly AgentEvent[],
-  priceFor?: (model: string) => Price | undefined,
-): UsageTotals {
-  const t: UsageTotals = {
+/**
+ * 会话累计的增量形态:界面每收到一条事件喂一次,状态栏读 totals() 是 O(1)。
+ * 正常步的 assistant 用量 + 压缩摘要请求的用量,两者都花钱;价格按用量发生时的模型取。
+ */
+export class UsageAccumulator {
+  private readonly t: UsageTotals = {
     requests: 0,
     inputTokens: 0,
     outputTokens: 0,
     cacheReadTokens: 0,
     cacheWriteTokens: 0,
   };
-  let cost = 0;
-  let priced = false;
-  let model = "";
-  for (const e of events) {
-    if (e.type === "session/start" || e.type === "session/model") model = e.model;
-    if (e.type === "request") model = e.model;
+  private cost = 0;
+  private priced = false;
+  private model = "";
+
+  constructor(private readonly priceFor?: (model: string) => Price | undefined) {}
+
+  add(e: AgentEvent): void {
+    if (e.type === "session/start" || e.type === "session/model" || e.type === "request")
+      this.model = e.model;
     const u = e.type === "assistant/message" || e.type === "compaction" ? e.usage : undefined;
-    if (!u) continue;
-    t.requests += 1;
-    t.inputTokens += u.inputTokens;
-    t.outputTokens += u.outputTokens;
-    t.cacheReadTokens += u.cacheReadTokens ?? 0;
-    t.cacheWriteTokens += u.cacheWriteTokens ?? 0;
-    const price = priceFor?.(model);
+    if (!u) return;
+    this.t.requests += 1;
+    this.t.inputTokens += u.inputTokens;
+    this.t.outputTokens += u.outputTokens;
+    this.t.cacheReadTokens += u.cacheReadTokens ?? 0;
+    this.t.cacheWriteTokens += u.cacheWriteTokens ?? 0;
+    const price = this.priceFor?.(this.model);
     if (price) {
-      priced = true;
-      cost += costOf(u, price);
+      this.priced = true;
+      this.cost += costOf(u, price);
     }
   }
-  if (priced) t.cost = cost;
-  return t;
+
+  totals(): UsageTotals {
+    return { ...this.t, ...(this.priced && { cost: this.cost }) };
+  }
+}
+
+/** 会话累计的一次性形态:扫一遍全部事件。回放与一次性模式用;界面用增量的 UsageAccumulator。 */
+export function usageTotals(
+  events: readonly AgentEvent[],
+  priceFor?: (model: string) => Price | undefined,
+): UsageTotals {
+  const acc = new UsageAccumulator(priceFor);
+  for (const e of events) acc.add(e);
+  return acc.totals();
 }
 
 /** 美元金额的显示:小额保留到厘,大额到分。 */

@@ -2,7 +2,7 @@
 // 这里还有子 agent 视图(Q62)、流式回复与思考的增量绘制、折叠/展开两个显示开关。
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import type { AgentEvent } from "../src/events.js";
-import { composeContext } from "../src/messages.js";
+import { type Composition, composeContext, type Message } from "../src/messages.js";
 import { parseEffort } from "../src/provider.js";
 import { classifyError, type ErrorKind, hintFor } from "../src/providers/errors.js";
 import type { ChildInfo } from "../src/subagent.js";
@@ -18,6 +18,7 @@ import {
   receiveHead,
   resultLines,
   sendCardLines,
+  unchangedPrefix,
 } from "./cards.js";
 import { renderExtEvent } from "./ext-events.js";
 import { fmtMs, fmtTok, messagesFor } from "./inspector.js";
@@ -367,12 +368,23 @@ function renderRequest(ctx: TuiContext, e: Extract<AgentEvent, { type: "request"
   req.count += 1;
   req.lastIndex = log.events.length - 1;
   req.providersAt.set(req.lastIndex, agent.provider);
-  const rec = { index: req.lastIndex, request: e, n: req.count, retries: [], before: [] };
-  const messages = messagesFor(log.events, rec);
   // 来历(Q81):正常步的正文就是之前事件的投影,每条都能对回事件号;摘要请求的正文由策略记的 body 重建,没有来历。
-  const provenance = e.body
-    ? undefined
-    : composeContext(log.events.slice(0, req.lastIndex)).provenance;
+  // 一次投影同时给消息与来历,不再算两遍。
+  let messages: Message[];
+  let provenance: Composition["provenance"] | undefined;
+  if (e.body) {
+    messages = messagesFor(log.events, {
+      index: req.lastIndex,
+      request: e,
+      n: req.count,
+      retries: [],
+      before: [],
+    });
+  } else {
+    const comp = composeContext(log.events, req.lastIndex);
+    messages = comp.messages;
+    provenance = comp.provenance;
+  }
   const activeDefs = ctx.defs().filter((d) => e.tools.includes(d.name));
   const level = e.effort ? parseEffort(e.effort) : undefined;
   const wire = agent.provider.wire?.(messages, activeDefs, level ? { effort: level } : {});
@@ -391,6 +403,8 @@ function renderRequest(ctx: TuiContext, e: Extract<AgentEvent, { type: "request"
     ...(provenance && { provenance }),
     width: Math.max(24, ctx.deps.terminal.columns - 52),
     toolsUnchanged: toolSig === req.lastToolSig,
+    // 回放历史:不是最后一次的请求卡马上会折成两行,只画那两行。
+    collapsed: req.lastIndex < req.finalRequestIndex,
     dropsThinking: agent.provider.fields?.protocol.startsWith("anthropic") ?? false,
   });
   // 旧的 Request 卡折成两行(头 + changed,Q85):当步的信息在新卡上,全文永远在检视器。
@@ -398,7 +412,10 @@ function renderRequest(ctx: TuiContext, e: Extract<AgentEvent, { type: "request"
   const cardNode = new Text(cardLines.join("\n"), 1, 0);
   req.lastCard = { node: cardNode, lines: cardLines };
   transcript.addChild(cardNode);
-  req.predictedAt.set(req.lastIndex, predictedCache(req.lastSent, messages));
+  req.predictedAt.set(
+    req.lastIndex,
+    predictedCache(req.lastSent, messages, unchangedPrefix(req.lastSent, messages)),
+  );
   req.lastToolSig = toolSig;
   req.lastParams = paramsLine(wire);
   if (e.reason === "compaction") req.lastCompactionIndex = req.lastIndex;
@@ -458,6 +475,7 @@ function renderCompaction(ctx: TuiContext, e: Extract<AgentEvent, { type: "compa
 
 /** 一条事件 → 屏幕。历史回放与实时订阅都走这里。 */
 export function render(ctx: TuiContext, e: AgentEvent): void {
+  ctx.usage.add(e);
   switch (e.type) {
     case "user/message":
       renderUser(ctx, e.text);
