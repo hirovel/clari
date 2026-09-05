@@ -64,7 +64,12 @@ if (args.events) log.subscribe((e) => process.stdout.write(`${JSON.stringify(e)}
 let compaction: Awaited<ReturnType<typeof buildCompaction>>;
 let ext: Awaited<ReturnType<typeof loadExtensions>>;
 try {
-  compaction = await buildCompaction(args.compaction, choice.contextWindow);
+  compaction = await buildCompaction(
+    args.compaction,
+    choice.contextWindow,
+    args.compactionReserve,
+    args.compactionTrigger,
+  );
   if (args.preservation) compaction.preservation = parsePreservation(args.preservation).policy;
   ext = await loadExtensions(args.extensions, { cwd: process.cwd(), log });
 } catch (err) {

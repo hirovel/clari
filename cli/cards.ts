@@ -378,11 +378,11 @@ export function sendCardLines(input: SendCardInput): string[] {
       g(
         "limit",
         room > 0
-          ? c.faint(`${fmtTok(room)} tok until auto-compaction (threshold ${fmtTok(r.threshold)})`)
+          ? c.faint(`${fmtTok(room)} tok until the compaction threshold (${fmtTok(r.threshold)})`)
           : c.jin(`over the auto-compaction threshold by ${fmtTok(-room)} tok`),
       ),
     );
-  } else lines.push(g("limit", c.faint("auto-compaction off")));
+  } else lines.push(g("limit", c.faint("no compaction configured")));
   return lines;
 }
 

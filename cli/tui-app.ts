@@ -390,7 +390,15 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       const cells = used > 0 ? Math.max(1, Math.round(used * 10)) : 0;
       const bar = "▰".repeat(cells) + "▱".repeat(10 - cells);
       const tone = used >= 0.7 ? c.zhu : c.jin;
-      tokens = `${tone(bar)} ${c.faint(`${pct(Math.max(0, 1 - used))} until auto-compaction · ${usage.inputTokens}→${usage.outputTokens} tok`)}`;
+      const trigger = compaction.trigger ?? "threshold";
+      const room = `${pct(Math.max(0, 1 - used))} ${trigger === "threshold" ? "until auto-compaction" : "until the compaction threshold"}`;
+      const over =
+        used >= 1 && trigger !== "threshold"
+          ? c.zhu(
+              ` · past the threshold: /compact to compress${trigger === "manual" ? "" : " (compaction is set to remind)"}`,
+            )
+          : "";
+      tokens = `${tone(bar)} ${c.faint(`${room} · ${usage.inputTokens}→${usage.outputTokens} tok`)}${over}`;
     }
     // 会话累计(含压缩摘要请求):输入、输出、缓存命中、费用。增量累计,每条事件到来时 render 喂进去。
     const totals = ctx.usage.totals();

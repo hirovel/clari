@@ -99,7 +99,7 @@ describe("/slots 与切换命令", () => {
     app.stop();
   });
 
-  it("参数校验:非法值给用法;运行中拒绝;/compaction clear 换策略且 /compact 用它;/compaction off 关自动", async () => {
+  it("参数校验:非法值给用法;运行中拒绝;/compaction clear 换策略且 /compact 用它;/compaction manual 关自动", async () => {
     const { app, log, text } = boot(scripted([]));
     await app.command("/execution sideways");
     expect(text()).toContain("Usage: /execution sequential|parallel");
@@ -128,16 +128,20 @@ describe("/slots 与切换命令", () => {
     expect(log.events.at(-1)).toMatchObject({
       type: "session/slot",
       slot: "compaction",
-      value: "clear",
+      value: "clear · trigger threshold",
     });
     await app.command("/compact");
     const comp = log.events.at(-1);
     expect(comp?.type).toBe("compaction");
     expect(comp?.type === "compaction" && comp.strategy).toContain("clearToolResults");
 
-    await app.command("/compaction off");
-    expect(log.events.at(-1)).toMatchObject({ type: "session/slot", slot: "compaction" });
-    expect(text()).toContain("auto-compaction disabled");
+    await app.command("/compaction manual");
+    expect(log.events.at(-1)).toMatchObject({
+      type: "session/slot",
+      slot: "compaction",
+      value: "clear · trigger manual",
+    });
+    expect(text()).toContain("compaction → trigger manual");
 
     await app.command("/compaction ./does-not-exist.mjs");
     expect(text()).toContain("✗");

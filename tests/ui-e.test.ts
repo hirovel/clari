@@ -87,7 +87,7 @@ describe("Request 卡:changed 行与消息表", () => {
     expect(first).toContain("Request #1");
     expect(first).toContain("first request · 8 messages");
     expect(first).toContain("limit");
-    expect(first).toContain("tok until auto-compaction");
+    expect(first).toContain("tok until the compaction threshold");
   });
 
   it("思考缺省一行,展开后逐行;首屏五个动词", () => {

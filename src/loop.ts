@@ -84,6 +84,9 @@ export type TurnDeps = {
   compaction?: CompactionConfig;
 };
 
+export type CompactionTrigger = "threshold" | "manual" | "remind";
+export const COMPACTION_TRIGGERS: CompactionTrigger[] = ["threshold", "manual", "remind"];
+
 export type CompactionConfig = {
   strategy: CompactionStrategy;
   window: number;
@@ -93,7 +96,11 @@ export type CompactionConfig = {
    */
   reserveTokens?: number;
   preservation?: PreservationPolicy;
-  auto?: boolean;
+  /**
+   * 什么时候压:threshold(缺省)= 每次请求前占用超阈值就压;manual = 只在 /compact 时压;
+   * remind = 不自动压,界面到阈值提示一行。三档下溢出恢复都会强制压缩一次。
+   */
+  trigger?: CompactionTrigger;
   /** 识别 provider 的上下文溢出错误。默认按常见错误文案匹配。 */
   isOverflow?: (err: Error) => boolean;
 };
@@ -202,8 +209,8 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
 
   let overflowRecovered = false;
   while (true) {
-    // 自动压缩检查:每次模型请求前,占用超阈值即压。
-    if (deps.compaction && deps.compaction.auto !== false) {
+    // 自动压缩检查:每次模型请求前,占用超阈值即压;manual 与 remind 不在这里动手,溢出时另有兜底。
+    if (deps.compaction && (deps.compaction.trigger ?? "threshold") === "threshold") {
       await compactIfNeeded(deps, deps.compaction, false);
     }
 

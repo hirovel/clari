@@ -11,7 +11,7 @@ import {
 import { DEFAULT_CONFIG_PATH, loadConfig, saveConfig } from "../src/config.js";
 import { now, type ToolCall } from "../src/events.js";
 import { type ApprovePolicy, allowAll, queueToTurnEnd, steer } from "../src/loop.js";
-import { loadCompactionStrategy, parsePreservation } from "./bootstrap.js";
+import { isCompactionTrigger, loadCompactionStrategy, parsePreservation } from "./bootstrap.js";
 import { editInExternalEditor } from "./editor.js";
 import { c } from "./theme.js";
 import {
@@ -174,7 +174,7 @@ export function initialSlotState(
   approval: ApprovalState,
 ): Record<string, string> {
   return {
-    compaction: deps.compactionName ?? "llm",
+    compaction: `${deps.compactionName ?? "llm"} · trigger ${deps.compaction.trigger ?? "threshold"}`,
     preservation: deps.preservationName ?? "keepRecentTokens (min(20000, window/4))",
     execution: deps.slots?.execution ?? "sequential",
     steering:
@@ -206,22 +206,31 @@ const done = (slot: string, value: string, when = "takes effect from the next tu
 
 async function compactionSlot(ctx: TuiContext, v: string): Promise<string> {
   const { compaction } = ctx;
+  const label = (strategy: string) => `${strategy} · trigger ${compaction.trigger ?? "threshold"}`;
   if (!v)
     return c.faint(
-      `compaction is ${ctx.slots.state.compaction}. Usage: /compaction llm|clear|pipeline|./strategy.mjs|off`,
+      `compaction is ${ctx.slots.state.compaction}. Usage: /compaction llm|clear|pipeline|./strategy.mjs (strategy) · /compaction threshold|manual|remind (trigger)`,
     );
-  if (v === "off") {
-    compaction.auto = false;
-    recordSlot(ctx, "compaction", "off (auto-compaction disabled; /compact still works)");
-    return done("compaction", "off", "auto-compaction disabled");
+  if (isCompactionTrigger(v)) {
+    compaction.trigger = v;
+    const strategy = ctx.slots.state.compaction?.split(" · ")[0] ?? "llm";
+    recordSlot(ctx, "compaction", label(strategy));
+    return done(
+      "compaction",
+      `trigger ${v}`,
+      v === "threshold"
+        ? "compacts automatically when usage passes the threshold"
+        : v === "manual"
+          ? "no automatic compaction; /compact when you decide (overflow still compacts once)"
+          : "no automatic compaction; the status bar says when you are past the threshold",
+    );
   }
   try {
     compaction.strategy = await loadCompactionStrategy(v);
   } catch (err) {
     return c.zhu(`✗ ${(err as Error).message}`);
   }
-  compaction.auto = true;
-  recordSlot(ctx, "compaction", v);
+  recordSlot(ctx, "compaction", label(v));
   return done("compaction", v, "used by the next auto or manual compaction");
 }
 

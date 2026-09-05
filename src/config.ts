@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ApprovalConfig } from "./approval.js";
+import type { CompactionTrigger } from "./loop.js";
 import type { EffortLevel, OpenAIDialect, Provider } from "./provider.js";
 import { openaiCompat } from "./provider.js";
 import { anthropic, type ThinkingMode } from "./providers/anthropic.js";
@@ -107,6 +108,10 @@ export type Preset = {
   steering?: "step" | "turn";
   /** 保留策略:"tokens 20000" 或 "ratio 0.3";缺省 keepRecentTokens(min(20000, window/4))。 */
   preservation?: string;
+  /** 压缩触发:threshold(缺省,到阈值自动压)| manual(只在 /compact)| remind(到阈值只提示)。 */
+  compactionTrigger?: CompactionTrigger;
+  /** 自动压缩阈值 = 窗口 − 这个余量;缺省 32000。 */
+  compactionReserve?: number;
   /** 是否记录原始流到 <session>.trace.jsonl;缺省 true。 */
   trace?: boolean;
   /** 工具结果初始折叠;缺省 false。 */
@@ -174,6 +179,8 @@ export const CONFIG_TEMPLATE: KernelConfig = {
   // 每个可选项的内置缺省值。命令行与预设可以覆盖;删掉某一项等于用内置缺省。
   defaults: {
     compaction: "llm",
+    compactionTrigger: "threshold",
+    compactionReserve: 32000,
     approve: "all",
     execution: "sequential",
     steering: "step",

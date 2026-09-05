@@ -81,7 +81,12 @@ try {
 const { log, sessionFile } = session;
 let compaction: Awaited<ReturnType<typeof buildCompaction>>;
 try {
-  compaction = await buildCompaction(args.compaction, first.contextWindow, RESERVE);
+  compaction = await buildCompaction(
+    args.compaction,
+    first.contextWindow,
+    args.compactionReserve ?? RESERVE,
+    args.compactionTrigger,
+  );
   if (args.preservation) compaction.preservation = parsePreservation(args.preservation).policy;
 } catch (err) {
   console.error((err as Error).message);

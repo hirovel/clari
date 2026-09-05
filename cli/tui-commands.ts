@@ -112,7 +112,8 @@ export const COMMANDS = [
   },
   {
     name: "compaction",
-    description: "Switch compaction strategy: /compaction llm|clear|pipeline|./x.mjs|off",
+    description:
+      "Compaction: /compaction llm|clear|pipeline|./x.mjs switches the strategy; /compaction threshold|manual|remind switches when it runs",
   },
   {
     name: "preservation",

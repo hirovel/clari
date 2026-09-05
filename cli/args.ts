@@ -8,7 +8,7 @@ import {
   type ToolPromptStyle,
   type ToolPromptsConfig,
 } from "../src/config.js";
-import type { ExecutionPolicy } from "../src/loop.js";
+import { COMPACTION_TRIGGERS, type CompactionTrigger, type ExecutionPolicy } from "../src/loop.js";
 import { EFFORT_LEVELS, type EffortLevel, parseEffort } from "../src/provider.js";
 import { isToolPromptStyle } from "./tool-prompts.js";
 
@@ -46,6 +46,10 @@ export type CommonArgs = {
   steering?: "step" | "turn";
   /** 保留策略:"tokens N" 或 "ratio X";不给用内置缺省。 */
   preservation?: string;
+  /** 压缩触发:threshold / manual / remind;不给用内置缺省 threshold。 */
+  compactionTrigger?: CompactionTrigger;
+  /** 自动压缩余量(token);不给用内置缺省 32000。 */
+  compactionReserve?: number;
   /** 预设里的审批规则;没有就用配置的,再没有就用内置缺省。 */
   approval?: ApprovalConfig;
   /** 预设名:从配置 presets 取缺省参数;显式给的参数优先。 */
@@ -103,6 +107,10 @@ export function resolveToolPrompts(args: CommonArgs, config: KernelConfig): Tool
     style: args.toolPrompts ?? config.toolPrompts?.style ?? "guided",
     ...(config.toolPrompts?.descriptions && { descriptions: config.toolPrompts.descriptions }),
   };
+}
+
+export function isCompactionTrigger(v: string): v is CompactionTrigger {
+  return (COMPACTION_TRIGGERS as string[]).includes(v);
 }
 
 export function parseCommonArgs(argv: string[]): CommonArgs {
@@ -185,6 +193,20 @@ export function parseCommonArgs(argv: string[]): CommonArgs {
         const v = takeValue(i++, a);
         parsePreservation(v);
         out.preservation = v;
+        break;
+      }
+      case "--compaction-trigger": {
+        const v = takeValue(i++, a);
+        if (!isCompactionTrigger(v))
+          throw new Error(`--compaction-trigger accepts threshold, manual or remind, got "${v}"`);
+        out.compactionTrigger = v;
+        break;
+      }
+      case "--compaction-reserve": {
+        const n = Number(takeValue(i++, a));
+        if (!Number.isInteger(n) || n < 0)
+          throw new Error("--compaction-reserve takes a non-negative integer number of tokens");
+        out.compactionReserve = n;
         break;
       }
       case "--json":
@@ -286,6 +308,8 @@ Options
   --execution sequential|parallel  tool execution slot: default one at a time; parallel = adjacent read-only calls run together
   --steering step|turn           steering slot: step (default) injects queued messages at the next step; turn waits until the model stops calling tools
   --preservation "tokens N|ratio X"   what compaction keeps verbatim; default tokens min(20000, window/4)
+  --compaction-trigger threshold|manual|remind   threshold (default) compacts when usage passes window - reserve; manual only on /compact; remind only shows a hint
+  --compaction-reserve N         tokens kept free below the window for the reply and the summary call (default 32000)
   --extension <module.mjs>       load an extension module (repeatable): add tools, replace slot implementations
   --max-steps N                  termination guard (default: no limit)
   --subagent                     add the task tool (sub-agents)
@@ -355,6 +379,10 @@ export function applyPreset(args: CommonArgs, config: KernelConfig): CommonArgs 
       parsePreservation(layer.preservation);
       out.preservation = layer.preservation;
     }
+    if (out.compactionTrigger === undefined && layer.compactionTrigger)
+      out.compactionTrigger = layer.compactionTrigger;
+    if (out.compactionReserve === undefined && layer.compactionReserve !== undefined)
+      out.compactionReserve = layer.compactionReserve;
     if (out.extensions.length === 0 && layer.extensions) out.extensions = [...layer.extensions];
   };
   if (preset) applyLayer(preset, `preset ${args.preset}`);

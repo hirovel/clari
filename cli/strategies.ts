@@ -6,7 +6,7 @@ import {
   llmSummarize,
   pipeline,
 } from "../src/compaction.js";
-import type { CompactionConfig } from "../src/loop.js";
+import type { CompactionConfig, CompactionTrigger } from "../src/loop.js";
 
 /** 自动压缩阈值之下预留给回复与工具结果的 token 数。 */
 export const RESERVE = 32000;
@@ -45,6 +45,12 @@ export async function buildCompaction(
   name: string,
   window: number,
   reserveTokens = RESERVE,
+  trigger?: CompactionTrigger,
 ): Promise<CompactionConfig> {
-  return { strategy: await loadCompactionStrategy(name), window, reserveTokens };
+  return {
+    strategy: await loadCompactionStrategy(name),
+    window,
+    reserveTokens,
+    ...(trigger && { trigger }),
+  };
 }
