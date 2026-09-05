@@ -88,7 +88,7 @@ function build(log: EventLog, provider: Provider, rows = 30) {
   return { insp, text, closed: () => closed };
 }
 
-describe("请求检视器(Q49)", () => {
+describe("请求检视器", () => {
   it("格式化:token 与耗时", () => {
     expect(fmtTok(999)).toBe("999");
     expect(fmtTok(1200)).toBe("1.2k");
@@ -242,7 +242,7 @@ describe("请求检视器(Q49)", () => {
     insp.handleInput("\t"); // 事件视图 → 压缩对照 → 请求视图
     expect(insp.currentMode).toBe("compactions");
     insp.handleInput("\t");
-    expect(insp.currentMode).toBe("composition"); // 第四视图:组装(Q81)
+    expect(insp.currentMode).toBe("composition"); // 第四视图:组装
     insp.handleInput("	");
     expect(insp.currentMode).toBe("list");
   });

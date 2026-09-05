@@ -44,7 +44,7 @@ export class EventLog {
 
   /**
    * 从 JSONL 文件重建日志(回放的入口)。缺省不挂文件 = 纯内存回放;
-   * attach 则沿用同一文件继续追加(会话恢复,Q54)。
+   * attach 则沿用同一文件继续追加(会话恢复,)。
    */
   static load(filePath: string, opts: { attach?: boolean } = {}): EventLog {
     const log = opts.attach ? new EventLog(filePath) : new EventLog();

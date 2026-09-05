@@ -1,4 +1,4 @@
-// 跨会话记忆(Q65):载体是通用标准 AGENTS.md 里一个由工具写入的节,别的工具也能读。
+// 跨会话记忆:载体是通用标准 AGENTS.md 里一个由工具写入的节,别的工具也能读。
 // 写入只走显式 remember 工具;读取在会话开始随项目指令进系统提示词(--memory 打开时);
 // 预算硬上限,超限报错不静默截断。没有隐藏目录,没有向量库。
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";

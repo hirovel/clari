@@ -1,4 +1,4 @@
-// MCP 工具桥接(Q87):每个 MCP 工具映射成内核的 Tool,名字 mcp__<server>__<tool>;
+// MCP 工具桥接:每个 MCP 工具映射成内核的 Tool,名字 mcp__<server>__<tool>;
 // 服务器的启动、失败、每次往返、stderr、工具表变化都记成 ext/event(source "mcp")。内核不知道 MCP 的存在。
 import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";

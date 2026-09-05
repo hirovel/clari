@@ -1,7 +1,7 @@
 import type { AgentEvent, ToolCall } from "./events.js";
 
 /**
- * 内部消息模型(Q4b 裁决):自有类型,不绑任何 provider 的 wire 格式。
+ * 内部消息模型:自有类型,不绑任何 provider 的 wire 格式。
  * 它只描述"模型将看到什么",翻译成 OpenAI/Anthropic 格式是适配器的事。
  */
 export type Message =
@@ -13,9 +13,9 @@ export type Message =
       toolCalls: ToolCall[];
       reasoning?: string;
       reasoningKind?: "full" | "summary";
-      /** 适配器私有回传物(Q53),原样透传。 */
+      /** 适配器私有回传物,原样透传。 */
       opaque?: unknown;
-      /** 这条消息被 context/edit 改过(Q74):回传物已丢弃;适配器据此决定之后的思考块要不要丢。 */
+      /** 这条消息被 context/edit 改过:回传物已丢弃;适配器据此决定之后的思考块要不要丢。 */
       edited?: true;
     }
   | {
@@ -27,7 +27,7 @@ export type Message =
       edited?: true;
     };
 
-/** 编辑状态(Q74):每个目标事件各字段的最新值,以及被丢弃的事件下标。 */
+/** 编辑状态:每个目标事件各字段的最新值,以及被丢弃的事件下标。 */
 export function editState(
   events: readonly AgentEvent[],
   upTo = events.length,
@@ -98,14 +98,14 @@ export function compactionState(
  *
  * interrupt 事件不投影 —— 打断本身不是模型可见内容。
  * compaction 事件不直接投影,但决定投影:被覆盖的事件跳过、在覆盖起点注入摘要、
- * 被清除的工具结果换成占位文本(Q31/Q32)。
+ * 被清除的工具结果换成占位文本。
  */
 export function deriveMessages(events: readonly AgentEvent[]): Message[] {
   return composeContext(events).messages;
 }
 
 /**
- * 一条消息的来历(Q81):它来自哪个事件,经过了哪些组装阶段。
+ * 一条消息的来历:它来自哪个事件,经过了哪些组装阶段。
  * stages 用固定词:summary(压缩摘要合成)、covered(原文被摘要取代,不出现)、cleared(工具结果换占位)、
  * edited:<字段>(context/edit 改过)、dropped(context/drop 丢弃,不出现)。
  */
@@ -135,7 +135,7 @@ function remember(e: AgentEvent, m: Message): Message {
 }
 
 /**
- * 上下文组装(Q81):事件数组 → 模型可见的消息序列,带每条的来历。
+ * 上下文组装:事件数组 → 模型可见的消息序列,带每条的来历。
  * 阶段固定且逐条可见:投影(事件→消息)→ 压缩(覆盖区跳过、切点注入摘要、清除占位)→ 编辑(换字段、丢弃)。
  * 纯函数,同一日志永远同一结果;deriveMessages 只是它的 messages 一列。
  */
@@ -163,7 +163,7 @@ export function composeContext(
   };
   for (let i = 0; i < upTo; i++) {
     if (c.summary && i === c.coversFrom) {
-      // 摘要是合成的消息,它改变了此后所有消息的前缀:与编辑同等对待(Q76),
+      // 摘要是合成的消息,它改变了此后所有消息的前缀:与编辑同等对待,
       // Anthropic 适配器据此不再回传之后的思考块(签名绑定前缀,否则新账号 400)。
       push(
         { role: "user", content: `[会话前段已压缩,以下为摘要]\n${c.summary}`, edited: true },
@@ -258,7 +258,8 @@ export function composeContext(
   return { messages, provenance, omitted };
 }
 
-function isProjected(e: AgentEvent): boolean {
+/** 模型可见的事件类型:这四种投影成消息,其余只给人看。 */
+export function isProjected(e: AgentEvent): boolean {
   return (
     e.type === "session/start" ||
     e.type === "user/message" ||

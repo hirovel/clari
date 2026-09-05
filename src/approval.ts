@@ -1,4 +1,4 @@
-// 审批策略(Q84):每个工具调用执行前,先由规则给出 allow / ask / deny 三种裁决;ask 才轮到人。
+// 审批策略:每个工具调用执行前,先由规则给出 allow / ask / deny 三种裁决;ask 才轮到人。
 // 规则是纯数据(配置或会话中 /approve 加的),裁决是纯函数,理由随裁决一起给出,界面照抄,不另起解释。
 // 内核不认识"危险命令":它只按规则匹配。哪些命令危险是用户的知识,写进 deny 规则。
 import { isAbsolute, relative, resolve, sep } from "node:path";
@@ -36,7 +36,7 @@ export function subjectOf(call: ToolCall): string | undefined {
   const a = (call.args ?? {}) as Record<string, unknown>;
   if (call.name === "bash") return typeof a.command === "string" ? a.command : undefined;
   if (call.name === "fetch") return typeof a.url === "string" ? a.url : undefined;
-  // 带命名空间的工具(Q87):prefix__group__name → "group:name",规则写 prefix:group:name*,如 mcp:github:get_*。
+  // 带命名空间的工具:prefix__group__name → "group:name",规则写 prefix:group:name*,如 mcp:github:get_*。
   const ns = namespaceOf(call.name);
   if (ns) {
     const rest = call.name.slice(ns.length + 2);

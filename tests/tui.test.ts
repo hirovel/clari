@@ -208,7 +208,7 @@ describe("TUI 壳", () => {
     expect(doc).toContain("Request #2");
     expect(doc).toContain("messages   4 · ≈");
     expect(doc).toContain("same       params · system · tools");
-    expect(doc).toContain("行10"); // 默认完整显示(Q34)
+    expect(doc).toContain("行10"); // 默认完整显示
     // 思考缺省折成一行:首行 + 种类与行数;第二行不显示。
     expect(doc).toContain("thinking   先拿到输出");
     expect(doc).toContain("(? · 2 lines · Ctrl+T)");
@@ -350,7 +350,7 @@ describe("TUI 壳", () => {
     app.stop();
   });
 
-  it("edit 调用显示行级 diff,write 显示前几行与总行数(Q58)", async () => {
+  it("edit 调用显示行级 diff,write 显示前几行与总行数", async () => {
     const { app } = boot(
       scripted([
         {
@@ -385,7 +385,7 @@ describe("TUI 壳", () => {
     app.stop();
   });
 
-  it("--approve ask:每个调用弹一行确认;y 执行、n 以拒绝结果回喂、a 本会话不再问(Q64)", async () => {
+  it("--approve ask:每个调用弹一行确认;y 执行、n 以拒绝结果回喂、a 本会话不再问", async () => {
     const term = new VirtualTerminal(100, 40);
     const log = new EventLog();
     const app = createTuiApp({

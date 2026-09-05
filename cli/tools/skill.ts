@@ -1,4 +1,4 @@
-// skill 工具(Q80,skills.load = tool 时装上):模型点名一个技能,正文作为工具结果返回。
+// skill 工具(skills.load = tool 时装上):模型点名一个技能,正文作为工具结果返回。
 // 与缺省的 read 路线相比,多一个工具定义占 token,少一次"猜路径"的往返;哪种更好留给对照实验。
 import { Type } from "@sinclair/typebox";
 import { defineTool } from "../../src/tools.js";

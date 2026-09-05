@@ -1,4 +1,4 @@
-// 一次性模式(Q55):跑一个 turn 就退出。策略 A/B 的执行器。
+// 一次性模式:跑一个 turn 就退出。策略 A/B 的执行器。
 // 用法:pnpm once -- "任务" [--json] [--model X] [--effort L] [--compaction llm|clear|pipeline]
 //                 [--max-steps N] [--resume 文件 | --continue] [--system-prompt 文件] [--append-system-prompt 文件]
 // stdout:最终回复文本;--json 时输出结构化结果。非零退出码 = 请求失败。
@@ -87,7 +87,7 @@ const tools = [
   ...baseTools.filter((t) => !ext.tools?.some((x) => x.name === t.name)),
   ...(ext.tools ?? []),
 ];
-// MCP 服务器(Q87):一次性模式也连,跑完关。
+// MCP 服务器:一次性模式也连,跑完关。
 const mcpCfg = mcpConfigOf(boot.config.mcp);
 const mcpServers = loadMcpServers(mcpCfg, process.cwd());
 let mcp: McpBridge | undefined;

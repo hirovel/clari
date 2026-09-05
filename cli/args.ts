@@ -38,28 +38,28 @@ export type CommonArgs = {
   maxSteps?: number;
   json: boolean;
   help: boolean;
-  /** 审批槽(Q23/Q64/Q84):all(缺省)= 不问;policy = 按规则裁决,ask 的才问人;ask = 每个调用都问。 */
+  /** 审批槽:all(缺省)= 不问;policy = 按规则裁决,ask 的才问人;ask = 每个调用都问。 */
   approve: "all" | "ask" | "policy";
-  /** 工具描述风格槽(Q89):命令行 > 预设 > 配置 > guided。 */
+  /** 工具描述风格槽:命令行 > 预设 > 配置 > guided。 */
   toolPrompts?: ToolPromptStyle;
-  /** 插话槽(Q78):step 缺省;turn = 留言等到模型停止调用工具。 */
+  /** 插话槽:step 缺省;turn = 留言等到模型停止调用工具。 */
   steering?: "step" | "turn";
-  /** 保留策略(Q78):"tokens N" 或 "ratio X";不给用内置缺省。 */
+  /** 保留策略:"tokens N" 或 "ratio X";不给用内置缺省。 */
   preservation?: string;
-  /** 预设里的审批规则(Q84);没有就用配置的,再没有就用内置缺省。 */
+  /** 预设里的审批规则;没有就用配置的,再没有就用内置缺省。 */
   approval?: ApprovalConfig;
-  /** 预设名(Q15):从配置 presets 取缺省参数;显式给的参数优先。 */
+  /** 预设名:从配置 presets 取缺省参数;显式给的参数优先。 */
   preset?: string;
-  /** 跨会话记忆(Q65):缺省关。 */
+  /** 跨会话记忆:缺省关。 */
   memory?: boolean;
-  /** 系统提示词的段与顺序(Q66)。 */
+  /** 系统提示词的段与顺序。 */
   promptSections?: PromptSectionName[];
-  /** 项目指令与记忆放 system 还是首条 user 消息(Q66)。 */
+  /** 项目指令与记忆放 system 还是首条 user 消息。 */
   instructionsAs?: "system" | "user";
-  /** 技能两个旋钮(Q80),来自配置或预设:清单放 system 还是不放;模型触发时 read 还是 skill 工具。 */
+  /** 技能两个旋钮,来自配置或预设:清单放 system 还是不放;模型触发时 read 还是 skill 工具。 */
   skillsList?: "system" | "none";
   skillsLoad?: "read" | "tool";
-  /** 执行槽(Q10):sequential 缺省;parallel = 并行安全的相邻只读调用同时跑。 */
+  /** 执行槽:sequential 缺省;parallel = 并行安全的相邻只读调用同时跑。 */
   execution?: ExecutionPolicy;
   /** 扩展模块路径(可多个):default 导出一个函数,返回要加的工具与槽实现。 */
   extensions: string[];
@@ -75,7 +75,7 @@ export type CommonArgs = {
   foldExplicit?: boolean;
 };
 
-/** 保留策略的文字形态 → 实现与显示名(Q78/Q90):配置、预设、命令行、/preservation 共用一种写法。 */
+/** 保留策略的文字形态 → 实现与显示名:配置、预设、命令行、/preservation 共用一种写法。 */
 export function parsePreservation(spec: string): { policy: PreservationPolicy; label: string } {
   const m = spec.trim().match(/^(tokens|ratio)\s+([\d.]+)$/);
   if (!m) throw new Error(`preservation must be "tokens N" or "ratio X", got "${spec}"`);
@@ -88,7 +88,7 @@ export function parsePreservation(spec: string): { policy: PreservationPolicy; l
   return { policy: keepRatio(n), label: `keepRatio(${n})` };
 }
 
-/** 审批槽的启动形态(Q84):all / ask 原样;policy = 预设规则 → 配置规则 → 内置缺省。 */
+/** 审批槽的启动形态:all / ask 原样;policy = 预设规则 → 配置规则 → 内置缺省。 */
 export function resolveApproval(
   args: CommonArgs,
   config: KernelConfig,
@@ -97,7 +97,7 @@ export function resolveApproval(
   return args.approval ?? config.approval ?? DEFAULT_APPROVAL;
 }
 
-/** 工具描述风格的启动形态(Q89):风格按优先级取,逐工具覆盖只来自配置。 */
+/** 工具描述风格的启动形态:风格按优先级取,逐工具覆盖只来自配置。 */
 export function resolveToolPrompts(args: CommonArgs, config: KernelConfig): ToolPromptsConfig {
   return {
     style: args.toolPrompts ?? config.toolPrompts?.style ?? "guided",
@@ -312,7 +312,7 @@ export function applyPreset(args: CommonArgs, config: KernelConfig): CommonArgs 
       `no preset "${args.preset}" in config; choices: ${Object.keys(config.presets ?? {}).join(" ") || "(none)"}`,
     );
   }
-  // 解析顺序(Q90):命令行 > 预设 > 配置 defaults > 内置缺省。有内置缺省的字段靠 *Explicit 与 settled 判断"还没人定"。
+  // 解析顺序:命令行 > 预设 > 配置 defaults > 内置缺省。有内置缺省的字段靠 *Explicit 与 settled 判断"还没人定"。
   const settled = new Set<string>();
   const open = (field: string, explicit: boolean | undefined) => !explicit && !settled.has(field);
   const applyLayer = (layer: Preset, label: string) => {

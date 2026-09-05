@@ -1,5 +1,5 @@
-// 呈现:UI 是事件流的订阅者。每条事件到屏幕的映射都在 render 里;历史回放与新事件走同一个函数(Q54)。
-// 这里还有子 agent 视图(Q62)、流式回复与思考的增量绘制、折叠/展开两个显示开关。
+// 呈现:UI 是事件流的订阅者。每条事件到屏幕的映射都在 render 里;历史回放与新事件走同一个函数。
+// 这里还有子 agent 视图、流式回复与思考的增量绘制、折叠/展开两个显示开关。
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import type { AgentEvent } from "../src/events.js";
 import { type Composition, composeContext, type Message } from "../src/messages.js";
@@ -78,7 +78,7 @@ export function streamDelta(ctx: TuiContext, d: string): void {
   ctx.tui.requestRender();
 }
 
-/** 推理内容不隐藏(Q34):thinking 模型的思考过程以淡字实时呈现。 */
+/** 推理内容不隐藏:thinking 模型的思考过程以淡字实时呈现。 */
 export function streamReasoning(ctx: TuiContext, d: string): void {
   const v = ctx.view;
   if (!v.reasoningView) {
@@ -113,7 +113,7 @@ export function setReceiveHead(
   );
 }
 
-// ---------- 子 agent 视图(Q62) ----------
+// ---------- 子 agent 视图 ----------
 
 export class ChildView {
   readonly block = new Container();
@@ -311,7 +311,7 @@ function renderAssistant(
   if (e.usage) v.lastUsage = e.usage;
   for (const tc of e.toolCalls) {
     transcript.addChild(new Text(callLine(tc.name, formatArgs(tc.args)), 1, 0));
-    // edit/write 的改动内容直接可见(Q58):diff 从参数算出,不进日志。续行缩进到内容列。
+    // edit/write 的改动内容直接可见:diff 从参数算出,不进日志。续行缩进到内容列。
     const detail = toolCallDetail(tc.name, tc.args);
     if (detail) {
       transcript.addChild(
@@ -325,7 +325,7 @@ function renderAssistant(
         ),
       );
     }
-    // task 调用行下面留一个槽,子 agent 开跑时把它的块挂进来(Q62)。
+    // task 调用行下面留一个槽,子 agent 开跑时把它的块挂进来。
     if (tc.name === "task") {
       const slot = new Container();
       ctx.children.slots.set(tc.id, slot);
@@ -334,7 +334,7 @@ function renderAssistant(
   }
   // 响应里除思考与文本之外的块:私有回传物(签名思考块、加密推理项)。
   for (const l of receiveBlockLines(e)) transcript.addChild(new Text(l, 1, 0));
-  // 原始流缺省开(Q82):每张接收卡尾行说明收了几行、去哪看。
+  // 原始流缺省开:每张接收卡尾行说明收了几行、去哪看。
   if (ctx.deps.trace) {
     const raw = req.rawAt.get(req.lastTurnIndex);
     if (raw) transcript.addChild(new Text(rawRow(raw.length, req.count), 1, 0));
@@ -345,7 +345,7 @@ function renderAssistant(
 }
 
 function renderToolResult(ctx: TuiContext, e: Extract<AgentEvent, { type: "tool/result" }>): void {
-  // 默认完整显示,不折叠(Q34);Ctrl+O 切换折叠,内容仍在节点里。
+  // 默认完整显示,不折叠;Ctrl+O 切换折叠,内容仍在节点里。
   const rec: ResultRecord = {
     name: e.name,
     content: e.content,
@@ -368,7 +368,7 @@ function renderRequest(ctx: TuiContext, e: Extract<AgentEvent, { type: "request"
   req.count += 1;
   req.lastIndex = log.events.length - 1;
   req.providersAt.set(req.lastIndex, agent.provider);
-  // 来历(Q81):正常步的正文就是之前事件的投影,每条都能对回事件号;摘要请求的正文由策略记的 body 重建,没有来历。
+  // 来历:正常步的正文就是之前事件的投影,每条都能对回事件号;摘要请求的正文由策略记的 body 重建,没有来历。
   // 一次投影同时给消息与来历,不再算两遍。
   let messages: Message[];
   let provenance: Composition["provenance"] | undefined;
@@ -407,7 +407,7 @@ function renderRequest(ctx: TuiContext, e: Extract<AgentEvent, { type: "request"
     collapsed: req.lastIndex < req.finalRequestIndex,
     dropsThinking: agent.provider.fields?.protocol.startsWith("anthropic") ?? false,
   });
-  // 旧的 Request 卡折成两行(头 + changed,Q85):当步的信息在新卡上,全文永远在检视器。
+  // 旧的 Request 卡折成两行(头 + changed,):当步的信息在新卡上,全文永远在检视器。
   if (req.lastCard) req.lastCard.node.setText(req.lastCard.lines.slice(0, 2).join("\n"));
   const cardNode = new Text(cardLines.join("\n"), 1, 0);
   req.lastCard = { node: cardNode, lines: cardLines };

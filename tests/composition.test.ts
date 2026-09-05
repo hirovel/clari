@@ -1,4 +1,4 @@
-// 上下文组装(Q81):composeContext 的来历与省略、三家 wireMap、组装槽记 body、检视器组装视图。
+// 上下文组装:composeContext 的来历与省略、三家 wireMap、组装槽记 body、检视器组装视图。
 import { describe, expect, it } from "vitest";
 import { compositionLines, compositionRows, RequestInspector } from "../cli/inspector.js";
 import type { AgentEvent } from "../src/events.js";
@@ -157,7 +157,7 @@ describe("检视器组装视图", () => {
     expect(screen).toContain("6 messages");
     expect(screen).toContain("summary(covers #2–#5)");
     expect(screen).toContain("omitted: 4 covered by the summary");
-    // Enter 先开动作菜单(Q83),第一项"View full message"再 Enter 才进全文
+    // Enter 先开动作菜单,第一项"View full message"再 Enter 才进全文
     insp.handleInput("\r");
     expect(insp.currentMode).toBe("actions");
     const menu = insp.render(120).map(plain).join("\n");

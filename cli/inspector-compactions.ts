@@ -1,7 +1,7 @@
 import { estimateTokens } from "../src/context.js";
 import type { AgentEvent } from "../src/events.js";
+import { isProjected } from "../src/messages.js";
 import { clock, eventTokens, fmtMs, fmtTok, indent } from "./inspector-format.js";
-import { PROJECTED } from "./inspector-requests.js";
 import { c } from "./theme.js";
 
 type CompactionEvent = Extract<AgentEvent, { type: "compaction" }>;
@@ -9,7 +9,7 @@ type CompactionEvent = Extract<AgentEvent, { type: "compaction" }>;
 export const COMPACTION_SECTIONS = ["compare", "original", "summary", "cleared"] as const;
 export type CompactionSection = 1 | 2 | 3 | 4;
 
-// ---------- 压缩对照(Q63):哪一大段变成了什么 ----------
+// ---------- 压缩对照:哪一大段变成了什么 ----------
 
 export type CompactionRecord = {
   n: number;
@@ -37,7 +37,7 @@ export function collectCompactions(events: readonly AgentEvent[]): CompactionRec
       const upTo = e.coversUpTo ?? 0;
       for (let k = from; k < upTo; k++) {
         const x = events[k];
-        if (x && PROJECTED.has(x.type)) covered.push(k);
+        if (x && isProjected(x)) covered.push(k);
       }
     }
     const cleared = (e.cleared ?? []).filter((k) => events[k]?.type === "tool/result");

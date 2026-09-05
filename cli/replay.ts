@@ -59,7 +59,7 @@ if (requestFlag >= 0) {
   }
 }
 
-// 压缩对照(Q63):哪一大段原文变成了什么;--json 给评测脚本。
+// 压缩对照:哪一大段原文变成了什么;--json 给评测脚本。
 const compactionFlag = flags.indexOf("--compaction");
 if (compactionFlag >= 0) {
   const n = Number(flags[compactionFlag + 1]);

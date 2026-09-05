@@ -41,7 +41,7 @@ describe("stream accumulation", () => {
     expect(turn.toolCalls).toEqual([{ id: "c1", name: "read", args: { path: "a.txt" } }]);
   });
 
-  it("参数 JSON 残缺不抛错,包成 __unparsed 交给工具层回喂(Q9)", () => {
+  it("参数 JSON 残缺不抛错,包成 __unparsed 交给工具层回喂", () => {
     const acc = newAcc();
     feedChunk(acc, {
       choices: [
@@ -56,7 +56,7 @@ describe("stream accumulation", () => {
     expect(turn.toolCalls[0]?.args).toEqual({ __unparsed: '{"broken' });
   });
 
-  it("aborted:保留半截文本,丢弃未完成的 toolCalls(Q11)", () => {
+  it("aborted:保留半截文本,丢弃未完成的 toolCalls", () => {
     const acc = newAcc();
     feedChunk(acc, { choices: [{ delta: { content: "我正在" } }] });
     feedChunk(acc, {

@@ -65,7 +65,7 @@ describe("Agent", () => {
     );
   });
 
-  it("interrupt:记 session/interrupt 事件并让 turn 以 aborted 收场(Q11)", async () => {
+  it("interrupt:记 session/interrupt 事件并让 turn 以 aborted 收场", async () => {
     const log = newLog();
     const provider: Provider = {
       model: "fake",
@@ -89,7 +89,7 @@ describe("Agent", () => {
     expect(agent.running).toBe(false);
   });
 
-  it("空闲时 prompt:上次打断遗留的队列先注入,不静默丢弃(Q20 硬规矩)", async () => {
+  it("空闲时 prompt:上次打断遗留的队列先注入,不静默丢弃(硬规矩)", async () => {
     const log = newLog();
     let firstRun = true;
     const provider: Provider = {

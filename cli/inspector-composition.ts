@@ -1,4 +1,4 @@
-// 组装视图(Q81)与上下文面板的动作(Q83):模型下一步会看到的每条消息从哪来、经过了什么、落在线路的第几条;
+// 组装视图与上下文面板的动作:模型下一步会看到的每条消息从哪来、经过了什么、落在线路的第几条;
 // 选中一条消息能做什么,每项带后果。
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { AgentEvent } from "../src/events.js";
@@ -7,7 +7,7 @@ import type { Provider } from "../src/provider.js";
 import { firstLine, fmtTok, indent, messageTokens, roleLabel } from "./inspector-format.js";
 import { c } from "./theme.js";
 
-// ---------- 组装视图(Q81):模型下一步会看到的每条消息从哪来、经过了什么、落在线路的第几条 ----------
+// ---------- 组装视图:模型下一步会看到的每条消息从哪来、经过了什么、落在线路的第几条 ----------
 
 export type CompositionRow = {
   /** 投影下标(从 1 起,与发送卡、/edit N 的编号不同:那是事件下标)。 */
@@ -85,7 +85,7 @@ export function compositionLines(events: readonly AgentEvent[], r: CompositionRo
   return lines;
 }
 
-// ---------- 上下文面板的动作(Q83):选中一条消息,Enter 列出能做什么,每项带后果 ----------
+// ---------- 上下文面板的动作:选中一条消息,Enter 列出能做什么,每项带后果 ----------
 
 export type ContextAction =
   | "view"

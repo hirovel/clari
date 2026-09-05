@@ -2,9 +2,9 @@ import { Kind, type Static, type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
 /**
- * 可执行工具(Q24):ToolDef(wire 层纯描述)加 execute。
- * 契约(Q18):返回纯文本;失败一律 throw,由循环捕获转成 tool/result{isError:true}。
- * ctx.signal 必须被长任务工具响应,否则即时打断(Q11)到不了子进程。
+ * 可执行工具:ToolDef(wire 层纯描述)加 execute。
+ * 契约:返回纯文本;失败一律 throw,由循环捕获转成 tool/result{isError:true}。
+ * ctx.signal 必须被长任务工具响应,否则即时打断到不了子进程。
  */
 export type ToolContext = {
   signal: AbortSignal;
@@ -15,7 +15,7 @@ export type ToolContext = {
 export type Tool<S extends TSchema = TSchema> = {
   name: string;
   description: string;
-  /** TypeBox schema,本身就是 JSON Schema 对象,原样进 wire 请求(Q19)。 */
+  /** TypeBox schema,本身就是 JSON Schema 对象,原样进 wire 请求。 */
   parameters: S;
   execute(args: Static<S>, ctx: ToolContext): Promise<string>;
   /**
@@ -33,7 +33,7 @@ export function defineTool<S extends TSchema>(tool: Tool<S>): Tool<S> {
 export type ValidationResult = { ok: true; value: unknown } | { ok: false; error: string };
 
 /**
- * 参数校验(Q19,循环在执行前统一调用):
+ * 参数校验(循环在执行前统一调用):
  * Value.Convert 先做类型强转(模型爱把数字发成字符串),再 Check。
  * 错误文本仿 pi:逐路径列错误,末尾附收到的参数原文,让模型看见自己发了什么。
  */

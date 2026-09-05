@@ -170,7 +170,7 @@ describe("文件工具的边界", () => {
     await expect(readTool.execute({ path: file }, ctx)).rejects.toThrow(/binary/);
   });
 
-  it("read:目录 → 列举条目,目录在前带 /,文件带字节数(Q88)", async () => {
+  it("read:目录 → 列举条目,目录在前带 /,文件带字节数", async () => {
     const sub = join(dir, "listing");
     mkdirSync(join(sub, "deep"), { recursive: true });
     writeFileSync(join(sub, "a.txt"), "abc");

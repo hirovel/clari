@@ -1,4 +1,4 @@
-// MCP 客户端(Q87):JSON-RPC 2.0 over stdio(一行一条)或 Streamable HTTP(一条消息一个 POST)。
+// MCP 客户端:JSON-RPC 2.0 over stdio(一行一条)或 Streamable HTTP(一条消息一个 POST)。
 // 双时代:先按 2026-07-28 发 server/discover(每个请求自带 _meta 版本与能力,没有握手);
 // 服务器不认就回退 2025-06-18 的 initialize 握手。只做 tools/list、tools/call 与取消,不做 OAuth、resources、prompts。
 // 每条收发的消息都交给 onRpc,检视器据此可见;stderr 逐行交给 onLog,不当错误。

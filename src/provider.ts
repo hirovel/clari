@@ -23,13 +23,13 @@ export type AssistantTurn = {
   /** reasoning 是模型读回去的全文,还是只给人看的摘要(正文在 opaque 里)。 */
   reasoningKind?: "full" | "summary";
   /**
-   * 适配器私有回传物(Q53):必须在下一轮原样送回、内核不解释的东西。
+   * 适配器私有回传物:必须在下一轮原样送回、内核不解释的东西。
    * Anthropic 是带签名的 thinking 块;适配器写、同一适配器读,内核只搬运。
    */
   opaque?: unknown;
 };
 
-// ---------- 强度级别(Q52) ----------
+// ---------- 强度级别 ----------
 
 /** 统一级别。缺省不传:请求里不出现任何强度参数,各家用自己的默认。 */
 export const EFFORT_LEVELS = ["off", "low", "medium", "high", "xhigh", "max"] as const;
@@ -61,7 +61,7 @@ export function clampEffort(level: EffortLevel, supported?: readonly EffortLevel
 export type WireOptions = { effort?: EffortLevel };
 
 export type CompleteOptions = {
-  /** 流式增量只进 UI 不进日志(Q12):增量拼完即最终消息,日志只记完整事件。 */
+  /** 流式增量只进 UI 不进日志:增量拼完即最终消息,日志只记完整事件。 */
   onDelta?: (textDelta: string) => void;
   onReasoning?: (reasoningDelta: string) => void;
   signal?: AbortSignal;
@@ -95,11 +95,11 @@ export interface Provider {
    */
   wire?(messages: Message[], tools: ToolDef[], opts?: WireOptions): unknown;
   /**
-   * 投影下标 → 线路正文里的下标(Q81):第 i 条消息落在 wire 消息数组的第几条;-1 = 不在数组里(如抽到顶层的 system)。
+   * 投影下标 → 线路正文里的下标:第 i 条消息落在 wire 消息数组的第几条;-1 = 不在数组里(如抽到顶层的 system)。
    * Anthropic 合并连续工具结果、Responses 把一条助手消息拆成几项,组装视图据此标每条"落在哪"。
    */
   wireMap?(messages: Message[]): number[];
-  /** 向供应商查询当前可用的模型名(GET /models)。发现模型下线与新模型靠这个,不靠猜(Q59)。 */
+  /** 向供应商查询当前可用的模型名(GET /models)。发现模型下线与新模型靠这个,不靠猜。 */
   listModels?(): Promise<string[]>;
 }
 
@@ -131,9 +131,9 @@ export async function fetchModelIds(
     .sort();
 }
 
-// ---------- OpenAI-compatible 适配器(Q4b:先接一家,DeepSeek 走此协议) ----------
+// ---------- OpenAI-compatible 适配器(先接一家,DeepSeek 走此协议) ----------
 
-/** 同一协议下的方言差异只体现在强度参数上(Q52)。 */
+/** 同一协议下的方言差异只体现在强度参数上。 */
 export type OpenAIDialect = "openai" | "deepseek";
 
 /**
@@ -188,7 +188,7 @@ export type StreamAcc = {
   toolCalls: { id: string; name: string; argsJson: string }[];
   finishReason?: string;
   usage?: Usage;
-  /** 不解释的响应元数据(Q82)。 */
+  /** 不解释的响应元数据。 */
   extras: Record<string, unknown>;
 };
 
@@ -245,10 +245,10 @@ export function finishAcc(acc: StreamAcc, aborted: boolean): AssistantTurn {
   const toolCalls: ToolCall[] = acc.toolCalls.map((tc) => ({
     id: tc.id,
     name: tc.name,
-    // 参数 JSON 解析失败不在这里报错:原样透传,让工具层校验并回喂模型(Q9)。
+    // 参数 JSON 解析失败不在这里报错:原样透传,让工具层校验并回喂模型。
     args: safeParse(tc.argsJson),
   }));
-  // length(Q26):调用保留在 turn 里 —— 循环需要逐个补错误应答,但绝不执行。
+  // length:调用保留在 turn 里 —— 循环需要逐个补错误应答,但绝不执行。
   const stopReason: StopReason = aborted
     ? "aborted"
     : acc.finishReason === "length"
@@ -341,7 +341,7 @@ export type OpenAICompatOptions = {
   dialect?: OpenAIDialect;
   /** 该模型支持的强度级别;请求了不支持的就向下回退。 */
   effortLevels?: EffortLevel[];
-  /** 逐字合并进请求正文的字段(Q59 透传):API 新参数不必等代码。 */
+  /** 逐字合并进请求正文的字段(透传):API 新参数不必等代码。 */
   extraBody?: Record<string, unknown>;
   /** 附加请求头(如 beta 头)。 */
   extraHeaders?: Record<string, string>;
@@ -450,7 +450,7 @@ export function openaiCompat(opts: OpenAICompatOptions): Provider {
             }
             return finishAcc(acc, false);
           } catch (err) {
-            // 打断(Q11):已流出的部分作为 aborted turn 返回,由循环记入日志,不丢真相。
+            // 打断:已流出的部分作为 aborted turn 返回,由循环记入日志,不丢真相。
             if (signal?.aborted) return finishAcc(acc, true);
             throw stallToError(err, Boolean(acc.text || acc.reasoning));
           }

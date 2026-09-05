@@ -1,5 +1,5 @@
-// 系统提示词组装(Q51/Q66)。CLI 层的纯函数,内核不知道它:内核只收到最终字符串并存进 session/start。
-// 段列表是数据不是字符串拼接:哪几段、什么顺序、放 system 还是首条 user 消息,都由配置或预设决定(Q66),
+// 系统提示词组装。CLI 层的纯函数,内核不知道它:内核只收到最终字符串并存进 session/start。
+// 段列表是数据不是字符串拼接:哪几段、什么顺序、放 system 还是首条 user 消息,都由配置或预设决定,
 // 检视器与 /context 按段读取。
 // 调查共识直接采用:项目指令文件按目录层级根在前、cwd 在后拼接;向上搜索止于 git 根;总预算加降级;替换与追加并存。
 import { execFileSync } from "node:child_process";
@@ -36,7 +36,7 @@ export const SECTION_LABELS: Record<PromptSectionName, string> = {
 };
 
 /**
- * 技能(Q80):一个目录一个 SKILL.md。frontmatter 认四个字段:name、description、
+ * 技能:一个目录一个 SKILL.md。frontmatter 认四个字段:name、description、
  * disable-model-invocation(只许用户 /名 触发,不进系统提示词)、allowed-tools(用户触发的那一 turn 里这些工具免审批)、
  * argument-hint(补全提示)。正文按需进入上下文,不预先占 token。
  */
@@ -216,7 +216,7 @@ export const DEFAULT_INSTRUCTION_BUDGET = 32 * 1024;
 
 /**
  * 发现项目指令文件:全局 → git 根 → … → cwd,每目录取一个。
- * 每个文件里由工具写入的记忆节被拆出来单独成段(记忆是否注入由调用方决定,Q65 缺省关)。
+ * 每个文件里由工具写入的记忆节被拆出来单独成段(记忆是否注入由调用方决定,缺省关)。
  * 预算:超限先丢最宽泛的(列表最前面的),只剩最后一份仍超限就截它。
  */
 export function discoverProjectInstructions(
@@ -311,9 +311,9 @@ export type BuildPromptOptions = {
   append?: string;
   /** 要哪几段、什么顺序;缺省 角色 → 环境 → 项目指令 → 记忆 → 追加。 */
   sections?: PromptSectionName[];
-  /** 记忆段是否注入(Q65 缺省关:没打开就连读都不读)。 */
+  /** 记忆段是否注入(缺省关:没打开就连读都不读)。 */
   memory?: boolean;
-  /** 项目指令与记忆放 system 还是首条 user 消息(Q66)。缺省 system。 */
+  /** 项目指令与记忆放 system 还是首条 user 消息。缺省 system。 */
   instructionsAs?: "system" | "user";
   discover?: DiscoverOptions;
   env?: { now?: Date; env?: NodeJS.ProcessEnv; git?: boolean };

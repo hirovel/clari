@@ -28,7 +28,7 @@ describe("validateArgs", () => {
     }
   });
 
-  it("__unparsed(烂 JSON)→专门的错误文本(Q9)", () => {
+  it("__unparsed(烂 JSON)→专门的错误文本", () => {
     const r = validateArgs(SCHEMA, { __unparsed: '{"broken' });
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error).toContain("不是合法 JSON");
@@ -68,7 +68,7 @@ describe("editTool", () => {
     );
   });
 
-  it("replaceAll→全部替换并报次数;没有命中仍走 not found(Q88)", async () => {
+  it("replaceAll→全部替换并报次数;没有命中仍走 not found", async () => {
     const path = tempFile("foo(a); foo(b);\nbar();");
     const out = await editTool.execute(
       { path, oldText: "foo(", newText: "baz(", replaceAll: true },

@@ -1,4 +1,4 @@
-// 供应商配置(Q44/Q57/Q59):哪家、什么协议、key 从哪来、模型名怎么匹配到家,以及每个模型的能力数据。
+// 供应商配置:哪家、什么协议、key 从哪来、模型名怎么匹配到家,以及每个模型的能力数据。
 // 分层原则:协议形状写在适配器代码里(多年不变);模型名、窗口、强度集合、thinking 模式是数据,放这里;
 // API 新增的参数用 extraBody / extraHeaders 逐字透传,不必等代码。key 只从配置字段或环境变量读取。
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -64,14 +64,14 @@ export type ProviderConfig = {
   retry?: { maxRetries?: number; baseDelayMs?: number; maxDelayMs?: number };
 };
 
-/** 工具描述风格(Q89):guided 缺省;terse 一两句;strict 带 ALWAYS / NEVER 规则。descriptions 逐工具覆盖。 */
+/** 工具描述风格:guided 缺省;terse 一两句;strict 带 ALWAYS / NEVER 规则。descriptions 逐工具覆盖。 */
 export type ToolPromptStyle = "guided" | "terse" | "strict";
 export type ToolPromptsConfig = {
   style?: ToolPromptStyle;
   descriptions?: Record<string, string>;
 };
 
-/** 系统提示词的段名(Q66):哪几段、什么顺序由配置或预设决定。 */
+/** 系统提示词的段名:哪几段、什么顺序由配置或预设决定。 */
 export type PromptSectionName = "role" | "env" | "instructions" | "memory" | "skills" | "append";
 
 export type PromptConfig = {
@@ -79,10 +79,10 @@ export type PromptConfig = {
   sections?: PromptSectionName[];
   /** 项目指令与记忆放 system(缺省)还是首条 user 消息。 */
   instructionsAs?: "system" | "user";
-  /** 跨会话记忆(Q65):缺省关。开了才读 AGENTS.md 里的记忆节并装上 remember 工具。 */
+  /** 跨会话记忆:缺省关。开了才读 AGENTS.md 里的记忆节并装上 remember 工具。 */
   memory?: boolean;
   /**
-   * 技能(Q80)两个旋钮。list:清单放系统提示词(缺省 system)还是不放(none,只许用户 /名 触发)。
+   * 技能两个旋钮。list:清单放系统提示词(缺省 system)还是不放(none,只许用户 /名 触发)。
    * load:模型触发时怎么拿正文,read = 自己用 read 读 SKILL.md(缺省),tool = 装一个 skill 工具,正文作为工具结果返回。
    * 用户触发固定为一条 user 消息。
    */
@@ -90,7 +90,7 @@ export type PromptConfig = {
 };
 
 /**
- * 预设(Q15):一组命名好的启动参数,`--preset 名`。命令行显式给的参数仍然优先。
+ * 预设:一组命名好的启动参数,`--preset 名`。命令行显式给的参数仍然优先。
  * 指令文件在这里当"预设指令器":不同预设指向不同的 system-prompt / append 文件与段组合。
  */
 export type Preset = {
@@ -99,7 +99,7 @@ export type Preset = {
   compaction?: string;
   /** all = 不问;ask = 每个调用都问;policy(缺省)= 按 approval 规则。 */
   approve?: "all" | "ask" | "policy";
-  /** 审批规则(Q84),覆盖全局的 approval。 */
+  /** 审批规则,覆盖全局的 approval。 */
   approval?: ApprovalConfig;
   /** 执行槽:sequential(缺省)| parallel。 */
   execution?: "sequential" | "parallel";
@@ -118,7 +118,7 @@ export type Preset = {
   subagent?: boolean;
   maxSteps?: number;
   prompt?: PromptConfig;
-  /** 工具描述风格(Q89)。 */
+  /** 工具描述风格。 */
   toolPrompts?: ToolPromptStyle;
 };
 
@@ -128,24 +128,24 @@ export type KernelConfig = {
   /** 模板里的能力数据核对日期。过期是常态,发现靠 /models。 */
   verifiedAt?: string;
   providers: Record<string, ProviderConfig>;
-  /** 系统提示词组装的全局缺省(Q66)。 */
+  /** 系统提示词组装的全局缺省。 */
   prompt?: PromptConfig;
   /**
-   * 全局缺省(Q90):与预设同形,每个可选项都能写在这里。解析顺序 命令行 > --preset 指的预设 > defaults > 内置缺省。
+   * 全局缺省:与预设同形,每个可选项都能写在这里。解析顺序 命令行 > --preset 指的预设 > defaults > 内置缺省。
    * 模板把每个旋钮的内置缺省值都列出来,改哪个就改哪个。
    */
   defaults?: Preset;
-  /** 命名预设(Q15)。 */
+  /** 命名预设。 */
   presets?: Record<string, Preset>;
   /** 会话文件目录;缺省工作目录下的 sessions/。环境变量 CLARI_SESSIONS 优先。 */
   sessionsDir?: string;
-  /** 审批规则(Q84):缺省只读工具放行、其余问人、cwd 之外必问。 */
+  /** 审批规则:缺省只读工具放行、其余问人、cwd 之外必问。 */
   approval?: ApprovalConfig;
-  /** 工具描述风格与逐工具覆盖(Q89)。 */
+  /** 工具描述风格与逐工具覆盖。 */
   toolPrompts?: ToolPromptsConfig;
-  /** MCP 桥接的配置(Q87)。内核不解释它;形状归 cli/mcp/config.ts。 */
+  /** MCP 桥接的配置。内核不解释它;形状归 cli/mcp/config.ts。 */
   mcp?: Record<string, unknown>;
-  /** fetch 工具的安全边界(Q86):私网放行、超时、字节上限、重定向次数。 */
+  /** fetch 工具的安全边界:私网放行、超时、字节上限、重定向次数。 */
   fetch?: {
     allowPrivate?: boolean;
     timeoutMs?: number;
@@ -171,7 +171,7 @@ export const DEFAULT_CONFIG_PATH =
 export const CONFIG_TEMPLATE: KernelConfig = {
   default: "deepseek-v4-pro",
   verifiedAt: "2026-09-02",
-  // 每个可选项的内置缺省值(Q90)。命令行与预设可以覆盖;删掉某一项等于用内置缺省。
+  // 每个可选项的内置缺省值。命令行与预设可以覆盖;删掉某一项等于用内置缺省。
   defaults: {
     compaction: "llm",
     approve: "all",

@@ -1,5 +1,4 @@
-import { estimateTokens } from "../src/context.js";
-import type { AgentEvent } from "../src/events.js";
+import { eventTokens, messageTokens as tokensOf } from "../src/context.js";
 import type { Message } from "../src/messages.js";
 
 // ---------- 纯格式化 ----------
@@ -21,37 +20,12 @@ export function clock(at: string): string {
   return d.toTimeString().slice(0, 8);
 }
 
+/** 检视器口径:消息大小含思考文本。 */
 export function messageTokens(m: Message): number {
-  switch (m.role) {
-    case "assistant":
-      return (
-        estimateTokens(m.content) +
-        estimateTokens(m.reasoning ?? "") +
-        m.toolCalls.reduce((n, tc) => n + estimateTokens(JSON.stringify(tc.args)) + 8, 0)
-      );
-    default:
-      return estimateTokens(m.content);
-  }
+  return tokensOf(m, { withReasoning: true });
 }
 
-/** 单条事件里模型可见文本的估算 token(压缩对照用同一口径)。 */
-export function eventTokens(e: AgentEvent): number {
-  switch (e.type) {
-    case "session/start":
-      return estimateTokens(e.system);
-    case "user/message":
-      return estimateTokens(e.text);
-    case "assistant/message":
-      return (
-        estimateTokens(e.text) +
-        e.toolCalls.reduce((n, tc) => n + estimateTokens(JSON.stringify(tc.args)) + 8, 0)
-      );
-    case "tool/result":
-      return estimateTokens(e.content);
-    default:
-      return 0;
-  }
-}
+export { eventTokens };
 
 export function roleLabel(m: Message): string {
   switch (m.role) {

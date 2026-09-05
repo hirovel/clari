@@ -61,7 +61,7 @@ export type Bootstrap = {
   configCreated: boolean;
   choose(name?: string): ModelChoice;
   settings: TuiSettings;
-  /** 把预设与配置缺省并进参数(Q15/Q66):显式参数 > 预设 > 配置 prompt 缺省 > 内置缺省。 */
+  /** 把预设与配置缺省并进参数:显式参数 > 预设 > 配置 prompt 缺省 > 内置缺省。 */
   resolve(args: CommonArgs): CommonArgs;
 };
 
@@ -109,7 +109,7 @@ export function bootstrap(): Bootstrap {
   };
 }
 
-/** 记忆文件(Q65):项目级 = git 根(或 cwd)的 AGENTS.md;用户级 = ~/.clari/AGENTS.md。 */
+/** 记忆文件:项目级 = git 根(或 cwd)的 AGENTS.md;用户级 = ~/.clari/AGENTS.md。 */
 export function memoryFiles(cwd = process.cwd(), home = clariHome()): MemoryFiles {
   const projectRoot = findGitRoot(cwd) ?? resolve(cwd);
   return { project: join(projectRoot, "AGENTS.md"), user: join(home, "AGENTS.md") };
@@ -124,9 +124,9 @@ export function buildTools(
   memory?: MemoryFiles,
   /** skills.load = tool 时给:装一个 skill 工具,模型点名即拿到正文。 */
   skills?: Skill[],
-  /** fetch 工具的安全边界(Q86);不给用缺省(拒私网、30 秒、5 MB)。 */
+  /** fetch 工具的安全边界;不给用缺省(拒私网、30 秒、5 MB)。 */
   fetchConfig?: FetchConfig,
-  /** 工具描述风格(Q89);不给就是工具文件里写的 guided。 */
+  /** 工具描述风格;不给就是工具文件里写的 guided。 */
   toolPrompts?: ToolPromptsConfig,
 ): Tool[] {
   // 每次组装复制一份工具对象:描述风格槽原地改描述,不能碰模块级单例。
@@ -155,7 +155,7 @@ export function buildTools(
   ];
 }
 
-/** 系统提示词(Q51):--system-prompt 整段替换,--append-system-prompt 追加;否则 角色 → 环境 → 项目指令。 */
+/** 系统提示词:--system-prompt 整段替换,--append-system-prompt 追加;否则 角色 → 环境 → 项目指令。 */
 type PromptArgs = Pick<
   CommonArgs,
   | "systemPromptFile"
@@ -227,7 +227,7 @@ export function beginSession(
       system: p.text,
       sections: p.sections,
     });
-    // instructionsAs = user:项目指令与记忆作为首条 user 消息进日志(Q66)。
+    // instructionsAs = user:项目指令与记忆作为首条 user 消息进日志。
     // 它是一条用户没打过的用户消息,所以必须像其它用户消息一样落盘、上屏,不做任何隐藏。
     if (p.preamble.length > 0) {
       s.log.append({

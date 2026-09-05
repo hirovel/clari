@@ -1,4 +1,4 @@
-// 用满 API 返回的信息(Q82):三家的 extras、raw 缺省开与 /raw N、/tools。
+// 用满 API 返回的信息:三家的 extras、raw 缺省开与 /raw N、/tools。
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
 import { parseCommonArgs } from "../cli/bootstrap.js";

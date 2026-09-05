@@ -17,9 +17,9 @@ import {
 } from "./providers/errors.js";
 import { type Tool, validateArgs } from "./tools.js";
 
-// ---------- 策略槽(Q27:全部是开放接口,内置实现无特权,自定义实现从外部注入) ----------
+// ---------- 策略槽(全部是开放接口,内置实现无特权,自定义实现从外部注入) ----------
 
-/** 终止策略(Q8):每个 step 结束后询问。返回 null 继续,返回字符串 = 停下的理由。 */
+/** 终止策略:每个 step 结束后询问。返回 null 继续,返回字符串 = 停下的理由。 */
 export type TerminationPolicy = (state: { steps: number }) => string | null;
 
 /** pi 立场:不设上限,循环转到模型不再调工具为止。 */
@@ -30,7 +30,7 @@ export function maxSteps(limit: number): TerminationPolicy {
   return ({ steps }) => (steps >= limit ? `已达步数上限 ${limit}` : null);
 }
 
-/** 插话策略(Q20):在给定边界要不要排空留言队列。 */
+/** 插话策略:在给定边界要不要排空留言队列。 */
 export type SteeringPolicy = (boundary: "step" | "turn") => boolean;
 
 /** Claude Code / pi 谱系:步边界即注入(默认)。 */
@@ -39,20 +39,20 @@ export const steer: SteeringPolicy = () => true;
 /** Codex 谱系:只在 turn 结束时投递。 */
 export const queueToTurnEnd: SteeringPolicy = (boundary) => boundary === "turn";
 
-/** 审批策略(Q23/Q84):执行每个工具调用前询问。false 或 {allowed:false} = 拒绝,以错误结果回喂,理由原样带上。 */
+/** 审批策略:执行每个工具调用前询问。false 或 {allowed:false} = 拒绝,以错误结果回喂,理由原样带上。 */
 export type ApprovePolicy = (call: ToolCall) => ApproveDecision | Promise<ApproveDecision>;
 
 /** pi 立场:不弹确认,要隔离就跑容器(默认)。 */
 export const allowAll: ApprovePolicy = () => true;
 
 /**
- * 执行策略(Q10):sequential = 一批调用逐个跑(默认,行为最可预测);
+ * 执行策略:sequential = 一批调用逐个跑(默认,行为最可预测);
  * parallel = 声明了并行安全的相邻调用同时跑(只读工具批量读取时省时间),其余仍逐个。
  * 结果按调用顺序落盘,两种策略下模型看到的序列一致。
  */
 export type ExecutionPolicy = "sequential" | "parallel";
 
-// ---------- runTurn(Q22 的纯函数层;Q13:换循环形态 = 用同一批原语另写一个函数) ----------
+// ---------- runTurn(纯函数层;换循环形态 = 用同一批原语另写一个函数) ----------
 
 export type TurnOutcome = "idle" | "aborted" | { stopped: string };
 
@@ -66,21 +66,21 @@ export type TurnDeps = {
     approve?: ApprovePolicy;
     execution?: ExecutionPolicy;
     /**
-     * 组装槽(Q81):事件数组 → 发给模型的消息。缺省就是 deriveMessages;给了就用它的结果发请求,
+     * 组装槽:事件数组 → 发给模型的消息。缺省就是 deriveMessages;给了就用它的结果发请求,
      * 差异部分记进 request.body(前缀投影 + 尾部),检视器仍能逐字节重建。扩展可在末尾追加一条提醒之类。
      */
     assemble?: (events: readonly AgentEvent[]) => Message[];
   };
-  /** 排空留言队列,返回待注入的用户消息。注入时点由 steering 决定(Q20);边界告诉队列该放哪些。 */
+  /** 排空留言队列,返回待注入的用户消息。注入时点由 steering 决定;边界告诉队列该放哪些。 */
   drainQueue?: (boundary: "step" | "turn") => string[];
   signal?: AbortSignal;
   onDelta?: (textDelta: string) => void;
   onReasoning?: (reasoningDelta: string) => void;
   /** 原始流逐行回调(trace)。不进日志:体量大且可由 provider 重放,由 CLI 决定是否写旁路文件。 */
   onRaw?: (line: string) => void;
-  /** 强度级别(Q52)。给函数则每次请求前取值,会话中切换下一请求即生效。缺省不传。 */
+  /** 强度级别。给函数则每次请求前取值,会话中切换下一请求即生效。缺省不传。 */
   effort?: EffortLevel | (() => EffortLevel | undefined);
-  /** 压缩配置(Q33):给了就启用自动触发与溢出恢复。 */
+  /** 压缩配置:给了就启用自动触发与溢出恢复。 */
   compaction?: CompactionConfig;
 };
 
@@ -112,7 +112,7 @@ const defaultIsOverflow = (err: Error): boolean => isContextOverflow(err);
 
 /**
  * 给策略用的 provider 包装:策略每发一次模型请求,日志里就多一条 reason 为 compaction 的 request
- * (以及其间的 retry / request/error)。摘要请求把整段上下文发给了模型,和正常步一样必须可见(Q48)。
+ * (以及其间的 retry / request/error)。摘要请求把整段上下文发给了模型,和正常步一样必须可见。
  * 响应不是 assistant/message —— 它不进投影;随后的 compaction 事件就是它的结果。
  */
 export function recordingProvider(
@@ -202,13 +202,13 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
 
   let overflowRecovered = false;
   while (true) {
-    // 自动压缩检查(Q33):每次模型请求前,占用超阈值即压。
+    // 自动压缩检查:每次模型请求前,占用超阈值即压。
     if (deps.compaction && deps.compaction.auto !== false) {
       await compactIfNeeded(deps, deps.compaction, false);
     }
 
-    // 请求事件(Q48):正文不落盘,它就是此刻的投影;记下规模与口径,检视器按需原样重建。
-    // 组装槽换了投影时(Q81),差异部分记进 body,重建仍然逐字节。
+    // 请求事件:正文不落盘,它就是此刻的投影;记下规模与口径,检视器按需原样重建。
+    // 组装槽换了投影时,差异部分记进 body,重建仍然逐字节。
     const assemble = deps.slots?.assemble;
     const messages = assemble ? assemble(log.events) : deriveMessages(log.events);
     const body = assemble ? describeRequestBody(log.events, messages) : undefined;
@@ -240,7 +240,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
       });
     } catch (err) {
       logRequestError(log, err);
-      // 溢出恢复(Q33):压缩取得进展才许重试,且只重试一次。
+      // 溢出恢复:压缩取得进展才许重试,且只重试一次。
       const overflow = cfg && (cfg.isOverflow ?? defaultIsOverflow)(err as Error);
       if (!overflow || overflowRecovered) throw err;
       overflowRecovered = true;
@@ -259,7 +259,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
     if (turn.stopReason === "aborted") return "aborted";
 
     if (turn.stopReason === "length") {
-      // Q26:截断响应的调用一个都不执行,逐个补错误应答(协议要求每个 call 有应答)。
+      //:截断响应的调用一个都不执行,逐个补错误应答(协议要求每个 call 有应答)。
       for (const call of turn.toolCalls) appendResult(log, call, LENGTH_NOTICE, true);
     } else if (turn.stopReason === "tool") {
       await executeCalls(turn.toolCalls, {
@@ -272,7 +272,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
       if (signal?.aborted) return "aborted";
     }
 
-    // step 边界。审批等待发生在上面的执行阶段,此处才排队列 —— 留言永不落进确认窗口(Q20 硬规矩)。
+    // step 边界。审批等待发生在上面的执行阶段,此处才排队列 —— 留言永不落进确认窗口(硬规矩)。
     let injected = steering("step") ? inject(log, "step", drainQueue("step")) : 0;
 
     if (turn.stopReason === "end") {
@@ -380,7 +380,7 @@ async function runOne(
     const content = await p.tool.execute(p.args as never, { signal, callId: p.call.id });
     return { content, isError: false, durationMs: Date.now() - startedAt };
   } catch (err) {
-    // Q9:执行失败也是结果。打断导致的失败同样如实记录。
+    //:执行失败也是结果。打断导致的失败同样如实记录。
     return { content: (err as Error).message, isError: true, durationMs: Date.now() - startedAt };
   }
 }
@@ -438,7 +438,7 @@ async function executeCalls(
   };
 
   for (const call of calls) {
-    // 打断后剩余调用不再执行,但必须逐个补应答(Q21)。
+    // 打断后剩余调用不再执行,但必须逐个补应答。
     if (signal.aborted) {
       await flush();
       appendResult(ctx.log, call, "已被用户打断,未执行。", true);

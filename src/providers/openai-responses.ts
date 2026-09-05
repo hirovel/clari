@@ -93,7 +93,7 @@ export type ResponsesAcc = {
   incompleteReason?: string;
   usage?: Usage;
   error?: string;
-  /** 不解释的响应元数据(Q82):id、服务模型、status、incomplete_details。 */
+  /** 不解释的响应元数据:id、服务模型、status、incomplete_details。 */
   extras: Record<string, unknown>;
 };
 

@@ -1,4 +1,4 @@
-// 检视器(Q49/Q60/Q62/Q63):对事件数组的几种投影,全部只读。
+// 检视器:对事件数组的几种投影,全部只读。
 //   请求视图  一行一请求 → 七分区(概要 / 决策 / 发送 / 工具定义 / 线路 JSON / 接收 / 写入)   inspector-requests
 //   事件视图  内核维护的全部事件,逐条大小与可见性 → 原样 JSON                                 inspector-requests
 //   压缩对照  每次压缩:被覆盖的那一大段原文 ↔ 它变成的摘要,带 token 与压缩比                 inspector-compactions
@@ -75,7 +75,7 @@ export type InspectorDeps = {
   rows: () => number;
   /** 主会话某请求的原始流(开了 trace 才有)。 */
   rawFor?: (requestIndex: number) => string[] | undefined;
-  /** 上下文面板里选中一条消息并选了动作(Q83)。view 由检视器自己处理,其余交给界面落到命令上。 */
+  /** 上下文面板里选中一条消息并选了动作。view 由检视器自己处理,其余交给界面落到命令上。 */
   onAction?: (action: ContextAction, row: CompositionRow) => void;
   onClose: () => void;
   requestRender: () => void;

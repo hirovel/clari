@@ -1,4 +1,4 @@
-// subagent:可选装能力(Q40)。内核任何模块都不引用本文件;组装者按需 import 并挂成一个工具。
+// subagent:可选装能力。内核任何模块都不引用本文件;组装者按需 import 并挂成一个工具。
 // 子 agent = 同一内核的递归实例化:独立事件日志、独立会话文件,replay 与构成投影零改动可用。
 import { type TSchema, Type } from "@sinclair/typebox";
 import { Agent } from "./agent.js";
@@ -8,7 +8,7 @@ import type { CompactionConfig, TurnDeps } from "./loop.js";
 import type { Provider } from "./provider.js";
 import { defineTool, type Tool, validateArgs } from "./tools.js";
 
-// ---------- 上下文范围槽(Q43):子启动时看到父的什么,由父模型在调用时选 ----------
+// ---------- 上下文范围槽:子启动时看到父的什么,由父模型在调用时选 ----------
 
 export type ParentSnapshot = {
   events: readonly AgentEvent[];
@@ -76,7 +76,7 @@ export const DEFAULT_SCOPES: ScopeRegistry = {
   },
 };
 
-// ---------- 运行方式槽(Q40):子怎么跑 ----------
+// ---------- 运行方式槽:子怎么跑 ----------
 
 export type SubagentRequest = {
   task: string;
@@ -91,7 +91,7 @@ export type SubagentRequest = {
   onLog?: (log: EventLog) => void;
 };
 
-/** 交给界面的子 agent 信息(Q62):子只是另一个数组,界面拿到日志即可订阅。 */
+/** 交给界面的子 agent 信息:子只是另一个数组,界面拿到日志即可订阅。 */
 export type ChildInfo = {
   log: EventLog;
   task: string;
@@ -102,7 +102,7 @@ export type ChildInfo = {
   index: number;
 };
 
-/** 返回契约(Q41):最终文本 + 完成状态 + 深挖句柄。所有 runner 实现必须产出同一形态。 */
+/** 返回契约:最终文本 + 完成状态 + 深挖句柄。所有 runner 实现必须产出同一形态。 */
 export type SubagentResult = {
   text: string;
   status: "completed" | "partial";
@@ -153,7 +153,7 @@ function lastAssistantText(events: readonly AgentEvent[]): string {
 export type TaskToolOptions = {
   parent: EventLog;
   provider: Provider;
-  /** 子的工具集。task 工具本身默认被剔除(Q42 一层封顶),allowNested 可放开。 */
+  /** 子的工具集。task 工具本身默认被剔除(一层封顶),allowNested 可放开。 */
   tools: Tool[];
   runner?: SubagentRunner;
   scopes?: ScopeRegistry;
@@ -163,7 +163,7 @@ export type TaskToolOptions = {
   allowNested?: boolean;
   slots?: TurnDeps["slots"];
   compaction?: CompactionConfig;
-  /** 子 agent 一开跑就通知(Q62):界面订阅子日志,实时显示。 */
+  /** 子 agent 一开跑就通知:界面订阅子日志,实时显示。 */
   onChild?: (child: ChildInfo) => void;
 };
 

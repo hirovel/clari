@@ -28,7 +28,7 @@ function project(): string {
   return tmp;
 }
 
-describe("只读工具(Q56)", () => {
+describe("只读工具", () => {
   it("walkFiles 跳过 node_modules 等目录,路径用正斜杠", () => {
     const root = project();
     expect(walkFiles(root)).toEqual(["README.md", "src/a.ts", "src/deep/b.ts"]);
@@ -80,7 +80,7 @@ describe("只读工具(Q56)", () => {
   });
 });
 
-describe("行级 diff(Q58)", () => {
+describe("行级 diff", () => {
   it("增删改与上下文折叠", () => {
     const d = diffLines("a\nb\nc\nd\ne\nf\ng", "a\nb\nX\nd\ne\nf\ng\nh");
     expect(d.map((l) => l.kind + l.text)).toEqual([

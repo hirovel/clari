@@ -44,7 +44,7 @@ describe("truncation policies", () => {
     expect(Buffer.byteLength(t.text, "utf8")).toBeLessThanOrEqual(300);
   });
 
-  it("capLineLength:超长行截到上限并加标记,短行不动(Q29)", () => {
+  it("capLineLength:超长行截到上限并加标记,短行不动", () => {
     const cap = capLineLength(10);
     expect(cap(`short\n${"y".repeat(30)}`)).toBe(
       `short\n${"y".repeat(10)}…[line truncated to 10 chars]`,
@@ -52,7 +52,7 @@ describe("truncation policies", () => {
   });
 });
 
-describe("readTool 截断行为(Q29)", () => {
+describe("readTool 截断行为", () => {
   const ctx = { signal: new AbortController().signal };
 
   function tempFile(content: string): string {

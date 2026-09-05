@@ -1,4 +1,4 @@
-// 审批策略(Q84):规则裁决、cwd 之外、拒绝附理由;日志半行恢复;统一入口。
+// 审批策略:规则裁决、cwd 之外、拒绝附理由;日志半行恢复;统一入口。
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

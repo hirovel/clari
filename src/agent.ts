@@ -14,7 +14,7 @@ export type AgentOptions = {
   onDelta?: (textDelta: string) => void;
   onReasoning?: (reasoningDelta: string) => void;
   onRaw?: (line: string) => void;
-  /** 强度级别(Q52),缺省不传;setEffort 会话中切换,下一请求生效。 */
+  /** 强度级别,缺省不传;setEffort 会话中切换,下一请求生效。 */
   effort?: EffortLevel;
 };
 
@@ -24,7 +24,7 @@ export type DeliverAs = "steer" | "followUp";
 type Queued = { text: string; deliverAs: DeliverAs };
 
 /**
- * Q22 的薄类层:持有留言队列与 AbortController,把 runTurn 串成会话。
+ * 薄类层:持有留言队列与 AbortController,把 runTurn 串成会话。
  * 状态仍然只在事件日志里;这个类只管"正在跑的这一次"的运行时资源。
  */
 export class Agent {
@@ -63,7 +63,7 @@ export class Agent {
   }
 
   /**
-   * 会话中切换一个策略槽(Q78):runTurn 开跑时取槽实现,所以下一次 turn 起生效。
+   * 会话中切换一个策略槽:runTurn 开跑时取槽实现,所以下一次 turn 起生效。
    * undefined = 恢复内置缺省。事件(session/slot)由调用方记,因为只有调用方知道实现的名字。
    */
   setSlot<K extends keyof NonNullable<TurnDeps["slots"]>>(
@@ -83,7 +83,7 @@ export class Agent {
   }
 
   /**
-   * 空闲时:入日志并开跑。运行中:进留言队列,注入时点由 steering 槽与投递方式共同决定(Q20):
+   * 空闲时:入日志并开跑。运行中:进留言队列,注入时点由 steering 槽与投递方式共同决定:
    * steer 在步边界排空,followUp 只在 turn 边界(模型不再调工具时)排空。
    */
   async prompt(text: string, opts: { deliverAs?: DeliverAs } = {}): Promise<TurnOutcome> {
@@ -92,7 +92,7 @@ export class Agent {
       this.queue.push({ text, deliverAs: opts.deliverAs ?? "steer" });
       return this.active;
     }
-    // 上次被打断遗留的留言先于新输入注入(Q20 硬规矩:队列不静默丢弃)。
+    // 上次被打断遗留的留言先于新输入注入(硬规矩:队列不静默丢弃)。
     for (const leftover of this.queue.splice(0)) {
       log.append({ type: "user/message", at: now(), text: leftover.text });
     }
@@ -101,7 +101,7 @@ export class Agent {
   }
 
   /**
-   * 重跑一步(Q76):丢掉最后一条(仍在投影里的)助手消息及其工具结果,不加新用户消息,
+   * 重跑一步:丢掉最后一条(仍在投影里的)助手消息及其工具结果,不加新用户消息,
    * 从当前投影再发一次请求。编辑上下文之后立刻看效果的入口。丢弃以 context/drop 事件落盘,原文不动。
    */
   async retry(): Promise<TurnOutcome> {
@@ -149,7 +149,7 @@ export class Agent {
     }
   }
 
-  /** 即时打断(Q11):interrupt 事件只给人看,模型看到的是打断的后果。 */
+  /** 即时打断:interrupt 事件只给人看,模型看到的是打断的后果。 */
   interrupt(): void {
     if (!this.running) return;
     this.opts.log.append({ type: "session/interrupt", at: now() });

@@ -1,4 +1,4 @@
-// 编辑上下文(Q74):投影层的编辑与丢弃、回传物丢弃、Anthropic 前缀绑定、界面命令与拒绝条件。
+// 编辑上下文:投影层的编辑与丢弃、回传物丢弃、Anthropic 前缀绑定、界面命令与拒绝条件。
 import { describe, expect, it } from "vitest";
 import { createTuiApp } from "../cli/tui-app.js";
 import { EventLog } from "../src/log.js";

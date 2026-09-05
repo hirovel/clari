@@ -1,6 +1,6 @@
 // TUI 应用:与终端实现解耦,便于用虚拟终端离线验证。cli/tui.ts 负责配置与真实终端,本文件负责组装。
 //
-// pi-tui 只当渲染引擎(Q45):差分渲染、编辑器、宽度计算;视觉层全部是自有组合。
+// pi-tui 只当渲染引擎:差分渲染、编辑器、宽度计算;视觉层全部是自有组合。
 // 界面分成几个接 ctx 的模块(重构块 2):
 //   tui-context   共享状态的形状
 //   tui-render    事件 → 屏幕,子 agent 视图,流式增量
@@ -91,23 +91,23 @@ export type TuiAppDeps = {
   /** 日志为空时用它落 session/start;入口已经落过(bootstrap.beginSession)就不需要。 */
   systemPrompt?: string;
   onExit?: () => void;
-  /** 工具结果初始是否折叠。缺省不折叠(Q34);Ctrl+O 随时切换。 */
+  /** 工具结果初始是否折叠。缺省不折叠;Ctrl+O 随时切换。 */
   fold?: boolean;
   /** 记录每次请求收到的原始流,供检视器"接收"分区逐行展示。 */
   trace?: boolean;
   /** 原始流旁路输出(如写 trace 文件)。requestIndex 是 request 事件在日志中的下标。 */
   onRaw?: (requestIndex: number, line: string) => void;
-  /** 初始强度级别(Q52);缺省不传。 */
+  /** 初始强度级别;缺省不传。 */
   effort?: EffortLevel;
   effortLevels?: EffortLevel[];
   /** 起始模型的价格(配置里给了才有)。 */
   price?: Price;
   /**
-   * 审批槽的启动形态(Q84):all(缺省)不问;ask 每个调用都问;规则对象 = policy 模式,
+   * 审批槽的启动形态:all(缺省)不问;ask 每个调用都问;规则对象 = policy 模式,
    * 按规则裁决,规则说 ask 的才问人。/approve 在会话中切换。
    */
   approve?: "all" | "ask" | ApprovalConfig;
-  /** 跨会话记忆已打开时的两个文件(Q65),供 /memory 看与删。 */
+  /** 跨会话记忆已打开时的两个文件,供 /memory 看与删。 */
   memory?: MemoryFiles;
   /** 启动时的压缩策略名(llm / clear / pipeline / 模块路径),/slots 显示用;缺省 llm。 */
   compactionName?: string;
@@ -115,13 +115,13 @@ export type TuiAppDeps = {
   slots?: TurnDeps["slots"];
   /** 提示词模板:/名 参数 展开成一条用户消息。 */
   templates?: PromptTemplate[];
-  /** 技能(Q80):/名 参数 触发;/skills 列出。 */
+  /** 技能:/名 参数 触发;/skills 列出。 */
   skills?: Skill[];
   /** 会话目录,/fork 的新文件写到这里。 */
   sessionsDir?: string;
-  /** MCP 桥接(Q87):/mcp 列状态。工具本身已在 tools 里。 */
+  /** MCP 桥接:/mcp 列状态。工具本身已在 tools 里。 */
   mcp?: { statuses(): McpServerStatus[] };
-  /** 工具描述风格槽(Q89)的启动形态;/toolprompts 会话中切换与逐条编辑。 */
+  /** 工具描述风格槽的启动形态;/toolprompts 会话中切换与逐条编辑。 */
   toolPrompts?: ToolPromptsConfig;
   /** 启动时的保留策略显示名(--preservation / 配置);缺省内置。 */
   preservationName?: string;
@@ -146,7 +146,7 @@ export type TuiApp = {
     key(data: string): void;
     lines(width?: number): string[];
   };
-  /** 子 agent 开跑时由 task 工具通知(Q62):挂到对应调用行下面并实时订阅。 */
+  /** 子 agent 开跑时由 task 工具通知:挂到对应调用行下面并实时订阅。 */
   attachChild(child: ChildInfo): void;
   children(): ChildInfo[];
   /** 正在等待回答的审批提示的渲染行;没有时为空。离线验证用(覆盖层不在 lines() 里)。 */
@@ -209,7 +209,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     onReasoning: (d) => streamReasoning(ctx, d),
   });
 
-  // ---------- 检视器(Q49) ----------
+  // ---------- 检视器 ----------
   const defs = (): ToolDef[] =>
     tools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters }));
   const sessions = (): SessionSource[] => [
@@ -359,7 +359,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
         const bucket = r.rawAt.get(r.lastIndex) ?? [];
         bucket.push(line);
         r.rawAt.set(r.lastIndex, bucket);
-        // 缺省开(Q82),内存里只留最近 RAW_LINE_CAP 行:整桶淘汰最旧的请求,磁盘旁路文件不删。
+        // 缺省开,内存里只留最近 RAW_LINE_CAP 行:整桶淘汰最旧的请求,磁盘旁路文件不删。
         r.rawLines++;
         while (r.rawLines > RAW_LINE_CAP && r.rawAt.size > 1) {
           const oldest = r.rawAt.keys().next().value as number;
@@ -408,7 +408,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     tui.requestRender();
   }
 
-  // ---------- 历史回放与订阅:屏幕即历史,历史与新事件长得一样(Q54) ----------
+  // ---------- 历史回放与订阅:屏幕即历史,历史与新事件长得一样 ----------
   const draw = (e: AgentEvent) => render(ctx, e);
   if (log.events.length > 0) {
     for (const e of log.events) draw(e);
@@ -456,7 +456,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       return { consume: true };
     }
     if (matchesKey(data, Key.ctrl("e"))) {
-      // Ctrl+E:组装视图(Q81),模型下一步会看到的每条消息从哪来、落在线路的第几条。
+      // Ctrl+E:组装视图,模型下一步会看到的每条消息从哪来、落在线路的第几条。
       if (!ctx.inspector.overlay) ctx.inspector.open();
       inspector.showComposition();
       tui.requestRender();

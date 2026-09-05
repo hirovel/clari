@@ -1,4 +1,4 @@
-// 编辑上下文(Q74):改的是投影,不是历史。每个动作都是追加一条 context/edit 或 context/drop 事件,
+// 编辑上下文:改的是投影,不是历史。每个动作都是追加一条 context/edit 或 context/drop 事件,
 // 原文永远留在数组里。/edit /drop /compare /restore /rewind /retry /edits /fork,以及上下文面板的动作菜单。
 import { now } from "../src/events.js";
 import { editState } from "../src/messages.js";

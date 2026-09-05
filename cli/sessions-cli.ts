@@ -1,4 +1,4 @@
-// `clari sessions`(Q90):列出会话目录,或按时间 / 条数清理。不加 --yes 只打印将要删什么。
+// `clari sessions`:列出会话目录,或按时间 / 条数清理。不加 --yes 只打印将要删什么。
 // 用法:clari sessions [--dir D]
 //       clari sessions prune (--older-than 30d | --keep 20) [--dir D] [--yes]
 import { loadConfig } from "../src/config.js";

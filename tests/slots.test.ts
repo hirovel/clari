@@ -1,4 +1,4 @@
-// 会话中切换策略槽(Q78):命令改变下一次 turn 的行为,每次切换记 session/slot,/slots 显示当前。
+// 会话中切换策略槽:命令改变下一次 turn 的行为,每次切换记 session/slot,/slots 显示当前。
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
 import { createTuiApp } from "../cli/tui-app.js";

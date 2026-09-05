@@ -1,4 +1,4 @@
-// 事件即真相(Q5 裁决):凡是进入模型请求的内容,必须可以从事件日志重建。
+// 事件即真相:凡是进入模型请求的内容,必须可以从事件日志重建。
 // 模型看到的消息永远是 deriveMessages(events) 的投影,没有第二份状态。
 
 import type { Message } from "./messages.js";
@@ -6,7 +6,7 @@ import type { Message } from "./messages.js";
 export type ToolCall = {
   id: string;
   name: string;
-  /** 模型给出的参数,原样保留(可能不合 schema —— 校验是工具层的事,见 Q9)。 */
+  /** 模型给出的参数,原样保留(可能不合 schema —— 校验是工具层的事)。 */
   args: unknown;
 };
 
@@ -23,10 +23,10 @@ export type Usage = {
 };
 
 export type StopReason =
-  | "end" // 模型自然结束,不再调工具 —— 循环的终点(Q8 untilIdle)
+  | "end" // 模型自然结束,不再调工具 —— 循环的终点(untilIdle)
   | "tool" // 模型请求了工具调用,循环继续
-  | "aborted" // 用户打断(Q11):已流出的半截文本仍然入日志,不丢真相
-  | "length"; // 输出被 token 上限截断(Q26):工具调用一律不执行,回喂重发指令
+  | "aborted" // 用户打断:已流出的半截文本仍然入日志,不丢真相
+  | "length"; // 输出被 token 上限截断:工具调用一律不执行,回喂重发指令
 
 export type AgentEvent =
   | {
@@ -58,14 +58,14 @@ export type AgentEvent =
        */
       reasoningKind?: "full" | "summary";
       /**
-       * 适配器私有回传物(Q53):下一轮必须原样送回、内核不解释的东西(如 Anthropic 带签名的 thinking 块)。
+       * 适配器私有回传物:下一轮必须原样送回、内核不解释的东西(如 Anthropic 带签名的 thinking 块)。
        * 模型可见(它会进入请求),所以必须入日志;写它和读它的是同一个适配器。
        */
       opaque?: unknown;
       /** 从发出请求到收齐响应的毫秒数。只给人看。 */
       latencyMs?: number;
       /**
-       * 供应商返回的、内核不解释的元数据(Q82):响应 id、实际服务的模型、原始停止原因、stop_sequence、
+       * 供应商返回的、内核不解释的元数据:响应 id、实际服务的模型、原始停止原因、stop_sequence、
        * system_fingerprint 之类。只给人看;原样保存,排查"软件自己处理出问题"时对照 raw 用。
        */
       extras?: Record<string, unknown>;
@@ -76,7 +76,7 @@ export type AgentEvent =
       callId: string;
       name: string;
       content: string;
-      /** 错误也是结果(Q9):校验失败/执行异常/被打断,一律以 result 回喂,不抛出循环。 */
+      /** 错误也是结果:校验失败/执行异常/被打断,一律以 result 回喂,不抛出循环。 */
       isError: boolean;
       /** 工具执行耗时;未执行(拒绝/校验失败/打断)时缺省。只给人看。 */
       durationMs?: number;
@@ -88,7 +88,7 @@ export type AgentEvent =
    */
   | { type: "session/recovered"; at: string; droppedBytes: number; preview: string }
   /**
-   * 可选装模块的事件(Q87 修订):内核不认识的来源(MCP 桥接等)把生命周期与往返记进同一条日志。
+   * 可选装模块的事件:内核不认识的来源(MCP 桥接等)把生命周期与往返记进同一条日志。
    * source 是模块名,kind 与 payload 由模块自定。只给人看;怎么画由模块登记(cli/ext-events.ts)。
    */
   | {
@@ -101,7 +101,7 @@ export type AgentEvent =
   /** 会话中切换模型。只给人看(不投影):此后的 assistant 消息由新模型生成。 */
   | { type: "session/model"; at: string; model: string }
   /**
-   * 会话中切换了某个策略槽(Q78)。只给人看:此后的步按新策略走。
+   * 会话中切换了某个策略槽。只给人看:此后的步按新策略走。
    * slot 是槽名(compaction / preservation / execution / steering / approve),value 是新实现的名字与参数。
    */
   | { type: "session/slot"; at: string; slot: string; value: string }
@@ -124,7 +124,7 @@ export type AgentEvent =
       threshold?: number;
       /** turn = 正常步;overflow-retry = 溢出压缩后的那一次重发;compaction = 压缩策略发出的摘要请求。 */
       reason: "turn" | "overflow-retry" | "compaction";
-      /** 请求的强度级别(Q52);未设置时缺省,请求里也没有强度参数。 */
+      /** 请求的强度级别;未设置时缺省,请求里也没有强度参数。 */
       effort?: string;
       /**
        * 正常步不记正文(它就是此前事件的投影)。策略自己发的请求(压缩摘要)发的不是纯投影,
@@ -171,7 +171,7 @@ export type AgentEvent =
   /** 执行槽把一批工具调用并行跑了(只在并行策略下、且批内多于一个调用时记)。 */
   | { type: "decision"; at: string; slot: "execution"; parallel: number; tools: string[] }
   /**
-   * 编辑上下文(Q74):追加事件,不改写历史。投影把目标事件的某个字段换成新值;原文永远留在数组里。
+   * 编辑上下文:追加事件,不改写历史。投影把目标事件的某个字段换成新值;原文永远留在数组里。
    * 被编辑的消息不再带私有回传物(签名或密文与改后的内容不再对应);Anthropic 还会丢弃之后所有消息的思考块。
    * reasoning 只在该消息 reasoningKind 为 full 时允许编辑(摘要改了模型也看不见)。
    */
@@ -185,11 +185,11 @@ export type AgentEvent =
       value: string;
       note?: string;
     }
-  /** 丢弃一条消息(Q74):user/message,或 assistant/message 连同它的全部工具结果。投影跳过它们。 */
+  /** 丢弃一条消息:user/message,或 assistant/message 连同它的全部工具结果。投影跳过它们。 */
   | { type: "context/drop"; at: string; target: number; note?: string }
   | {
       /**
-       * 压缩(Q31):追加事件,永不改写历史。投影读取它决定跳过什么、注入什么。
+       * 压缩:追加事件,永不改写历史。投影读取它决定跳过什么、注入什么。
        * summary+coversFrom/coversUpTo = 摘要覆盖一段事件;cleared = 这些下标的工具结果换成占位文本。
        * 两组字段可以同时出现(pipeline 策略的产物)。
        */

@@ -237,7 +237,7 @@ describe("pipeline", () => {
   });
 });
 
-describe("循环触发(Q33)", () => {
+describe("循环触发", () => {
   function log(): EventLog {
     const l = new EventLog();
     for (const e of BASE) l.append(e);

@@ -1,4 +1,4 @@
-// 可选装模块的事件如何画(Q87 修订):内核只有一种 ext/event,来源自己决定哪些值得在主屏与检视器露一行。
+// 可选装模块的事件如何画:内核只有一种 ext/event,来源自己决定哪些值得在主屏与检视器露一行。
 // 新模块在这里登记一个渲染函数;没登记的来源画成 "source/kind"。
 import type { AgentEvent } from "../src/events.js";
 import { renderMcpEvent } from "./mcp/bridge.js";

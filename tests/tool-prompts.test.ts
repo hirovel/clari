@@ -1,4 +1,4 @@
-// 工具描述风格槽(Q89):三套风格可切、逐工具可改、切回原文;/toolprompts 记 session/slot;--tool-prompts 解析;
+// 工具描述风格槽:三套风格可切、逐工具可改、切回原文;/toolprompts 记 session/slot;--tool-prompts 解析;
 // MCP 事件泛化后审批规则按命名空间仍然对上。
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
@@ -131,7 +131,7 @@ describe("/toolprompts", () => {
   });
 });
 
-describe("命名空间工具的审批规则(Q87 修订)", () => {
+describe("命名空间工具的审批规则", () => {
   it("prefix__group__name 对上 prefix:group:pattern 与裸 prefix;别的命名空间对不上", () => {
     const call = { id: "c", name: "mcp__github__get_issue", args: {} };
     const cfg = {

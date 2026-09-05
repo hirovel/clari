@@ -1,9 +1,15 @@
-// 请求视图(Q49):一行一请求 → 七分区(概要 / 决策 / 发送 / 工具定义 / 线路 JSON / 接收 / 写入),
+// 请求视图:一行一请求 → 七分区(概要 / 决策 / 发送 / 工具定义 / 线路 JSON / 接收 / 写入),
 // 以及事件视图的行与详情。请求正文按 deriveMessages(请求之前的事件) 原样重建,wire 层正文由 provider.wire 重建。
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import { estimateTokens } from "../src/context.js";
 import type { AgentEvent } from "../src/events.js";
-import { compactionState, deriveMessages, editState, type Message } from "../src/messages.js";
+import {
+  compactionState,
+  deriveMessages,
+  editState,
+  isProjected,
+  type Message,
+} from "../src/messages.js";
 import { type Provider, parseEffort, type ToolDef } from "../src/provider.js";
 import { renderExtEvent } from "./ext-events.js";
 import {
@@ -310,7 +316,7 @@ export function sentLines(
     lines.push(
       `${c.jin(`[${i + 1}] ${roleLabel(m)}`)}  ${c.soft(`${tok} tok · ${pctOf(tok, total)}`)}${m.edited ? c.jin("  ✎ edited (original in the events view)") : ""}`,
     );
-    // 系统提示词按段拆开(Q51):角色、环境、项目指令各占多少。
+    // 系统提示词按段拆开:角色、环境、项目指令各占多少。
     if (m.role === "system" && sections && sections.length > 0) {
       const chars = sections.reduce((n, s) => n + s.chars, 0);
       for (const s of sections) {
@@ -489,16 +495,10 @@ export function messagesFor(events: readonly AgentEvent[], rec: RequestRecord): 
   return deriveMessages(events.slice(0, rec.index));
 }
 
-export const PROJECTED = new Set([
-  "session/start",
-  "user/message",
-  "assistant/message",
-  "tool/result",
-]);
 const SHAPES = new Set(["compaction", "context/edit", "context/drop"]);
 
 function visibility(e: AgentEvent): string {
-  if (PROJECTED.has(e.type)) return "model-visible";
+  if (isProjected(e)) return "model-visible";
   if (SHAPES.has(e.type)) return "shapes projection";
   return "people only";
 }
@@ -552,11 +552,7 @@ export function eventRow(events: readonly AgentEvent[], i: number, selected: boo
   const size = JSON.stringify(e).length;
   const body = `${`#${i}`.padEnd(5)} ${clock(e.at)}  ${e.type.padEnd(18)} ${String(size).padStart(7)} chars  ${visibility(e)}${flag}`;
   const mark = selected ? c.zhu("▸") : " ";
-  const tone = selected
-    ? c.bold(c.ink(body))
-    : PROJECTED.has(e.type)
-      ? c.soft(body)
-      : c.faint(body);
+  const tone = selected ? c.bold(c.ink(body)) : isProjected(e) ? c.soft(body) : c.faint(body);
   return `${mark} ${tone}`;
 }
 

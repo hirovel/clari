@@ -1,4 +1,4 @@
-// 工具描述风格槽(Q89):同一套工具,三套描述文案可选,用户可逐条改。
+// 工具描述风格槽:同一套工具,三套描述文案可选,用户可逐条改。
 // 描述没有最优解:各家的文案长短与语气差一个量级,效果随模型而变,所以做成槽而不是定案。
 // 内核不知道这一层;buildTools 装上,/toolprompts 会话中切换,切换记 session/slot 事件,下一次请求起生效。
 import type { ToolPromptStyle, ToolPromptsConfig } from "../src/config.js";

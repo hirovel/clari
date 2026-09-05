@@ -1,6 +1,6 @@
-// Anthropic Messages API 适配器:第二个 provider,同时是对内部消息抽象(Q4)的验证。
+// Anthropic Messages API 适配器:第二个 provider,同时是对内部消息抽象的验证。
 // 与 OpenAI 兼容适配器的差异全部封在这里:工具结果是 user 消息里的内容块、system 是顶层字段、
-// 流式事件按内容块下标分发、thinking 块带签名必须原样回传(Q53)。内核其余部分一行不改。
+// 流式事件按内容块下标分发、thinking 块带签名必须原样回传。内核其余部分一行不改。
 import type { StopReason, ToolCall, Usage } from "../events.js";
 import type { Message } from "../messages.js";
 import {
@@ -95,7 +95,7 @@ export type AnthropicAcc = {
   cacheWriteTokens?: number;
   outputTokens?: number;
   error?: string;
-  /** 不解释的响应元数据(Q82):id、服务模型、原始 stop_reason、stop_sequence。 */
+  /** 不解释的响应元数据:id、服务模型、原始 stop_reason、stop_sequence。 */
   extras: Record<string, unknown>;
 };
 
@@ -297,9 +297,9 @@ export function toAnthropicWire(
   let systemText: string | undefined;
   const out: { role: "user" | "assistant"; content: WireBlock[] }[] = [];
   const map: number[] = [];
-  // 思考块的签名绑定它之前的整个前缀(Q74):前面任何一条消息被改过,后面的思考块就都不再回传。
+  // 思考块的签名绑定它之前的整个前缀:前面任何一条消息被改过,后面的思考块就都不再回传。
   let prefixEdited = false;
-  // 第一条改过的消息之前的那条 wire 消息下标:编辑点断点挂在它上面(Q76)。
+  // 第一条改过的消息之前的那条 wire 消息下标:编辑点断点挂在它上面。
   let editBoundary = -1;
   for (const m of messages) {
     if (m.edited && !prefixEdited) editBoundary = out.length - 1;
@@ -366,7 +366,7 @@ export function toAnthropicWire(
       }
     };
     if (system?.[0]) system[0] = mark(system[0]);
-    // 编辑点断点(Q76):第一条改过的消息之前那条挂断点,编辑点之前的前缀稳定命中,只有之后重算。
+    // 编辑点断点:第一条改过的消息之前那条挂断点,编辑点之前的前缀稳定命中,只有之后重算。
     if (editBoundary >= 0 && editBoundary < out.length - 1) markLast(out[editBoundary]);
     markLast(out.at(-1));
   }
@@ -384,7 +384,7 @@ const BUDGETS: Record<Exclude<EffortLevel, "off">, number> = {
   max: 32000,
 };
 
-/** 强度 → 请求字段(Q52)。缺省不传;off 发 disabled(不可关的模型会 400,由用户配置 effortLevels 排除 off)。 */
+/** 强度 → 请求字段。缺省不传;off 发 disabled(不可关的模型会 400,由用户配置 effortLevels 排除 off)。 */
 export function anthropicEffortParams(
   level: EffortLevel | undefined,
   mode: ThinkingMode,

@@ -1,4 +1,4 @@
-// 会话文件(Q54/Q90):目录、新建、恢复、分叉,以及列表与清理。
+// 会话文件:目录、新建、恢复、分叉,以及列表与清理。
 // 会话目录里每个 .jsonl 是一份事件数组,旁边可能有 .trace.jsonl(原始流)与 .mcp/(MCP 图片结果)。
 // 列表只读首尾几个事件;清理按开始时间或保留条数,连同旁车文件一起删,不加 --yes 只打印计划。
 import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
@@ -183,7 +183,7 @@ export function newSessionPath(dir = SESSIONS_DIR, suffix = ""): string {
 }
 
 /**
- * 打开会话(Q54):新建,或恢复并沿用同一文件继续追加。
+ * 打开会话:新建,或恢复并沿用同一文件继续追加。
  * 恢复时不重算系统提示词,日志里那份是唯一真相。
  */
 export function openSession(

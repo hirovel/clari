@@ -51,7 +51,7 @@ function slowTool(name: string, ms: number, concurrency?: "parallel" | "sequenti
   return { tool, order };
 }
 
-describe("执行槽(Q10):并行只在选了策略且工具声明并行安全时发生", () => {
+describe("执行槽:并行只在选了策略且工具声明并行安全时发生", () => {
   const calls = [
     { id: "a", name: "ra", args: {} },
     { id: "b", name: "rb", args: {} },
@@ -138,7 +138,7 @@ describe("执行槽(Q10):并行只在选了策略且工具声明并行安全时�
   });
 });
 
-describe("留言投递方式(Q20):steer 步边界,followUp 等到 turn 边界", () => {
+describe("留言投递方式:steer 步边界,followUp 等到 turn 边界", () => {
   it("followUp 不在步边界注入,模型不再调工具时才注入", async () => {
     const log = new EventLog();
     log.append({ type: "session/start", at: "", model: "fake", system: "" });

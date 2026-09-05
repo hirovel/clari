@@ -78,7 +78,7 @@ describe("runTurn", () => {
     expect(firstResult(log)).toMatchObject({ callId: "c1", content: "echo:hi", isError: false });
   });
 
-  it("工具抛异常→isError 结果回喂,循环继续不炸(Q9)", async () => {
+  it("工具抛异常→isError 结果回喂,循环继续不炸", async () => {
     const log = newLog();
     const outcome = await runTurn({
       log,
@@ -92,7 +92,7 @@ describe("runTurn", () => {
     expect(firstResult(log)).toMatchObject({ content: "工具内部错误", isError: true });
   });
 
-  it("参数校验失败→错误文本含路径与原参数,不执行工具(Q19)", async () => {
+  it("参数校验失败→错误文本含路径与原参数,不执行工具", async () => {
     const log = newLog();
     await runTurn({
       log,
@@ -108,7 +108,7 @@ describe("runTurn", () => {
     expect(result.content).toContain('"wrong": 1');
   });
 
-  it("审批拒绝→不执行,以错误结果回喂(Q23)", async () => {
+  it("审批拒绝→不执行,以错误结果回喂", async () => {
     const log = newLog();
     await runTurn({
       log,
@@ -125,7 +125,7 @@ describe("runTurn", () => {
     });
   });
 
-  it("maxSteps 终止策略叫停,返回 stopped 理由(Q8)", async () => {
+  it("maxSteps 终止策略叫停,返回 stopped 理由", async () => {
     const log = newLog();
     const loopForever: AssistantTurn = {
       text: "",
@@ -141,7 +141,7 @@ describe("runTurn", () => {
     expect(outcome).toEqual({ stopped: "已达步数上限 2" });
   });
 
-  it("length:一个都不执行,逐个补错误应答后让模型重发(Q26)", async () => {
+  it("length:一个都不执行,逐个补错误应答后让模型重发", async () => {
     const log = newLog();
     await runTurn({
       log,
@@ -162,7 +162,7 @@ describe("runTurn", () => {
     expect(results[2]).toMatchObject({ callId: "c3", content: "echo:a", isError: false });
   });
 
-  it("steer 模式:插话在 step 边界注入,模型下一步就看到(Q20)", async () => {
+  it("steer 模式:插话在 step 边界注入,模型下一步就看到", async () => {
     const log = newLog();
     const queue = ["插话"];
     await runTurn({
@@ -190,7 +190,7 @@ describe("runTurn", () => {
     ]);
   });
 
-  it("queue 模式:插话等到 turn 末才注入,并触发新一轮(Q20)", async () => {
+  it("queue 模式:插话等到 turn 末才注入,并触发新一轮", async () => {
     const log = newLog();
     const queue = ["插话"];
     await runTurn({
@@ -221,7 +221,7 @@ describe("runTurn", () => {
     ]);
   });
 
-  it("打断:剩余调用不执行但逐个补应答,投影保持合法(Q21)", async () => {
+  it("打断:剩余调用不执行但逐个补应答,投影保持合法", async () => {
     const log = newLog();
     const ac = new AbortController();
     const abortingTool = defineTool({

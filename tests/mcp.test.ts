@@ -1,4 +1,4 @@
-// MCP 客户端与桥接(Q87):双时代探测、分页、命名、白黑名单、isError 与协议错误、图片落盘、stderr 事件、
+// MCP 客户端与桥接:双时代探测、分页、命名、白黑名单、isError 与协议错误、图片落盘、stderr 事件、
 // list_changed 刷新、启动失败与 required、HTTP 传输、审批规则、配置合并与变量展开。
 import { existsSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";

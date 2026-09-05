@@ -1,7 +1,7 @@
-// 文件三工具:read / write / edit。内核对它们一无所知(Q2),从 CLI 层注入。
-// read 的截断策略可换(Q28):默认保头,自定义策略经 createReadTool 注入。
-// read 传目录即列举(Q88):目录列举工具在各家退场,并进 read 省一个工具名。
-// 描述文案的写法(Q88):每条说清输出形状、硬限制、失败原因与该换哪个工具;不写行为以外的话。
+// 文件三工具:read / write / edit。内核对它们一无所知,从 CLI 层注入。
+// read 的截断策略可换:默认保头,自定义策略经 createReadTool 注入。
+// read 传目录即列举:目录列举工具在各家退场,并进 read 省一个工具名。
+// 描述文案的写法:每条说清输出形状、硬限制、失败原因与该换哪个工具;不写行为以外的话。
 import {
   closeSync,
   mkdirSync,
@@ -33,7 +33,7 @@ export function looksBinary(path: string): boolean {
 }
 
 export function createReadTool(opts: { truncate?: TruncationPolicy; maxLineChars?: number } = {}) {
-  // 保头+分页是全行业共识(Q29 调查:pi/Claude Code/opencode/Cline 现行版一致,保尾无一家)。
+  // 保头+分页是全行业共识(pi/Claude Code/opencode/Cline 现行版一致,保尾无一家)。
   const truncate = opts.truncate ?? keepHead();
   const capLine = capLineLength(opts.maxLineChars ?? 2000);
   return defineTool({

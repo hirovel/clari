@@ -130,7 +130,7 @@ const tools = [
   ...baseTools.filter((t) => !ext.tools?.some((x) => x.name === t.name)),
   ...(ext.tools ?? []),
 ];
-// MCP 服务器(Q87):启动时连接,工具原地追加到 tools;required 的失败即退出。
+// MCP 服务器:启动时连接,工具原地追加到 tools;required 的失败即退出。
 const mcpCfg = mcpConfigOf(boot.config.mcp);
 const mcpServers = loadMcpServers(mcpCfg, process.cwd());
 let mcp: McpBridge | undefined;

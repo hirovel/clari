@@ -1,4 +1,4 @@
-// 界面定稿(Q83):标签沟卡片、changed 行、未变折叠、上下文面板动作菜单与后果、/compare /restore /rewind、首屏、? 键。
+// 界面定稿:标签沟卡片、changed 行、未变折叠、上下文面板动作菜单与后果、/compare /restore /rewind、首屏、? 键。
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
 import {

@@ -5,7 +5,7 @@
 // 版式是一条 9 列的标签沟:标签淡色靠左,内容从第 12 列起;续行缩进到内容列。不画框,不用竖线。
 // 记号优先于颜色:+ 新增、✎ 编辑、≈ 摘要或清除、· 未变;红色只留给错误。
 // 全部是纯函数,输入就是事件与投影;不重复已经在屏幕上的正文,只标结构与差异。
-import { estimateTokens } from "../src/context.js";
+import { messageTokens as estimateMessageTokens, estimateTokens } from "../src/context.js";
 import { costOf, fmtCost, type Price } from "../src/cost.js";
 import type { AgentEvent } from "../src/events.js";
 import type { Message } from "../src/messages.js";
@@ -41,11 +41,7 @@ const keyMemo = new WeakMap<Message, string>();
 function messageTokens(m: Message): number {
   const hit = tokenMemo.get(m);
   if (hit !== undefined) return hit;
-  const base = estimateTokens(m.content);
-  const n =
-    m.role === "assistant"
-      ? base + m.toolCalls.reduce((s, tc) => s + estimateTokens(JSON.stringify(tc.args)) + 8, 0)
-      : base;
+  const n = estimateMessageTokens(m);
   tokenMemo.set(m, n);
   return n;
 }
@@ -242,7 +238,7 @@ export type SendCardInput = {
   /** 消息首行的可用宽度。 */
   width?: number;
   /**
-   * 只要头两行(头 + changed):回放历史时,除最后一次之外的 Request 卡一画出来就会被折成两行(Q85),
+   * 只要头两行(头 + changed):回放历史时,除最后一次之外的 Request 卡一画出来就会被折成两行,
    * 参数、系统段、工具与消息表算了也不显示。
    */
   collapsed?: boolean;
@@ -281,7 +277,7 @@ export function changedLine(
     parts.push(c.jin(`${summary.length} summary (${summary.map((r) => `#${r.idx}`).join(", ")})`));
   const cleared = count("cleared");
   if (cleared.length > 0) parts.push(c.jin(`${cleared.length} cleared`));
-  // 编辑点之后的思考块(Q76):Anthropic 的签名绑定前缀,改过之后的思考块不再回传。
+  // 编辑点之后的思考块:Anthropic 的签名绑定前缀,改过之后的思考块不再回传。
   const firstEdited = messages.findIndex((m) => m.edited);
   const thinking =
     input.dropsThinking && firstEdited >= 0
@@ -318,7 +314,7 @@ export function sendCardLines(input: SendCardInput): string[] {
   const rows = messageRows(messages, input.previous, input.provenance, keep);
   lines.push(g("changed", changedLine(input, rows, keep)));
 
-  // params / system / tools 一轮之后基本不变:没变的不再逐行印,合成一行 same(Q85)。第一次请求全印。
+  // params / system / tools 一轮之后基本不变:没变的不再逐行印,合成一行 same。第一次请求全印。
   const params = paramsLine(input.wire);
   const sameParams = input.previous !== undefined && input.previousParams === params;
   if (!sameParams) lines.push(g("params", c.faint(params)));
@@ -463,7 +459,7 @@ export function receiveBlockLines(e: AssistantEvent): string[] {
       ),
     );
   }
-  // 供应商元数据(Q82):不解释,原样列出;与内核归一后的 stopReason 并排,两者不一致就能看见。
+  // 供应商元数据:不解释,原样列出;与内核归一后的 stopReason 并排,两者不一致就能看见。
   if (e.extras && Object.keys(e.extras).length > 0) {
     lines.push(
       g(

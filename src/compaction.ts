@@ -1,9 +1,9 @@
-import { estimateTokens } from "./context.js";
+import { estimateTokens, eventTokens, messageTokens } from "./context.js";
 import type { AgentEvent, Usage } from "./events.js";
-import { compactionState, deriveMessages, type Message } from "./messages.js";
+import { compactionState, deriveMessages, isProjected, type Message } from "./messages.js";
 import type { Provider } from "./provider.js";
 
-// ---------- 保留策略槽(Q37):决定压缩时尾部保留多少原文 ----------
+// ---------- 保留策略槽:决定压缩时尾部保留多少原文 ----------
 
 /**
  * 返回切点下标:events[切点..] 原文保留,切点之前可被摘要覆盖。
@@ -54,34 +54,7 @@ export function legalizeCut(events: readonly AgentEvent[], cut: number): number 
   return c;
 }
 
-function isProjected(e: AgentEvent): boolean {
-  return (
-    e.type === "session/start" ||
-    e.type === "user/message" ||
-    e.type === "assistant/message" ||
-    e.type === "tool/result"
-  );
-}
-
-function eventTokens(e: AgentEvent): number {
-  switch (e.type) {
-    case "session/start":
-      return estimateTokens(e.system);
-    case "user/message":
-      return estimateTokens(e.text);
-    case "assistant/message":
-      return (
-        estimateTokens(e.text) +
-        e.toolCalls.reduce((n, tc) => n + estimateTokens(JSON.stringify(tc.args)) + 8, 0)
-      );
-    case "tool/result":
-      return estimateTokens(e.content);
-    default:
-      return 0;
-  }
-}
-
-// ---------- 压缩策略槽(Q32/Q39):内核管 WHEN,策略管 HOW ----------
+// ---------- 压缩策略槽:内核管 WHEN,策略管 HOW ----------
 
 export type CompactionPayload = {
   summary?: string;
@@ -103,7 +76,7 @@ export type CompactionInput = {
   targetTokens: number;
   provider?: Provider;
   preservation?: PreservationPolicy;
-  /** 手动压缩时用户附加的指示(Q33)。 */
+  /** 手动压缩时用户附加的指示。 */
   instructions?: string;
   signal?: AbortSignal;
 };
@@ -136,13 +109,6 @@ export function estimateAfter(
     ? [...events, { type: "compaction", at: "", ...payload } as AgentEvent]
     : events;
   return deriveMessages(view).reduce((n, m) => n + messageTokens(m), 0);
-}
-
-function messageTokens(m: Message): number {
-  const base = estimateTokens(m.content);
-  return m.role === "assistant"
-    ? base + m.toolCalls.reduce((n, tc) => n + estimateTokens(JSON.stringify(tc.args)) + 8, 0)
-    : base;
 }
 
 // ---------- 策略一:清除旧工具结果(无损,零 LLM 调用) ----------

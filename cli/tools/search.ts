@@ -1,4 +1,4 @@
-// 只读两工具(Q56, Q88):grep / glob。内核不知道它们,从 CLI 层注入;目录列举并入 read。
+// 只读两工具:grep / glob。内核不知道它们,从 CLI 层注入;目录列举并入 read。
 // 立场取自 pi:模型在这些工具名上被训练过,给工具即给"先搜后读"的引导,不必写提示词规则。
 import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync, statSync } from "node:fs";

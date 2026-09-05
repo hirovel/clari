@@ -1,4 +1,4 @@
-// 子 agent 视图(Q62)与压缩对照(Q63)。
+// 子 agent 视图与压缩对照。
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
 import {
@@ -38,7 +38,7 @@ const echo = defineTool({
   },
 });
 
-describe("子 agent 视图(Q62)", () => {
+describe("子 agent 视图", () => {
   it("task 工具把子日志与 callId 交给界面;子块挂在调用行下,尾窗、进度、完成态、会话切换", async () => {
     const provider = scripted([
       // 父:派任务
@@ -168,7 +168,7 @@ describe("子 agent 视图(Q62)", () => {
   });
 });
 
-describe("压缩对照(Q63)", () => {
+describe("压缩对照", () => {
   const events: AgentEvent[] = [
     { type: "session/start", at: "t", model: "m", system: "S" },
     { type: "user/message", at: "t", text: "开始" },
@@ -301,7 +301,7 @@ describe("压缩对照(Q63)", () => {
     insp.handleInput("\x1b");
     expect(insp.currentMode).toBe("compactions");
     insp.handleInput("\t");
-    expect(insp.currentMode).toBe("composition"); // 第四视图:组装(Q81)
+    expect(insp.currentMode).toBe("composition"); // 第四视图:组装
     insp.handleInput("	");
     expect(insp.currentMode).toBe("list");
   });

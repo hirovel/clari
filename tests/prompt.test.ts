@@ -34,7 +34,7 @@ function tree(): { root: string; deep: string; home: string } {
   return { root, deep, home };
 }
 
-describe("系统提示词组装(Q51)", () => {
+describe("系统提示词组装", () => {
   it("段列表以空行相接,空段跳过", () => {
     expect(
       composeSystemPrompt([

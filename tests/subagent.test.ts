@@ -117,7 +117,7 @@ describe("createTaskTool", () => {
     return log;
   }
 
-  it("父调用 task → 子在独立日志里跑完 → 结果回喂父;子拿不到 task 工具(Q42)", async () => {
+  it("父调用 task → 子在独立日志里跑完 → 结果回喂父;子拿不到 task 工具", async () => {
     const parent = parentLog();
     let childTools: string[] = [];
     const childProvider: Provider = {

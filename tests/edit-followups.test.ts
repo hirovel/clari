@@ -1,4 +1,4 @@
-// 编辑上下文的收口(Q76):压缩与清除当作编辑点、Anthropic 编辑点断点、发送卡的编辑点行与预计命中、/retry。
+// 编辑上下文的收口:压缩与清除当作编辑点、Anthropic 编辑点断点、发送卡的编辑点行与预计命中、/retry。
 import { describe, expect, it } from "vitest";
 import { predictedCache, receiveHead, sendCardLines } from "../cli/cards.js";
 import { Agent } from "../src/agent.js";

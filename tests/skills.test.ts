@@ -1,4 +1,4 @@
-// 技能(Q80):frontmatter 四字段、四个发现目录、清单排除只许用户触发的、用户 /名 触发成用户消息、
+// 技能:frontmatter 四字段、四个发现目录、清单排除只许用户触发的、用户 /名 触发成用户消息、
 // allowed-tools 免审批、skill 工具(load = tool)、skills.list = none 不进系统提示词、/skills 列表。
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

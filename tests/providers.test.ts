@@ -129,7 +129,7 @@ describe("config 解析", () => {
   });
 });
 
-describe("按模型的能力数据(Q57)与强度映射(Q52)", () => {
+describe("按模型的能力数据与强度映射", () => {
   it("模型对象:窗口与强度集合取模型级,缺省回落到供应商级", () => {
     const r = resolveModel(CONFIG_TEMPLATE, "claude-haiku-4-5-20251001");
     expect(r.contextWindow).toBe(200000);
@@ -205,7 +205,7 @@ describe("按模型的能力数据(Q57)与强度映射(Q52)", () => {
   });
 });
 
-describe("Anthropic thinking 块(Q53)", () => {
+describe("Anthropic thinking 块", () => {
   it("流式累积 thinking 与签名;finish 产出可读 reasoning 与 opaque 回传物;打断丢弃块", () => {
     const acc = newAnthropicAcc();
     const events: AnthropicEvent[] = [

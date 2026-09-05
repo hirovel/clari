@@ -91,7 +91,7 @@ describe("入口参数与会话文件", () => {
   });
 });
 
-describe("会话恢复(Q54)", () => {
+describe("会话恢复", () => {
   it("历史渲染到屏幕、不重发 session/start、换模型记 session/model、检视器可重建同模型的线路正文", async () => {
     tmp = mkdtempSync(join(tmpdir(), "ak-resume-"));
     const file = join(tmp, "s.jsonl");
@@ -193,7 +193,7 @@ describe("会话恢复(Q54)", () => {
   });
 });
 
-describe("配置里的可选项(Q90):命令行 > 预设 > defaults > 内置缺省", () => {
+describe("配置里的可选项:命令行 > 预设 > defaults > 内置缺省", () => {
   it("defaults 给全局缺省,预设覆盖它,显式命令行再覆盖预设;prompt 段与 skills 同序", () => {
     const config = {
       default: "p/m",

@@ -294,7 +294,7 @@ function renderFields(ctx: TuiContext): string {
   ].join("\n");
 }
 
-/** /prompt:系统提示词的段构成与位置(Q66)。数据来自 session/start,与模型看到的同源。 */
+/** /prompt:系统提示词的段构成与位置。数据来自 session/start,与模型看到的同源。 */
 function renderPrompt(ctx: TuiContext): string {
   const { log } = ctx;
   const start = log.events.find((e) => e.type === "session/start");
@@ -362,7 +362,7 @@ function memoryCommand(ctx: TuiContext, arg: string): string {
   return lines.join("\n");
 }
 
-/** /context:估算占用、实测、会话累计、各部分占比,系统提示词按段拆开(Q51)。 */
+/** /context:估算占用、实测、会话累计、各部分占比,系统提示词按段拆开。 */
 export function renderContext(ctx: TuiContext): string {
   const { log } = ctx;
   const b = contextBreakdown(log.events, ctx.model.contextWindow);
@@ -438,7 +438,7 @@ function switchModel(ctx: TuiContext, arg: string): void {
   }
 }
 
-/** 强度级别(Q52):缺省不传;设了就记进每条 request 事件,下一请求生效。 */
+/** 强度级别:缺省不传;设了就记进每条 request 事件,下一请求生效。 */
 function setEffort(ctx: TuiContext, arg: string): void {
   const { agent } = ctx;
   const levels = ctx.model.effortLevels;
@@ -475,7 +475,7 @@ function setEffort(ctx: TuiContext, arg: string): void {
   ctx.updateStatus();
 }
 
-/** 向供应商查当前模型列表(Q59):配置里有、服务器没有的标出来,发现下线不靠猜。 */
+/** 向供应商查当前模型列表:配置里有、服务器没有的标出来,发现下线不靠猜。 */
 async function listRemoteModels(ctx: TuiContext): Promise<void> {
   const p = ctx.agent.provider;
   const { providerName } = ctx.model.info;
@@ -712,7 +712,7 @@ export async function command(ctx: TuiContext, text: string): Promise<void> {
   }
 }
 
-/** 提示词模板与技能:/名 参数 → 一条用户消息。技能的 allowed-tools 在这一 turn 免审批(Q80)。 */
+/** 提示词模板与技能:/名 参数 → 一条用户消息。技能的 allowed-tools 在这一 turn 免审批。 */
 async function userDefined(ctx: TuiContext, cmd: string, arg: string): Promise<void> {
   const t = ctx.templates.find((x) => x.name === cmd);
   if (t) {

@@ -44,7 +44,7 @@ function fresh(): EventLog {
 
 const types = (log: EventLog) => log.events.map((e) => e.type);
 
-describe("请求层记录(Q48)", () => {
+describe("请求层记录", () => {
   it("每次请求先落 request 事件:规模、工具、估算、阈值;响应带耗时", async () => {
     const log = fresh();
     await runTurn({
@@ -269,7 +269,7 @@ describe("请求层记录(Q48)", () => {
   });
 });
 
-describe("策略请求的真实正文与策略名(Q60)", () => {
+describe("策略请求的真实正文与策略名", () => {
   it("describeRequestBody:正常步 tail 为空;摘要请求 = 前缀投影 + 指示消息", () => {
     const log = fresh();
     log.append({ type: "assistant/message", at: "t", text: "a", toolCalls: [], stopReason: "end" });
@@ -360,7 +360,7 @@ describe("策略请求的真实正文与策略名(Q60)", () => {
   });
 });
 
-describe("wire 层与实际发送一致(Q48)", () => {
+describe("wire 层与实际发送一致", () => {
   afterEach(() => vi.unstubAllGlobals());
 
   it("openaiCompat.wire() 与 fetch 收到的正文逐字节相同;onRaw 收到每一行", async () => {

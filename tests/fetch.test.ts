@@ -1,4 +1,4 @@
-// fetch 工具(Q86):HTML 转文本、重定向两态、字节上限、二进制拒绝、私网拒绝、续读、超时;审批规则按 URL。
+// fetch 工具:HTML 转文本、重定向两态、字节上限、二进制拒绝、私网拒绝、续读、超时;审批规则按 URL。
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";

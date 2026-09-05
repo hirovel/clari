@@ -1,4 +1,4 @@
-// 截断策略(Q28):开放接口,工具在输出超限时按策略选择保留哪部分。
+// 截断策略:开放接口,工具在输出超限时按策略选择保留哪部分。
 // 内置三种覆盖常见场景;自定义策略从外部传入工具工厂即可,不改任何现有代码。
 
 export type Truncation = {
@@ -78,7 +78,7 @@ export function keepBothEnds(
 }
 
 /**
- * 单行长度上限(Q29):压扁超长行(压缩产物/单行 JSON),防止一行吃穿字节预算。
+ * 单行长度上限:压扁超长行(压缩产物/单行 JSON),防止一行吃穿字节预算。
  * 与头尾策略正交,在策略之前应用。
  */
 export function capLineLength(maxChars: number): (text: string) => string {

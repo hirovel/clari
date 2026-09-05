@@ -1,5 +1,5 @@
-// 策略槽在会话中切换(Q78):每次切换记 session/slot,下一次 turn 起生效。
-// 审批槽(Q64/Q84)的三种形态与审批提示组件也在这里:它是唯一需要界面参与的槽。
+// 策略槽在会话中切换:每次切换记 session/slot,下一次 turn 起生效。
+// 审批槽的三种形态与审批提示组件也在这里:它是唯一需要界面参与的槽。
 import { type Component, Key, matchesKey } from "@earendil-works/pi-tui";
 import {
   type ApprovalConfig,
@@ -34,7 +34,7 @@ type ApprovalChoice = { kind: "y" | "n" | "a"; reason?: string };
 const APPROVAL_DETAIL_LINES = 20;
 
 /**
- * 审批提示(Q64/Q84):一行问题(带为什么要问)、edit/write 的 diff、一行按键说明;
+ * 审批提示:一行问题(带为什么要问)、edit/write 的 diff、一行按键说明;
  * y / n / a,r 进入输入理由,理由原样进工具结果喂回模型;Esc 视为拒绝。
  */
 export class ApprovalPrompt implements Component {
@@ -109,7 +109,7 @@ export function initialApproval(approve: TuiAppDeps["approve"]): ApprovalState {
   };
 }
 
-/** 问一次就是一次;a 把该工具加进本会话的放行名单。拒绝以错误结果回喂模型(Q23)。 */
+/** 问一次就是一次;a 把该工具加进本会话的放行名单。拒绝以错误结果回喂模型。 */
 export function askApproval(
   ctx: TuiContext,
   call: ToolCall,
@@ -154,7 +154,7 @@ export function askApproval(
   });
 }
 
-/** 审批槽的三种形态(Q84):all 不问;ask 每个调用都问;policy 按规则裁决,ask 的才问。 */
+/** 审批槽的三种形态:all 不问;ask 每个调用都问;policy 按规则裁决,ask 的才问。 */
 export function approveImpl(ctx: TuiContext): ApprovePolicy {
   const a = ctx.approval;
   if (a.mode === "all") return allowAll;
@@ -314,7 +314,7 @@ function approveSlot(ctx: TuiContext, v: string): string {
   return show();
 }
 
-/** 工具描述风格槽(Q89):列表、切换、逐条编辑、写回配置。切换与编辑都原地改 tools 的描述。 */
+/** 工具描述风格槽:列表、切换、逐条编辑、写回配置。切换与编辑都原地改 tools 的描述。 */
 function toolPromptsSlot(ctx: TuiContext, v: string): string {
   const cfg = ctx.slots.toolPrompts;
   const { tools } = ctx;

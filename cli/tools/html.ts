@@ -1,4 +1,4 @@
-// HTML → 可读 markdown(Q86):fetch 工具的缺省转换器。只做字符串扫描,不建 DOM,零依赖。
+// HTML → 可读 markdown:fetch 工具的缺省转换器。只做字符串扫描,不建 DOM,零依赖。
 // 取 <main> / <article>(没有就 <body>),去掉 script / style / nav / header / footer / aside,
 // 标题、段落、嵌套列表、链接、粗斜体、行内代码、带语言的代码块、带分隔行的表格、实体解码、空白折叠。
 // 没有正文评分:新闻站与论坛页会带上导航与评论;要 Readability 品质的用 fetch.convert 槽换。

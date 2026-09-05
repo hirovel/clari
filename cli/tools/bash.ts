@@ -1,5 +1,5 @@
-// bash 工具(Q25,照抄 pi 方案):Windows 找 Git Bash,打断杀进程树。
-// 截断策略可换(Q28):默认保尾,自定义策略经 createBashTool 注入。
+// bash 工具(照抄 pi 方案):Windows 找 Git Bash,打断杀进程树。
+// 截断策略可换:默认保尾,自定义策略经 createBashTool 注入。
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

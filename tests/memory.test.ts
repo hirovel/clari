@@ -1,4 +1,4 @@
-// 跨会话记忆(Q65)、系统提示词段控制与预设(Q66/Q15)。
+// 跨会话记忆、系统提示词段控制与预设。
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -28,7 +28,7 @@ afterEach(() => {
 
 const ctx = { signal: new AbortController().signal };
 
-describe("记忆节:AGENTS.md 里由工具写入的一节(Q65)", () => {
+describe("记忆节:AGENTS.md 里由工具写入的一节", () => {
   it("拆分:人写部分与记忆节分开;记忆节到下一个二级标题为止", () => {
     const content = `# 项目\n规则 A\n\n${MEMORY_HEADING}\n- [correction] 2026-09-03 不要用 any\n- [preference] 2026-09-03 回答简短\n\n## 其它\n人写的`;
     const s = splitMemory(content);
@@ -94,7 +94,7 @@ describe("记忆节:AGENTS.md 里由工具写入的一节(Q65)", () => {
   });
 });
 
-describe("系统提示词段控制(Q66)", () => {
+describe("系统提示词段控制", () => {
   function repo(): { root: string; home: string } {
     tmp = mkdtempSync(join(tmpdir(), "ak-prompt-"));
     const root = join(tmp, "repo");
@@ -203,7 +203,7 @@ describe("系统提示词段控制(Q66)", () => {
   });
 });
 
-describe("预设(Q15)与参数优先级", () => {
+describe("预设与参数优先级", () => {
   const config: KernelConfig = {
     default: "m",
     providers: {},

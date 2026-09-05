@@ -31,7 +31,7 @@ import type { ApprovalPrompt } from "./tui-slots.js";
 export const FOLD_HEAD = 3;
 /** 子 agent 尾窗保留的行数。 */
 export const CHILD_TAIL = 3;
-/** 引导线:子 agent 的每一行都带它,一眼分清层级;不是框线(Q45)。 */
+/** 引导线:子 agent 的每一行都带它,一眼分清层级;不是框线。 */
 export const GUIDE = `  ${c.faint("┆")} `;
 /** 内存里保留的原始流行数上限;超过就整桶淘汰最旧请求的 raw(磁盘旁路文件不受影响)。 */
 export const RAW_LINE_CAP = 100_000;
@@ -43,7 +43,7 @@ export type ResultRecord = { name: string; content: string; isError: boolean; du
 
 export type TuiInfo = TuiAppDeps["info"];
 
-/** 显示状态(Q49):折叠/隐藏只改屏幕,不改日志;切换键重绘已有节点。 */
+/** 显示状态:折叠/隐藏只改屏幕,不改日志;切换键重绘已有节点。 */
 export type ViewState = {
   foldResults: boolean;
   /** 思考缺省折成一行(首行 + 种类 + 行数),Ctrl+T 展开全文。 */
@@ -61,7 +61,7 @@ export type ViewState = {
   lastUsage: { inputTokens: number; outputTokens: number } | undefined;
 };
 
-/** 请求层记录(Q48):发出每个请求时用的 provider、原始流、接收卡头节点。都不进日志。 */
+/** 请求层记录:发出每个请求时用的 provider、原始流、接收卡头节点。都不进日志。 */
 export type RequestState = {
   count: number;
   lastIndex: number;
@@ -83,7 +83,7 @@ export type RequestState = {
   lastCard: { node: Text; lines: string[] } | undefined;
 };
 
-/** 审批(Q64/Q84):规则对象被策略实现闭包引用,/approve 改它即生效。 */
+/** 审批:规则对象被策略实现闭包引用,/approve 改它即生效。 */
 export type ApprovalState = {
   cfg: ApprovalConfig;
   mode: "all" | "ask" | "policy";
@@ -98,7 +98,7 @@ export type ApprovalState = {
 /** 策略槽的当前形态,/slots 显示;每次切换记 session/slot。 */
 export type SlotState = {
   state: Record<string, string>;
-  /** 工具描述风格的当前形态(Q89):风格加逐工具覆盖。 */
+  /** 工具描述风格的当前形态:风格加逐工具覆盖。 */
   toolPrompts: ToolPromptsConfig;
 };
 

@@ -1,4 +1,4 @@
-// 会话列表与清理(Q90):概要读首尾事件;清理按时间或条数,旁车同删,不加 apply 只算计划;子进程入口 clari sessions。
+// 会话列表与清理:概要读首尾事件;清理按时间或条数,旁车同删,不加 apply 只算计划;子进程入口 clari sessions。
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

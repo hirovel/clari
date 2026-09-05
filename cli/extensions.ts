@@ -13,7 +13,7 @@ export type Extension = {
 };
 
 /**
- * 装载扩展模块(Q27 的外部注入):default 导出 `(ctx) => Extension`,ctx 里有工作目录与事件日志。
+ * 装载扩展模块(外部注入):default 导出 `(ctx) => Extension`,ctx 里有工作目录与事件日志。
  * 多个模块按顺序合并,后者的槽覆盖前者;工具重名以后者为准。
  */
 export async function loadExtensions(
