@@ -22,6 +22,8 @@ import {
   resolveModel,
   setApiKey,
   setDefaultModel,
+  type ToolPromptStyle,
+  type ToolPromptsConfig,
 } from "../src/config.js";
 import { type AgentEvent, now } from "../src/events.js";
 import { EventLog } from "../src/log.js";
@@ -36,6 +38,7 @@ import {
   type PromptSection,
   type Skill,
 } from "./prompt.js";
+import { applyToolPrompts, isToolPromptStyle } from "./tool-prompts.js";
 import { bashTool } from "./tools/bash.js";
 import { createFetchTool, type FetchConfig } from "./tools/fetch.js";
 import { editTool, readTool, writeTool } from "./tools/fs.js";
@@ -75,8 +78,10 @@ export type CommonArgs = {
   maxSteps?: number;
   json: boolean;
   help: boolean;
-  /** 审批槽(Q23/Q64/Q84):policy(缺省)= 按规则裁决,ask 的才问人;ask = 每个调用都问;all = 不问。 */
+  /** 审批槽(Q23/Q64/Q84):all(缺省)= 不问;policy = 按规则裁决,ask 的才问人;ask = 每个调用都问。 */
   approve: "all" | "ask" | "policy";
+  /** 工具描述风格槽(Q89):命令行 > 预设 > 配置 > guided。 */
+  toolPrompts?: ToolPromptStyle;
   /** 预设里的审批规则(Q84);没有就用配置的,再没有就用内置缺省。 */
   approval?: ApprovalConfig;
   /** 预设名(Q15):从配置 presets 取缺省参数;显式给的参数优先。 */
@@ -111,6 +116,14 @@ export function resolveApproval(
 ): "all" | "ask" | ApprovalConfig {
   if (args.approve !== "policy") return args.approve;
   return args.approval ?? config.approval ?? DEFAULT_APPROVAL;
+}
+
+/** 工具描述风格的启动形态(Q89):风格按优先级取,逐工具覆盖只来自配置。 */
+export function resolveToolPrompts(args: CommonArgs, config: KernelConfig): ToolPromptsConfig {
+  return {
+    style: args.toolPrompts ?? config.toolPrompts?.style ?? "guided",
+    ...(config.toolPrompts?.descriptions && { descriptions: config.toolPrompts.descriptions }),
+  };
 }
 
 export function parseCommonArgs(argv: string[]): CommonArgs {
@@ -190,6 +203,13 @@ export function parseCommonArgs(argv: string[]): CommonArgs {
         out.approveExplicit = true;
         break;
       }
+      case "--tool-prompts": {
+        const v = takeValue(i++, a);
+        if (!isToolPromptStyle(v))
+          throw new Error(`--tool-prompts accepts guided, terse or strict, got "${v}"`);
+        out.toolPrompts = v;
+        break;
+      }
       case "--help":
       case "-h":
         out.help = true;
@@ -263,6 +283,7 @@ Options
   --resume <session file> | --continue   resume a session and keep appending to the same file
   --system-prompt <file> | --append-system-prompt <file>
   --approve all|policy|ask       all (default, pi stance) = never ask; policy = allow/deny rules from config, ask when no rule matches; ask = every call
+  --tool-prompts guided|terse|strict   tool description style (default guided); edit single descriptions with /toolprompts edit <tool>
   --preset name                  apply the parameter set presets.name from config; explicit flags still win
   --memory | --no-memory         cross-session memory (memory section in AGENTS.md + remember tool); default off
   --prompt-sections role,env,instructions,memory,skills,append   which system prompt sections, in which order
@@ -310,6 +331,7 @@ export function applyPreset(args: CommonArgs, config: KernelConfig): CommonArgs 
     }
     if (!args.compactionExplicit && preset.compaction) out.compaction = preset.compaction;
     if (!args.approveExplicit && preset.approve) out.approve = preset.approve;
+    if (out.toolPrompts === undefined && preset.toolPrompts) out.toolPrompts = preset.toolPrompts;
     if (preset.approval) out.approval = preset.approval;
     if (out.systemPromptFile === undefined && preset.systemPromptFile) {
       out.systemPromptFile = preset.systemPromptFile;
@@ -433,7 +455,10 @@ export function buildTools(
   skills?: Skill[],
   /** fetch 工具的安全边界(Q86);不给用缺省(拒私网、30 秒、5 MB)。 */
   fetchConfig?: FetchConfig,
+  /** 工具描述风格(Q89);不给就是工具文件里写的 guided。 */
+  toolPrompts?: ToolPromptsConfig,
 ): Tool[] {
+  // 每次组装复制一份工具对象:描述风格槽原地改描述,不能碰模块级单例。
   const base: Tool[] = [
     readTool,
     writeTool,
@@ -442,7 +467,8 @@ export function buildTools(
     grepTool,
     globTool,
     createFetchTool({ ...(fetchConfig && { config: fetchConfig }) }),
-  ];
+  ].map((t) => ({ ...t }));
+  applyToolPrompts(base, toolPrompts);
   if (memory) base.push(createRememberTool(memory));
   if (skills?.some((s) => !s.disableModelInvocation)) base.push(createSkillTool(skills));
   if (!subagent) return base;

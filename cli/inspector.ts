@@ -23,6 +23,7 @@ import {
   type Message,
 } from "../src/messages.js";
 import { type Provider, parseEffort, type ToolDef } from "../src/provider.js";
+import { renderExtEvent } from "./ext-events.js";
 import { c } from "./theme.js";
 
 type RequestEvent = Extract<AgentEvent, { type: "request" }>;
@@ -79,13 +80,14 @@ export function collectRequests(events: readonly AgentEvent[]): RequestRecord[] 
       case "decision":
       case "session/interrupt":
       case "session/recovered":
-      case "mcp/server":
-      case "mcp/tools":
       case "session/model":
       case "session/slot":
       case "context/edit":
       case "context/drop":
         pending.push(e);
+        break;
+      case "ext/event":
+        if (renderExtEvent(e)) pending.push(e);
         break;
       default:
         break;
@@ -357,18 +359,11 @@ export function decisionLines(rec: RequestRecord): string[] {
           `${c.zhu("◇")} recovered: dropped ${e.droppedBytes} bytes of a half-written line at the end of the log`,
         );
         break;
-      case "mcp/server":
-        lines.push(
-          e.phase === "failed" || e.phase === "closed"
-            ? `${c.zhu("◇")} mcp ${e.server}: ${e.phase}${e.error ? ` · ${e.error}` : ""}`
-            : `${c.jin("◇")} mcp ${e.server}: ${e.phase}${e.era ? ` · ${e.era} ${e.protocolVersion ?? ""}` : ""}${e.toolCount !== undefined ? ` · ${e.toolCount} tools` : ""}${e.ms !== undefined ? ` · ${e.ms}ms` : ""}`,
-        );
+      case "ext/event": {
+        const r = renderExtEvent(e);
+        if (r) lines.push(c[r.tone](r.text));
         break;
-      case "mcp/tools":
-        lines.push(
-          `${c.jin("◇")} mcp ${e.server}: tools changed · +${e.added.length} −${e.removed.length} · ${e.total} total`,
-        );
-        break;
+      }
       case "session/model":
         lines.push(`${c.jin("◇")} model switched to ${e.model}`);
         break;

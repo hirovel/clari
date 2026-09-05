@@ -6,15 +6,28 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { bridgedName, connectMcpServers, contentToText, toolAllowed } from "../cli/mcp/bridge.js";
+import {
+  bridgedName,
+  connectMcpServers,
+  contentToText,
+  type McpEvent,
+  mcpEvent,
+  toolAllowed,
+} from "../cli/mcp/bridge.js";
 import { expandVars, loadMcpServers, type ResolvedServer } from "../cli/mcp/config.js";
 import { decide } from "../src/approval.js";
+import type { AgentEvent } from "../src/events.js";
 import { EventLog } from "../src/log.js";
 import type { Tool } from "../src/tools.js";
 import { createLogic } from "./helpers/mcp-server.mjs";
 
 const helper = resolve("tests/helpers/mcp-server.mjs");
 const ctx = { signal: new AbortController().signal, callId: "call_1" } as never;
+const mcpEvents = (events: readonly AgentEvent[]): McpEvent[] =>
+  events.flatMap((e) => {
+    const m = mcpEvent(e);
+    return m ? [m] : [];
+  });
 
 function stdioServer(
   name: string,
@@ -51,14 +64,15 @@ describe("stdio · modern", () => {
     expect(tools.map((t) => t.name).sort()).toEqual(
       ["boom", "echo", "image", "proto", "t1", "t2", "t3"].map((n) => `mcp__fake__${n}`).sort(),
     );
-    const lists = log.events.filter(
-      (e) => e.type === "mcp/rpc" && e.direction === "send" && e.method === "tools/list",
+    const ev = mcpEvents(log.events);
+    const lists = ev.filter(
+      (m) => m.kind === "rpc" && m.direction === "send" && m.method === "tools/list",
     );
     expect(lists).toHaveLength(4);
-    expect(log.events.some((e) => e.type === "mcp/log" && e.line === "this is not an error")).toBe(
-      true,
-    );
-    expect(log.events.find((e) => e.type === "mcp/server" && e.phase === "ready")).toMatchObject({
+    expect(ev.some((m) => m.kind === "log" && m.line === "this is not an error")).toBe(true);
+    // 内核只有一种 ext/event;MCP 的四种都装在 payload 里,内核事件表没有 mcp 字样。
+    expect(log.events.every((e) => !e.type.startsWith("mcp"))).toBe(true);
+    expect(ev.find((m) => m.kind === "server" && m.phase === "ready")).toMatchObject({
       listed: 7,
       toolCount: 7,
     });
@@ -90,13 +104,15 @@ describe("stdio · modern", () => {
       era: "legacy",
       protocolVersion: "2025-06-18",
     });
-    expect(log.events.some((e) => e.type === "mcp/rpc" && e.method === "initialize")).toBe(true);
+    expect(mcpEvents(log.events).some((m) => m.kind === "rpc" && m.method === "initialize")).toBe(
+      true,
+    );
     expect(await find(tools, "mcp__old__t1").execute({ x: 1 }, ctx)).toBe('t1 got {"x":1}');
     for (let i = 0; i < 50 && !tools.some((t) => t.name === "mcp__old__t_new"); i++)
       await new Promise((r) => setTimeout(r, 20));
     expect(tools.some((t) => t.name === "mcp__old__t_new")).toBe(true);
-    const change = log.events.find(
-      (e) => e.type === "mcp/tools" && e.added.includes("mcp__old__t_new"),
+    const change = mcpEvents(log.events).find(
+      (m) => m.kind === "tools" && m.added.includes("mcp__old__t_new"),
     );
     expect(change).toMatchObject({ removed: [], total: 6 });
     await bridge.close();
@@ -129,8 +145,8 @@ describe("stdio · modern", () => {
     expect(gone?.phase).toBe("failed");
     expect(gone?.error).toBeTruthy();
     expect(
-      log.events.find(
-        (e) => e.type === "mcp/server" && e.server === "gone" && e.phase === "starting",
+      mcpEvents(log.events).find(
+        (m) => m.kind === "server" && m.server === "gone" && m.phase === "starting",
       ),
     ).toMatchObject({ warning: "unset variables kept as-is: TOKEN" });
     await find(tools, "mcp__crash__t1").execute({}, ctx);

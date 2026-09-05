@@ -2,9 +2,37 @@
 // 同名以 config.json 为准且整条覆盖。${VAR} 与 ${VAR:-default} 展开;缺失的变量原样保留并报出来。
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { McpConfig, McpServerConfig } from "../../src/config.js";
+/** 一台 MCP 服务器(Q87)。command 走 stdio,url 走 Streamable HTTP。 */
+export type McpServerConfig = {
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  /** 相对项目根。 */
+  cwd?: string;
+  url?: string;
+  headers?: Record<string, string>;
+  /** 白名单先应用,黑名单后应用;通配 * ?。 */
+  enabledTools?: string[];
+  disabledTools?: string[];
+  startupTimeoutMs?: number;
+  toolTimeoutMs?: number;
+  /** true = 连不上就启动失败;缺省 false,只记事件。 */
+  required?: boolean;
+  enabled?: boolean;
+};
 
-export type { McpConfig, McpServerConfig };
+export type McpConfig = {
+  servers?: Record<string, McpServerConfig>;
+  /** 工具结果字符上限,缺省 100000。 */
+  maxResultChars?: number;
+  /** 愿意说的协议版本,优先级从前到后;缺省 2026-07-28 再 2025-06-18。 */
+  protocolVersions?: string[];
+};
+
+/** 配置文件里的 mcp 键对内核是不透明对象;这里给它形状。 */
+export function mcpConfigOf(raw: unknown): McpConfig | undefined {
+  return raw && typeof raw === "object" ? (raw as McpConfig) : undefined;
+}
 
 /** 展开 ${VAR} / ${VAR:-default};缺失且无缺省值的原样保留。 */
 export function expandVars(

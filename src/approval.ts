@@ -36,14 +36,21 @@ export function subjectOf(call: ToolCall): string | undefined {
   const a = (call.args ?? {}) as Record<string, unknown>;
   if (call.name === "bash") return typeof a.command === "string" ? a.command : undefined;
   if (call.name === "fetch") return typeof a.url === "string" ? a.url : undefined;
-  // MCP 工具(Q87):mcp__server__tool → "server:tool",规则写 mcp:github:get_*。
-  if (call.name.startsWith("mcp__")) {
-    const rest = call.name.slice(5);
+  // 带命名空间的工具(Q87):prefix__group__name → "group:name",规则写 prefix:group:name*,如 mcp:github:get_*。
+  const ns = namespaceOf(call.name);
+  if (ns) {
+    const rest = call.name.slice(ns.length + 2);
     const i = rest.indexOf("__");
     return i < 0 ? rest : `${rest.slice(0, i)}:${rest.slice(i + 2)}`;
   }
   if (PATH_TOOLS.has(call.name)) return typeof a.path === "string" ? a.path : ".";
   return undefined;
+}
+
+/** 工具名的命名空间:双下划线之前的第一段(mcp__github__get_issue → mcp);没有双下划线就没有。 */
+function namespaceOf(toolName: string): string | undefined {
+  const i = toolName.indexOf("__");
+  return i > 0 ? toolName.slice(0, i) : undefined;
 }
 
 /** 通配符 → 正则:`*` 任意长度(含空格与斜杠),`?` 单字符。命令与路径共用,路径不做分段语义,够用且好解释。 */
@@ -67,8 +74,8 @@ function normalizePath(p: string, cwd: string): string {
 export function ruleMatches(rule: string, call: ToolCall, cwd: string): boolean {
   const i = rule.indexOf(":");
   const name = i < 0 ? rule : rule.slice(0, i);
-  const isMcp = name === "mcp" && call.name.startsWith("mcp__");
-  if (name !== call.name && name !== "*" && !isMcp) return false;
+  const byNamespace = namespaceOf(call.name) === name;
+  if (name !== call.name && name !== "*" && !byNamespace) return false;
   if (i < 0) return true;
   const pattern = rule.slice(i + 1);
   const subject = subjectOf(call);

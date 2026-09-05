@@ -20,11 +20,12 @@ import {
   parseCommonArgs,
   RESERVE,
   resolveApproval,
+  resolveToolPrompts,
   sessionsDir,
   USAGE,
 } from "./bootstrap.js";
 import { connectMcpServers, type McpBridge } from "./mcp/bridge.js";
-import { loadMcpServers } from "./mcp/config.js";
+import { loadMcpServers, mcpConfigOf } from "./mcp/config.js";
 import { discoverSkills } from "./prompt.js";
 import { discoverTemplates } from "./templates.js";
 import { createTuiApp, type ModelChoice } from "./tui-app.js";
@@ -109,6 +110,7 @@ try {
   process.exit(1);
 }
 const skills = discoverSkills(process.cwd());
+const toolPromptsCfg = resolveToolPrompts(args, boot.config);
 const baseTools = buildTools(
   log,
   first,
@@ -118,6 +120,7 @@ const baseTools = buildTools(
   memory,
   args.skillsLoad === "tool" ? skills : undefined,
   boot.config.fetch,
+  toolPromptsCfg,
 );
 // 扩展模块的工具重名时覆盖内置的。
 const tools = [
@@ -125,7 +128,8 @@ const tools = [
   ...(ext.tools ?? []),
 ];
 // MCP 服务器(Q87):启动时连接,工具原地追加到 tools;required 的失败即退出。
-const mcpServers = loadMcpServers(boot.config.mcp, process.cwd());
+const mcpCfg = mcpConfigOf(boot.config.mcp);
+const mcpServers = loadMcpServers(mcpCfg, process.cwd());
 let mcp: McpBridge | undefined;
 if (mcpServers.length > 0) {
   try {
@@ -133,7 +137,7 @@ if (mcpServers.length > 0) {
       log,
       tools,
       artifactsDir: sessionFile.replace(/.jsonl$/, ".mcp"),
-      ...(boot.config.mcp && { mcp: boot.config.mcp }),
+      ...(mcpCfg && { mcp: mcpCfg }),
     });
   } catch (err) {
     console.error((err as Error).message);
@@ -160,6 +164,7 @@ app = createTuiApp({
   skills,
   sessionsDir: sessionDir,
   ...(mcp && { mcp }),
+  toolPrompts: toolPromptsCfg,
   onExit: () => {
     void (mcp?.close() ?? Promise.resolve()).finally(() => process.exit(0));
   },

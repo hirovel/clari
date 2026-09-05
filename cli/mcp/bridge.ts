@@ -1,5 +1,5 @@
 // MCP 工具桥接(Q87):每个 MCP 工具映射成内核的 Tool,名字 mcp__<server>__<tool>;
-// 服务器的启动、失败、每次往返、stderr、工具表变化都记成事件。内核不知道 MCP 的存在。
+// 服务器的启动、失败、每次往返、stderr、工具表变化都记成 ext/event(source "mcp")。内核不知道 MCP 的存在。
 import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -34,6 +34,78 @@ export type McpBridge = {
   toolNames(): string[];
   close(): Promise<void>;
 };
+
+/** 桥接记的四种事件,装在 ext/event 的 payload 里;kind 是判别字段。 */
+export type McpEvent =
+  | {
+      kind: "server";
+      server: string;
+      phase: "starting" | "ready" | "failed" | "closed";
+      transport: "stdio" | "http";
+      era?: "modern" | "legacy";
+      protocolVersion?: string;
+      serverInfo?: { name?: string; version?: string };
+      toolCount?: number;
+      /** 服务器列出的工具数(过滤前)。 */
+      listed?: number;
+      instructions?: string;
+      error?: string;
+      warning?: string;
+      ms?: number;
+    }
+  | {
+      kind: "rpc";
+      server: string;
+      direction: "send" | "receive";
+      method?: string;
+      id?: number | string;
+      bytes: number;
+      /** 原文,Authorization 已遮蔽。 */
+      body: string;
+    }
+  | { kind: "log"; server: string; line: string }
+  | { kind: "tools"; server: string; added: string[]; removed: string[]; total: number };
+
+function emit(log: EventLog, ev: McpEvent): void {
+  const { kind, ...payload } = ev;
+  log.append({ type: "ext/event", at: now(), source: "mcp", kind, payload });
+}
+
+/** 从日志事件读回桥接事件;不是 MCP 的返回 undefined。 */
+export function mcpEvent(e: AgentEvent): McpEvent | undefined {
+  if (e.type !== "ext/event" || e.source !== "mcp") return undefined;
+  return { kind: e.kind, ...e.payload } as McpEvent;
+}
+
+/** 主屏与检视器的一行;rpc 与 log 不上屏(检视器的事件视图有全文)。 */
+export function renderMcpEvent(
+  e: AgentEvent,
+): { tone: "jin" | "zhu" | "faint"; text: string } | undefined {
+  const m = mcpEvent(e);
+  if (!m) return undefined;
+  if (m.kind === "server") {
+    if (m.phase === "ready")
+      return {
+        tone: "jin",
+        text: `◇ mcp ${m.server}: ready · ${m.transport} · ${m.era ?? ""} ${m.protocolVersion ?? ""} · ${m.toolCount ?? 0} tools${m.listed !== undefined && m.listed !== m.toolCount ? ` of ${m.listed} listed` : ""} · ${m.ms ?? 0}ms`,
+      };
+    if (m.phase === "failed" || m.phase === "closed")
+      return {
+        tone: "zhu",
+        text: `◇ mcp ${m.server}: ${m.phase}${m.error ? ` · ${m.error}` : ""}`,
+      };
+    if (m.warning) return { tone: "faint", text: `· mcp ${m.server}: ${m.warning}` };
+    return undefined;
+  }
+  if (m.kind === "tools") {
+    if (m.added.length + m.removed.length === 0 || m.total === m.added.length) return undefined;
+    return {
+      tone: "jin",
+      text: `◇ mcp ${m.server}: tools changed · +${m.added.length} −${m.removed.length} · ${m.total} total · applies from the next request`,
+    };
+  }
+  return undefined;
+}
 
 const MAX_NAME = 128;
 
@@ -174,14 +246,7 @@ export async function connectMcpServers(
     const added = names.filter((n) => !before.includes(n));
     const removed = before.filter((n) => !names.includes(n));
     if (before.length > 0 || added.length > 0)
-      log.append({
-        type: "mcp/tools",
-        at: now(),
-        server: server.name,
-        added,
-        removed,
-        total: names.length,
-      });
+      emit(log, { kind: "tools", server: server.name, added, removed, total: names.length });
     return names;
   };
 
@@ -197,9 +262,8 @@ export async function connectMcpServers(
       missingVars: server.missing,
     };
     statuses.push(status);
-    log.append({
-      type: "mcp/server",
-      at: now(),
+    emit(log, {
+      kind: "server",
       server: server.name,
       phase: "starting",
       transport,
@@ -213,9 +277,8 @@ export async function connectMcpServers(
       requestTimeoutMs: server.config.toolTimeoutMs ?? 60000,
       onRpc: (direction, message) => {
         const body = redact(message);
-        log.append({
-          type: "mcp/rpc",
-          at: now(),
+        emit(log, {
+          kind: "rpc",
           server: server.name,
           direction,
           ...(message.method && { method: message.method }),
@@ -224,7 +287,7 @@ export async function connectMcpServers(
           body: body.length > maxChars ? `${body.slice(0, maxChars)}…` : body,
         });
       },
-      onLog: (line) => log.append({ type: "mcp/log", at: now(), server: server.name, line }),
+      onLog: (line) => emit(log, { kind: "log", server: server.name, line }),
       onNotification: (method) => {
         if (method === "notifications/tools/list_changed") {
           client
@@ -234,9 +297,8 @@ export async function connectMcpServers(
               status.toolCount = names.length;
             })
             .catch((err) =>
-              log.append({
-                type: "mcp/log",
-                at: now(),
+              emit(log, {
+                kind: "log",
                 server: server.name,
                 line: `tools/list after list_changed failed: ${(err as Error).message}`,
               }),
@@ -247,9 +309,8 @@ export async function connectMcpServers(
         if (status.phase === "ready") {
           status.phase = "closed";
           status.error = `process exited (code ${code ?? "null"}${signal ? `, signal ${signal}` : ""})`;
-          log.append({
-            type: "mcp/server",
-            at: now(),
+          emit(log, {
+            kind: "server",
             server: server.name,
             phase: "closed",
             transport,
@@ -284,9 +345,8 @@ export async function connectMcpServers(
         toolCount: names.length,
         ms: Date.now() - started,
       });
-      log.append({
-        type: "mcp/server",
-        at: now(),
+      emit(log, {
+        kind: "server",
         server: server.name,
         phase: "ready",
         transport,
@@ -301,9 +361,8 @@ export async function connectMcpServers(
     } catch (err) {
       status.error = (err as Error).message;
       status.ms = Date.now() - started;
-      log.append({
-        type: "mcp/server",
-        at: now(),
+      emit(log, {
+        kind: "server",
         server: server.name,
         phase: "failed",
         transport,
@@ -341,8 +400,3 @@ export function describeStatus(s: McpServerStatus): string {
     .join(" · ");
   return `${head} ${info}${s.error ? ` · ${s.error}` : ""}${s.missingVars.length > 0 ? ` · unset: ${s.missingVars.join(", ")}` : ""}`;
 }
-
-export type McpEvent = Extract<
-  AgentEvent,
-  { type: "mcp/server" | "mcp/rpc" | "mcp/log" | "mcp/tools" }
->;

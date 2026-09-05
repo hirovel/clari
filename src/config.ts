@@ -64,31 +64,11 @@ export type ProviderConfig = {
   retry?: { maxRetries?: number; baseDelayMs?: number; maxDelayMs?: number };
 };
 
-/** 一台 MCP 服务器(Q87)。command 走 stdio,url 走 Streamable HTTP。 */
-export type McpServerConfig = {
-  command?: string;
-  args?: string[];
-  env?: Record<string, string>;
-  /** 相对项目根。 */
-  cwd?: string;
-  url?: string;
-  headers?: Record<string, string>;
-  /** 白名单先应用,黑名单后应用;通配 * ?。 */
-  enabledTools?: string[];
-  disabledTools?: string[];
-  startupTimeoutMs?: number;
-  toolTimeoutMs?: number;
-  /** true = 连不上就启动失败;缺省 false,只记事件。 */
-  required?: boolean;
-  enabled?: boolean;
-};
-
-export type McpConfig = {
-  servers?: Record<string, McpServerConfig>;
-  /** 工具结果字符上限,缺省 100000。 */
-  maxResultChars?: number;
-  /** 愿意说的协议版本,优先级从前到后;缺省 2026-07-28 再 2025-06-18。 */
-  protocolVersions?: string[];
+/** 工具描述风格(Q89):guided 缺省;terse 一两句;strict 带 ALWAYS / NEVER 规则。descriptions 逐工具覆盖。 */
+export type ToolPromptStyle = "guided" | "terse" | "strict";
+export type ToolPromptsConfig = {
+  style?: ToolPromptStyle;
+  descriptions?: Record<string, string>;
 };
 
 /** 系统提示词的段名(Q66):哪几段、什么顺序由配置或预设决定。 */
@@ -130,6 +110,8 @@ export type Preset = {
   subagent?: boolean;
   maxSteps?: number;
   prompt?: PromptConfig;
+  /** 工具描述风格(Q89)。 */
+  toolPrompts?: ToolPromptStyle;
 };
 
 export type KernelConfig = {
@@ -146,8 +128,10 @@ export type KernelConfig = {
   sessionsDir?: string;
   /** 审批规则(Q84):缺省只读工具放行、其余问人、cwd 之外必问。 */
   approval?: ApprovalConfig;
-  /** MCP 服务器(Q87):stdio 或 Streamable HTTP;项目根 .mcp.json 的 mcpServers 也会读,同名以这里为准。 */
-  mcp?: McpConfig;
+  /** 工具描述风格与逐工具覆盖(Q89)。 */
+  toolPrompts?: ToolPromptsConfig;
+  /** MCP 桥接的配置(Q87)。内核不解释它;形状归 cli/mcp/config.ts。 */
+  mcp?: Record<string, unknown>;
   /** fetch 工具的安全边界(Q86):私网放行、超时、字节上限、重定向次数。 */
   fetch?: {
     allowPrivate?: boolean;

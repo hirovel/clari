@@ -17,11 +17,12 @@ import {
   memoryFiles,
   parseCommonArgs,
   resolveApproval,
+  resolveToolPrompts,
   sessionsDir,
   USAGE,
 } from "./bootstrap.js";
 import { connectMcpServers, type McpBridge } from "./mcp/bridge.js";
-import { loadMcpServers } from "./mcp/config.js";
+import { loadMcpServers, mcpConfigOf } from "./mcp/config.js";
 import { discoverSkills } from "./prompt.js";
 
 let args: ReturnType<typeof parseCommonArgs>;
@@ -68,6 +69,7 @@ try {
   console.error((err as Error).message);
   process.exit(2);
 }
+const toolPromptsCfg = resolveToolPrompts(args, boot.config);
 const baseTools = buildTools(
   log,
   choice,
@@ -77,13 +79,15 @@ const baseTools = buildTools(
   args.memory ? memoryFiles() : undefined,
   args.skillsLoad === "tool" ? discoverSkills(process.cwd()) : undefined,
   boot.config.fetch,
+  toolPromptsCfg,
 );
 const tools = [
   ...baseTools.filter((t) => !ext.tools?.some((x) => x.name === t.name)),
   ...(ext.tools ?? []),
 ];
 // MCP 服务器(Q87):一次性模式也连,跑完关。
-const mcpServers = loadMcpServers(boot.config.mcp, process.cwd());
+const mcpCfg = mcpConfigOf(boot.config.mcp);
+const mcpServers = loadMcpServers(mcpCfg, process.cwd());
 let mcp: McpBridge | undefined;
 if (mcpServers.length > 0) {
   try {
@@ -91,7 +95,7 @@ if (mcpServers.length > 0) {
       log,
       tools,
       artifactsDir: sessionFile.replace(/.jsonl$/, ".mcp"),
-      ...(boot.config.mcp && { mcp: boot.config.mcp }),
+      ...(mcpCfg && { mcp: mcpCfg }),
     });
   } catch (err) {
     console.error((err as Error).message);

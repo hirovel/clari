@@ -214,10 +214,7 @@ export function composeContext(events: readonly AgentEvent[]): Composition {
       }
       case "session/interrupt":
       case "session/recovered":
-      case "mcp/server":
-      case "mcp/rpc":
-      case "mcp/log":
-      case "mcp/tools":
+      case "ext/event":
       case "session/model":
       case "session/slot":
       case "compaction":

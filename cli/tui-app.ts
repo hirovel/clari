@@ -27,6 +27,12 @@ import {
   policyApprove,
 } from "../src/approval.js";
 import { keepRatio, keepRecentTokens } from "../src/compaction.js";
+import {
+  DEFAULT_CONFIG_PATH,
+  loadConfig,
+  saveConfig,
+  type ToolPromptsConfig,
+} from "../src/config.js";
 import { contextBreakdown } from "../src/context.js";
 import { fmtCost, type Price, usageTotals } from "../src/cost.js";
 import { type AgentEvent, now, type ToolCall } from "../src/events.js";
@@ -71,6 +77,7 @@ import {
   thinkingLines,
 } from "./cards.js";
 import { editInExternalEditor } from "./editor.js";
+import { renderExtEvent } from "./ext-events.js";
 import {
   type CompositionRow,
   type ContextAction,
@@ -84,6 +91,14 @@ import { describeStatus, type McpServerStatus } from "./mcp/bridge.js";
 import { expandSkill, type Skill } from "./prompt.js";
 import { expandTemplate, type PromptTemplate } from "./templates.js";
 import { c, editorTheme, markdownTheme } from "./theme.js";
+import {
+  applyToolPrompts,
+  describeToolPrompts,
+  isToolPromptStyle,
+  STYLE_NOTES,
+  styleTokens,
+  TOOL_PROMPT_STYLES,
+} from "./tool-prompts.js";
 import { diffLines, hunks } from "./tools/diff.js";
 import { clearMemory, forgetMemory, type MemoryFiles, memoryEntries } from "./tools/memory.js";
 
@@ -153,6 +168,8 @@ export type TuiAppDeps = {
   sessionsDir?: string;
   /** MCP 桥接(Q87):/mcp 列状态。工具本身已在 tools 里。 */
   mcp?: { statuses(): McpServerStatus[] };
+  /** 工具描述风格槽(Q89)的启动形态;/toolprompts 会话中切换与逐条编辑。 */
+  toolPrompts?: ToolPromptsConfig;
 };
 
 export type TuiApp = {
@@ -263,6 +280,11 @@ const COMMANDS = [
   },
   { name: "raw", description: "Raw stream of request N as received, line by line: /raw N" },
   { name: "mcp", description: "MCP servers: transport, protocol era, tool count, last error" },
+  {
+    name: "toolprompts",
+    description:
+      "Tool description style: /toolprompts guided|terse|strict; edit <tool> opens your editor; reset <tool>; save writes to config",
+  },
   {
     name: "skills",
     description: "List skills: source, description size, model-invocable, allowed tools",
@@ -882,7 +904,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
         const level = e.effort ? parseEffort(e.effort) : undefined;
         const wire = agent.provider.wire?.(messages, activeDefs, level ? { effort: level } : {});
         const start = log.events.find((x) => x.type === "session/start");
-        const toolNames = e.tools.join(" ");
+        const toolNames = JSON.stringify(activeDefs);
         transcript.addChild(new Spacer(1));
         const cardLines = sendCardLines({
           n: requestCount,
@@ -982,27 +1004,11 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
           ),
         );
         break;
-      case "mcp/server":
-        if (e.phase === "ready")
-          note(
-            c.jin(
-              `◇ mcp ${e.server}: ready · ${e.transport} · ${e.era ?? ""} ${e.protocolVersion ?? ""} · ${e.toolCount ?? 0} tools${e.listed !== undefined && e.listed !== e.toolCount ? ` of ${e.listed} listed` : ""} · ${e.ms ?? 0}ms`,
-            ),
-          );
-        else if (e.phase === "failed" || e.phase === "closed")
-          note(c.zhu(`◇ mcp ${e.server}: ${e.phase}${e.error ? ` · ${e.error}` : ""}`));
-        else if (e.warning) note(c.faint(`· mcp ${e.server}: ${e.warning}`));
+      case "ext/event": {
+        const r = renderExtEvent(e);
+        if (r) note(c[r.tone](r.text));
         break;
-      case "mcp/tools":
-        if (e.added.length + e.removed.length > 0 && e.total !== e.added.length)
-          note(
-            c.jin(
-              `◇ mcp ${e.server}: tools changed · +${e.added.length} −${e.removed.length} · ${e.total} total · applies from the next request`,
-            ),
-          );
-        break;
-      case "mcp/rpc":
-      case "mcp/log":
+      }
       case "session/interrupt":
       case "session/start":
         break;
@@ -1147,7 +1153,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
                 "No MCP servers. Configure mcp.servers in ~/.clari/config.json or mcpServers in ./.mcp.json.",
               )
             : [
-                `${c.soft("MCP")} ${c.ink(`${list.length} servers`)}  ${c.faint("tools are named mcp__<server>__<tool>; approval rules mcp:<server>:<tool>; every RPC is an mcp/rpc event")}`,
+                `${c.soft("MCP")} ${c.ink(`${list.length} servers`)}  ${c.faint("tools are named mcp__<server>__<tool>; approval rules mcp:<server>:<tool>; every RPC is an ext/event with source mcp")}`,
                 ...list.map(
                   (s) =>
                     `  ${s.phase === "ready" ? c.green("✓") : c.zhu("✗")} ${c.ink(describeStatus(s))}`,
@@ -1198,6 +1204,9 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       case "steering":
       case "approve":
         note(await slotCommand(cmd, arg));
+        break;
+      case "toolprompts":
+        note(await slotCommand("toolPrompts", arg));
         break;
       case "slots":
         note(slotsList());
@@ -1692,6 +1701,12 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     execution: deps.slots?.execution ?? "sequential",
     steering: deps.slots?.steering ? "custom" : "step",
     approve: approveValue(),
+    toolPrompts: describeToolPrompts(deps.toolPrompts),
+  };
+  /** 工具描述风格的当前形态(Q89):风格加逐工具覆盖;切换与编辑都原地改 tools 的描述。 */
+  const toolPromptsCfg: ToolPromptsConfig = {
+    style: deps.toolPrompts?.style ?? "guided",
+    descriptions: { ...deps.toolPrompts?.descriptions },
   };
   function recordSlot(slot: string, value: string): void {
     slotState[slot] = value;
@@ -1805,6 +1820,71 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
         }
         return show();
       }
+      case "toolPrompts": {
+        const [sub, name] = v.split(/\s+/, 2);
+        const usage = "Usage: /toolprompts guided|terse|strict | edit <tool> | reset <tool> | save";
+        if (!sub) {
+          const rows = TOOL_PROMPT_STYLES.map((st) => {
+            const tok = styleTokens(tools, { ...toolPromptsCfg, style: st });
+            const mark = st === toolPromptsCfg.style ? c.jin("●") : c.faint("○");
+            return `  ${mark} ${c.ink(st.padEnd(8))} ${c.soft(String(tok).padStart(5))} ${c.faint("tok")}  ${c.faint(STYLE_NOTES[st])}`;
+          });
+          const edited = Object.keys(toolPromptsCfg.descriptions ?? {});
+          return [
+            `${c.soft("Tool prompts")}  ${c.faint("the same tools, three description styles; the model sees only the descriptions, never the style name")}`,
+            ...rows,
+            c.faint(
+              edited.length > 0
+                ? `  edited by you: ${edited.join(" ")}  (reset <tool> to drop; save to keep across sessions)`
+                : "  edit <tool> opens the description in your editor; save writes style and edits to ~/.clari/config.json",
+            ),
+          ].join("\n");
+        }
+        if (isToolPromptStyle(sub)) {
+          toolPromptsCfg.style = sub;
+          const changed = applyToolPrompts(tools, toolPromptsCfg);
+          recordSlot("toolPrompts", describeToolPrompts(toolPromptsCfg));
+          return done(
+            `${sub} (${styleTokens(tools, toolPromptsCfg)} tok)`,
+            changed.length > 0
+              ? `${changed.length} descriptions changed; takes effect from the next request`
+              : "no description changed",
+          );
+        }
+        if (sub === "edit" || sub === "reset") {
+          const t = tools.find((x) => x.name === name);
+          if (!name || !t) return c.zhu(`no tool named ${name ?? "?"}; see /tools`);
+          const descriptions = toolPromptsCfg.descriptions ?? {};
+          toolPromptsCfg.descriptions = descriptions;
+          if (sub === "reset") {
+            if (!(name in descriptions)) return c.faint(`· ${name} is not edited`);
+            delete descriptions[name as string];
+          } else {
+            tui.stop();
+            const next = editInExternalEditor(t.description, { suffix: ".txt" });
+            tui.start();
+            if (next === undefined) return c.faint("· unchanged, cancelled");
+            descriptions[name as string] = next.replace(/\s+$/, "");
+          }
+          applyToolPrompts(tools, toolPromptsCfg);
+          recordSlot("toolPrompts", describeToolPrompts(toolPromptsCfg));
+          return done(
+            `${sub} ${name} (${Math.ceil(t.description.length / 4)} tok)`,
+            "takes effect from the next request; /tools shows the first line, Ctrl+R → tool definitions the full text",
+          );
+        }
+        if (sub === "save") {
+          const { config } = loadConfig();
+          const descriptions = toolPromptsCfg.descriptions ?? {};
+          config.toolPrompts = {
+            style: toolPromptsCfg.style ?? "guided",
+            ...(Object.keys(descriptions).length > 0 && { descriptions }),
+          };
+          saveConfig(config);
+          return done("saved", `toolPrompts written to ${DEFAULT_CONFIG_PATH}`);
+        }
+        return c.zhu(usage);
+      }
       default:
         return c.zhu(`unknown slot ${slot}`);
     }
@@ -1825,7 +1905,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       return `  ${c.jin(t.name.padEnd(10))} ${c.soft(String(tok).padStart(5))} ${c.faint("tok")}  ${c.faint((t.concurrency === "parallel" ? "parallel" : "sequential").padEnd(10))} ${c.ink(t.description.split("\n")[0]?.slice(0, 70) ?? "")}\n${" ".repeat(13)}${c.faint(`params: ${params.join(", ") || "(none)"}`)}`;
     });
     return [
-      `${c.soft("Tools")} ${c.ink(`${tools.length}`)}  ${c.faint(`≈${total} tok of definitions sent with every request · full JSON in Ctrl+R → tool definitions`)}`,
+      `${c.soft("Tools")} ${c.ink(`${tools.length}`)}  ${c.faint(`≈${total} tok of definitions sent with every request · style ${slotState.toolPrompts} (/toolprompts) · full JSON in Ctrl+R → tool definitions`)}`,
       ...rows,
     ].join("\n");
   }
@@ -1859,7 +1939,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       ([k, val]) => `  ${c.jin(k.padEnd(13))} ${c.ink(val)}`,
     );
     return [
-      `${c.soft("Slots")}  ${c.faint("switch with /compaction /preservation /execution /steering /approve; each switch is a session/slot event")}`,
+      `${c.soft("Slots")}  ${c.faint("switch with /compaction /preservation /execution /steering /approve /toolprompts; each switch is a session/slot event")}`,
       ...rows,
       `  ${c.jin("termination".padEnd(13))} ${c.ink(deps.slots?.termination ? "custom" : "untilIdle")}  ${c.faint("(--max-steps N at startup)")}`,
     ].join("\n");
