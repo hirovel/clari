@@ -187,7 +187,8 @@ async function compactIfNeeded(
   return true;
 }
 
-const LENGTH_NOTICE = "未执行:响应被输出 token 上限截断,参数可能不完整。请重新发起这次工具调用。";
+const LENGTH_NOTICE =
+  "Not executed: the response was cut off by the output token limit, so the arguments may be incomplete. Issue this tool call again.";
 
 /**
  * 跑一个 turn:从当前日志出发,循环 step 直到无事可欠(模型不调工具且队列为空)、
@@ -407,7 +408,7 @@ async function executeCalls(
   // 准备阶段永远按顺序:找工具、审批、校验。审批是人的决定,不能并发弹出。
   const prepare = async (call: ToolCall): Promise<Prepared> => {
     const tool = ctx.tools.find((t) => t.name === call.name);
-    if (!tool) return { call, immediate: `未知工具 "${call.name}"。` };
+    if (!tool) return { call, immediate: `Unknown tool "${call.name}".` };
     const decision = await ctx.approve(call);
     const allowed = typeof decision === "boolean" ? decision : decision.allowed;
     if (!allowed) {
@@ -448,7 +449,7 @@ async function executeCalls(
     // 打断后剩余调用不再执行,但必须逐个补应答。
     if (signal.aborted) {
       await flush();
-      appendResult(ctx.log, call, "已被用户打断,未执行。", true);
+      appendResult(ctx.log, call, "Interrupted by the user; not executed.", true);
       continue;
     }
     const p = await prepare(call);

@@ -251,7 +251,7 @@ describe("runTurn", () => {
     expect(results[0]).toMatchObject({ callId: "c1", isError: true });
     expect(results[1]).toMatchObject({
       callId: "c2",
-      content: "已被用户打断,未执行。",
+      content: "Interrupted by the user; not executed.",
       isError: true,
     });
   });
@@ -266,6 +266,6 @@ describe("runTurn", () => {
       ]),
       tools: [echoTool],
     });
-    expect(firstResult(log)).toMatchObject({ content: '未知工具 "nope"。', isError: true });
+    expect(firstResult(log)).toMatchObject({ content: 'Unknown tool "nope".', isError: true });
   });
 });
