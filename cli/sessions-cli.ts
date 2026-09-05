@@ -25,15 +25,14 @@ try {
     console.log(USAGE_SESSIONS);
     process.exit(0);
   }
-  let dir = flag("--dir");
-  if (!dir) {
+  const configuredDir = (): string => {
     try {
-      dir = sessionsDir(loadConfig().config);
+      return sessionsDir(loadConfig().config);
     } catch {
-      dir = sessionsDir();
+      return sessionsDir();
     }
-  }
-  dir = dir || SESSIONS_DIR;
+  };
+  const dir: string = flag("--dir") ?? configuredDir() ?? SESSIONS_DIR;
   const sub = argv[0];
   if (sub === "prune") {
     const older = flag("--older-than");

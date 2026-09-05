@@ -1,7 +1,14 @@
-// 会话文件的列表与清理(Q90):会话目录里每个 .jsonl 是一份事件数组,旁边可能有 .trace.jsonl(原始流)与 .mcp/(MCP 图片结果)。
+// 会话文件(Q54/Q90):目录、新建、恢复、分叉,以及列表与清理。
+// 会话目录里每个 .jsonl 是一份事件数组,旁边可能有 .trace.jsonl(原始流)与 .mcp/(MCP 图片结果)。
 // 列表只读首尾几个事件;清理按开始时间或保留条数,连同旁车文件一起删,不加 --yes 只打印计划。
 import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
+import type { KernelConfig } from "../src/config.js";
+import type { AgentEvent } from "../src/events.js";
+import { EventLog } from "../src/log.js";
+import type { CommonArgs } from "./args.js";
+
+export const SESSIONS_DIR = "sessions";
 
 export type SessionSummary = {
   file: string;
@@ -152,4 +159,63 @@ export function parseAge(s: string): number {
     throw new Error(`--older-than takes a number of days like 30d (or hours like 12h), got "${s}"`);
   const n = Number(m[1]);
   return m[2] === "h" ? n / 24 : n;
+}
+
+// ---------- 目录、新建、恢复、分叉 ----------
+
+/** 会话目录:环境变量 CLARI_SESSIONS > 配置 sessionsDir > ./sessions。 */
+export function sessionsDir(config?: Pick<KernelConfig, "sessionsDir">): string {
+  return process.env.CLARI_SESSIONS?.trim() || config?.sessionsDir || SESSIONS_DIR;
+}
+
+/** 最近一次会话文件(按文件名排序,文件名即时间戳)。 */
+export function latestSession(dir = SESSIONS_DIR): string | undefined {
+  if (!existsSync(dir)) return undefined;
+  const files = readdirSync(dir)
+    .filter((f) => f.endsWith(".jsonl") && !f.endsWith(".trace.jsonl"))
+    .sort();
+  const last = files.at(-1);
+  return last ? join(dir, last) : undefined;
+}
+
+export function newSessionPath(dir = SESSIONS_DIR, suffix = ""): string {
+  return join(dir, `${new Date().toISOString().replace(/[:.]/g, "-")}${suffix}.jsonl`);
+}
+
+/**
+ * 打开会话(Q54):新建,或恢复并沿用同一文件继续追加。
+ * 恢复时不重算系统提示词,日志里那份是唯一真相。
+ */
+export function openSession(
+  args: Pick<CommonArgs, "resume" | "continue">,
+  dir = SESSIONS_DIR,
+): {
+  log: EventLog;
+  sessionFile: string;
+  resumed: boolean;
+} {
+  const target = args.resume ?? (args.continue ? latestSession(dir) : undefined);
+  if (target) {
+    if (!existsSync(target)) throw new Error(`session file not found: ${target}`);
+    return { log: EventLog.load(target, { attach: true }), sessionFile: target, resumed: true };
+  }
+  if (args.continue) throw new Error(`no session to resume in ${dir}/`);
+  const sessionFile = newSessionPath(dir);
+  return { log: new EventLog(sessionFile), sessionFile, resumed: false };
+}
+
+/**
+ * 分叉会话:把前 upTo 条事件复制成一个新文件。事件即真相,分叉就是复制前缀;
+ * 原文件一字不动,新文件用 --resume 打开就从那个时点继续。
+ */
+export function forkSession(
+  events: readonly AgentEvent[],
+  upTo: number,
+  dir = SESSIONS_DIR,
+): { file: string; events: number } {
+  const n = Math.max(1, Math.min(upTo, events.length));
+  const file = newSessionPath(dir, "-fork");
+  const log = new EventLog(file);
+  for (const e of events.slice(0, n)) log.append(e);
+  return { file, events: n };
 }
