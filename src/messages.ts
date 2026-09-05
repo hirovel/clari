@@ -63,7 +63,8 @@ export function editState(
   return { edits, dropped };
 }
 
-export const CLEARED_PLACEHOLDER = "[此工具结果已被清除以节省上下文;原文完整保留在会话日志中]";
+export const CLEARED_PLACEHOLDER =
+  "[This tool result was cleared to save context; the original is kept in full in the session log]";
 
 /** 从事件里汇总当前生效的压缩状态:摘要覆盖范围 + 被清除的工具结果下标。 */
 export function compactionState(
@@ -166,7 +167,11 @@ export function composeContext(
       // 摘要是合成的消息,它改变了此后所有消息的前缀:与编辑同等对待,
       // Anthropic 适配器据此不再回传之后的思考块(签名绑定前缀,否则新账号 400)。
       push(
-        { role: "user", content: `[会话前段已压缩,以下为摘要]\n${c.summary}`, edited: true },
+        {
+          role: "user",
+          content: `[Earlier conversation was compacted; summary follows]\n${c.summary}`,
+          edited: true,
+        },
         summaryEvent,
         [`summary(covers #${c.coversFrom}–#${c.coversUpTo - 1})`],
       );

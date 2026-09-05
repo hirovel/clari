@@ -214,9 +214,11 @@ describe("端到端(假服务器)", () => {
     const loaded = EventLog.load(sessionFile);
     expect(loaded.events).toEqual(log.events);
     const messages = deriveMessages(loaded.events);
-    expect(messages.some((m) => m.role === "user" && m.content.includes("会话前段已压缩"))).toBe(
-      true,
-    );
+    expect(
+      messages.some(
+        (m) => m.role === "user" && m.content.includes("Earlier conversation was compacted"),
+      ),
+    ).toBe(true);
     expect(readFileSync(sessionFile, "utf8").trim().split("\n")).toHaveLength(log.events.length);
 
     app.stop();
