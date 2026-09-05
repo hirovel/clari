@@ -290,7 +290,8 @@ function approveSlot(ctx: TuiContext, v: string): string {
   }
   if (sub === "allow" || sub === "deny") {
     if (!rule) return c.zhu(`Usage: /approve ${sub} <rule>`);
-    const list = (a.cfg[sub] = a.cfg[sub] ?? []);
+    const list = a.cfg[sub] ?? [];
+    a.cfg[sub] = list;
     if (!list.includes(rule)) list.push(rule);
     a.mode = "policy";
     return apply(`${sub} ${rule}`);
@@ -350,7 +351,8 @@ function toolPromptsSlot(ctx: TuiContext, v: string): string {
   if (sub === "edit" || sub === "reset") {
     const t = tools.find((x) => x.name === name);
     if (!name || !t) return c.zhu(`no tool named ${name ?? "?"}; see /tools`);
-    const descriptions = (cfg.descriptions = cfg.descriptions ?? {});
+    const descriptions = cfg.descriptions ?? {};
+    cfg.descriptions = descriptions;
     if (sub === "reset") {
       if (!(name in descriptions)) return c.faint(`· ${name} is not edited`);
       delete descriptions[name];

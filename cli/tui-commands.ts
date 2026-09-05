@@ -738,4 +738,3 @@ async function userDefined(ctx: TuiContext, cmd: string, arg: string): Promise<v
   }
   ctx.note(c.zhu(`unknown command /${cmd}`) + c.faint("  /help lists commands"));
 }
-
