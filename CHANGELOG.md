@@ -1,7 +1,7 @@
 # Changelog
 
 All notable changes to clari. The format follows Keep a Changelog; versions follow semver.
-Design decisions behind each entry are numbered Q1 to Q90 in the internal architecture document.
+Design decisions behind each entry are recorded, with reasons and alternatives, in the internal architecture document.
 
 ## [Unreleased]
 
