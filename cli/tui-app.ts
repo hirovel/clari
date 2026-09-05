@@ -89,6 +89,7 @@ import {
 } from "./inspector.js";
 import { describeStatus, type McpServerStatus } from "./mcp/bridge.js";
 import { expandSkill, type Skill } from "./prompt.js";
+import { listSessions, sessionRows } from "./sessions.js";
 import { expandTemplate, type PromptTemplate } from "./templates.js";
 import { c, editorTheme, markdownTheme } from "./theme.js";
 import {
@@ -170,6 +171,8 @@ export type TuiAppDeps = {
   mcp?: { statuses(): McpServerStatus[] };
   /** 工具描述风格槽(Q89)的启动形态;/toolprompts 会话中切换与逐条编辑。 */
   toolPrompts?: ToolPromptsConfig;
+  /** 启动时的保留策略显示名(--preservation / 配置);缺省内置。 */
+  preservationName?: string;
 };
 
 export type TuiApp = {
@@ -280,6 +283,11 @@ const COMMANDS = [
   },
   { name: "raw", description: "Raw stream of request N as received, line by line: /raw N" },
   { name: "mcp", description: "MCP servers: transport, protocol era, tool count, last error" },
+  {
+    name: "sessions",
+    description:
+      "List recent session files (resume with --resume; prune with clari sessions prune)",
+  },
   {
     name: "toolprompts",
     description:
@@ -1145,6 +1153,19 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       case "tools":
         note(toolsList());
         break;
+      case "sessions": {
+        const dir = deps.sessionsDir ?? SESSIONS_DIR;
+        const list = listSessions(dir).slice(0, 15);
+        note(
+          list.length === 0
+            ? c.faint(`No sessions in ${dir}/.`)
+            : [
+                `${c.soft("Sessions")} ${c.ink(`${list.length} most recent in ${dir}/`)}  ${c.faint("resume: clari --resume <file>; prune: clari sessions prune --older-than 30d --yes")}`,
+                ...sessionRows(list).map((l) => `  ${c.ink(l)}`),
+              ].join("\n"),
+        );
+        break;
+      }
       case "mcp": {
         const list = deps.mcp?.statuses() ?? [];
         note(
@@ -1697,9 +1718,10 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
 
   const slotState: Record<string, string> = {
     compaction: deps.compactionName ?? "llm",
-    preservation: "keepRecentTokens (min(20000, window/4))",
+    preservation: deps.preservationName ?? "keepRecentTokens (min(20000, window/4))",
     execution: deps.slots?.execution ?? "sequential",
-    steering: deps.slots?.steering ? "custom" : "step",
+    steering:
+      deps.slots?.steering === queueToTurnEnd ? "turn" : deps.slots?.steering ? "custom" : "step",
     approve: approveValue(),
     toolPrompts: describeToolPrompts(deps.toolPrompts),
   };

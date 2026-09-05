@@ -7,7 +7,10 @@ import { type ApprovalConfig, DEFAULT_APPROVAL } from "../src/approval.js";
 import {
   type CompactionStrategy,
   clearToolResults,
+  keepRatio,
+  keepRecentTokens,
   llmSummarize,
+  type PreservationPolicy,
   pipeline,
 } from "../src/compaction.js";
 import {
@@ -17,6 +20,7 @@ import {
   type KernelConfig,
   loadConfig,
   modelNames,
+  type Preset,
   type PromptSectionName,
   resolveApiKey,
   resolveModel,
@@ -82,6 +86,10 @@ export type CommonArgs = {
   approve: "all" | "ask" | "policy";
   /** 工具描述风格槽(Q89):命令行 > 预设 > 配置 > guided。 */
   toolPrompts?: ToolPromptStyle;
+  /** 插话槽(Q78):step 缺省;turn = 留言等到模型停止调用工具。 */
+  steering?: "step" | "turn";
+  /** 保留策略(Q78):"tokens N" 或 "ratio X";不给用内置缺省。 */
+  preservation?: string;
   /** 预设里的审批规则(Q84);没有就用配置的,再没有就用内置缺省。 */
   approval?: ApprovalConfig;
   /** 预设名(Q15):从配置 presets 取缺省参数;显式给的参数优先。 */
@@ -107,7 +115,22 @@ export type CommonArgs = {
   compactionExplicit?: boolean;
   approveExplicit?: boolean;
   subagentExplicit?: boolean;
+  traceExplicit?: boolean;
+  foldExplicit?: boolean;
 };
+
+/** 保留策略的文字形态 → 实现与显示名(Q78/Q90):配置、预设、命令行、/preservation 共用一种写法。 */
+export function parsePreservation(spec: string): { policy: PreservationPolicy; label: string } {
+  const m = spec.trim().match(/^(tokens|ratio)\s+([\d.]+)$/);
+  if (!m) throw new Error(`preservation must be "tokens N" or "ratio X", got "${spec}"`);
+  const n = Number(m[2]);
+  if (m[1] === "tokens") {
+    if (!(n > 0)) throw new Error("preservation tokens must be positive");
+    return { policy: keepRecentTokens(n), label: `keepRecentTokens(${n})` };
+  }
+  if (n <= 0 || n >= 1) throw new Error("preservation ratio must be between 0 and 1");
+  return { policy: keepRatio(n), label: `keepRatio(${n})` };
+}
 
 /** 审批槽的启动形态(Q84):all / ask 原样;policy = 预设规则 → 配置规则 → 内置缺省。 */
 export function resolveApproval(
@@ -185,13 +208,29 @@ export function parseCommonArgs(argv: string[]): CommonArgs {
         break;
       case "--trace":
         out.trace = true;
+        out.traceExplicit = true;
         break;
       case "--no-trace":
         out.trace = false;
+        out.traceExplicit = true;
         break;
       case "--fold":
         out.fold = true;
+        out.foldExplicit = true;
         break;
+      case "--steering": {
+        const v = takeValue(i++, a);
+        if (v !== "step" && v !== "turn")
+          throw new Error(`--steering accepts step or turn, got "${v}"`);
+        out.steering = v;
+        break;
+      }
+      case "--preservation": {
+        const v = takeValue(i++, a);
+        parsePreservation(v);
+        out.preservation = v;
+        break;
+      }
       case "--json":
         out.json = true;
         break;
@@ -289,6 +328,8 @@ Options
   --prompt-sections role,env,instructions,memory,skills,append   which system prompt sections, in which order
   --instructions-as system|user  put project instructions and memory in system (default) or in the first user message
   --execution sequential|parallel  tool execution slot: default one at a time; parallel = adjacent read-only calls run together
+  --steering step|turn           steering slot: step (default) injects queued messages at the next step; turn waits until the model stops calling tools
+  --preservation "tokens N|ratio X"   what compaction keeps verbatim; default tokens min(20000, window/4)
   --extension <module.mjs>       load an extension module (repeatable): add tools, replace slot implementations
   --max-steps N                  termination guard (default: no limit)
   --subagent                     add the task tool (sub-agents)
@@ -301,6 +342,8 @@ Options
 Config
   ${DEFAULT_CONFIG_PATH}
   CLARI_CONFIG overrides the path; keys come from the env var named by apiKeyEnv, or /key provider secret in the UI
+  every option above has a config counterpart: defaults.<name> is the global default, presets.<name>.<option> a named set; flags > preset > defaults > built-in
+  clari sessions [--dir D]        list session files; clari sessions prune --older-than 30d | --keep N [--yes]
   session files default to ./sessions/; override with sessionsDir in config or CLARI_SESSIONS
   prompt templates: ~/.clari/prompts/*.md and <git root>/.clari/prompts/*.md; /name args in the UI
   skills: ~/.clari/skills/<name>/SKILL.md and <git root>/.agents/skills/<name>/SKILL.md; listed in the system prompt's skills section`;
@@ -322,35 +365,65 @@ export function applyPreset(args: CommonArgs, config: KernelConfig): CommonArgs 
       `no preset "${args.preset}" in config; choices: ${Object.keys(config.presets ?? {}).join(" ") || "(none)"}`,
     );
   }
-  if (preset) {
-    if (out.model === undefined && preset.model) out.model = preset.model;
-    if (out.effort === undefined && preset.effort) {
-      const level = parseEffort(preset.effort);
-      if (!level) throw new Error(`preset ${args.preset} has invalid effort "${preset.effort}"`);
+  // 解析顺序(Q90):命令行 > 预设 > 配置 defaults > 内置缺省。有内置缺省的字段靠 *Explicit 与 settled 判断"还没人定"。
+  const settled = new Set<string>();
+  const open = (field: string, explicit: boolean | undefined) => !explicit && !settled.has(field);
+  const applyLayer = (layer: Preset, label: string) => {
+    if (out.model === undefined && layer.model) out.model = layer.model;
+    if (out.effort === undefined && layer.effort) {
+      const level = parseEffort(layer.effort);
+      if (!level) throw new Error(`${label} has invalid effort "${layer.effort}"`);
       out.effort = level;
     }
-    if (!args.compactionExplicit && preset.compaction) out.compaction = preset.compaction;
-    if (!args.approveExplicit && preset.approve) out.approve = preset.approve;
-    if (out.toolPrompts === undefined && preset.toolPrompts) out.toolPrompts = preset.toolPrompts;
-    if (preset.approval) out.approval = preset.approval;
-    if (out.systemPromptFile === undefined && preset.systemPromptFile) {
-      out.systemPromptFile = preset.systemPromptFile;
+    if (open("compaction", args.compactionExplicit) && layer.compaction) {
+      out.compaction = layer.compaction;
+      settled.add("compaction");
     }
-    if (out.appendSystemPromptFile === undefined && preset.appendSystemPromptFile) {
-      out.appendSystemPromptFile = preset.appendSystemPromptFile;
+    if (open("approve", args.approveExplicit) && layer.approve) {
+      out.approve = layer.approve;
+      settled.add("approve");
     }
-    if (!args.subagentExplicit && preset.subagent !== undefined) out.subagent = preset.subagent;
-    if (out.maxSteps === undefined && preset.maxSteps !== undefined) out.maxSteps = preset.maxSteps;
-    if (out.execution === undefined && preset.execution) out.execution = preset.execution;
-    if (out.extensions.length === 0 && preset.extensions) out.extensions = [...preset.extensions];
-  }
-  const prompt = { ...config.prompt, ...preset?.prompt };
+    if (open("subagent", args.subagentExplicit) && layer.subagent !== undefined) {
+      out.subagent = layer.subagent;
+      settled.add("subagent");
+    }
+    if (open("trace", args.traceExplicit) && layer.trace !== undefined) {
+      out.trace = layer.trace;
+      settled.add("trace");
+    }
+    if (open("fold", args.foldExplicit) && layer.fold !== undefined) {
+      out.fold = layer.fold;
+      settled.add("fold");
+    }
+    if (out.toolPrompts === undefined && layer.toolPrompts) out.toolPrompts = layer.toolPrompts;
+    if (out.approval === undefined && layer.approval) out.approval = layer.approval;
+    if (out.systemPromptFile === undefined && layer.systemPromptFile)
+      out.systemPromptFile = layer.systemPromptFile;
+    if (out.appendSystemPromptFile === undefined && layer.appendSystemPromptFile)
+      out.appendSystemPromptFile = layer.appendSystemPromptFile;
+    if (out.maxSteps === undefined && layer.maxSteps !== undefined) out.maxSteps = layer.maxSteps;
+    if (out.execution === undefined && layer.execution) out.execution = layer.execution;
+    if (out.steering === undefined && layer.steering) out.steering = layer.steering;
+    if (out.preservation === undefined && layer.preservation) {
+      parsePreservation(layer.preservation);
+      out.preservation = layer.preservation;
+    }
+    if (out.extensions.length === 0 && layer.extensions) out.extensions = [...layer.extensions];
+  };
+  if (preset) applyLayer(preset, `preset ${args.preset}`);
+  if (config.defaults) applyLayer(config.defaults, "config defaults");
+  // prompt 段的三层同样按 预设 > defaults > 配置顶层 prompt 合并;命令行给了的字段不动。
+  const prompt = { ...config.prompt, ...config.defaults?.prompt, ...preset?.prompt };
   if (out.memory === undefined && prompt.memory !== undefined) out.memory = prompt.memory;
   if (out.promptSections === undefined && prompt.sections) out.promptSections = prompt.sections;
   if (out.instructionsAs === undefined && prompt.instructionsAs) {
     out.instructionsAs = prompt.instructionsAs;
   }
-  const skills = { ...config.prompt?.skills, ...preset?.prompt?.skills };
+  const skills = {
+    ...config.prompt?.skills,
+    ...config.defaults?.prompt?.skills,
+    ...preset?.prompt?.skills,
+  };
   if (skills.list) out.skillsList = skills.list;
   if (skills.load) out.skillsLoad = skills.load;
   return out;

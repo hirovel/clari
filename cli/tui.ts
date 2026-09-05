@@ -9,6 +9,7 @@
 //   --approve ask  每个工具调用在界面里问一次(y 允许 / n 拒绝 / a 本会话总是允许该工具);缺省 all 不问
 import { appendFileSync } from "node:fs";
 import { ProcessTerminal } from "@earendil-works/pi-tui";
+import { queueToTurnEnd } from "../src/loop.js";
 import {
   beginSession,
   bootstrap,
@@ -18,6 +19,7 @@ import {
   loadExtensions,
   memoryFiles,
   parseCommonArgs,
+  parsePreservation,
   RESERVE,
   resolveApproval,
   resolveToolPrompts,
@@ -80,6 +82,7 @@ const { log, sessionFile } = session;
 let compaction: Awaited<ReturnType<typeof buildCompaction>>;
 try {
   compaction = await buildCompaction(args.compaction, first.contextWindow, RESERVE);
+  if (args.preservation) compaction.preservation = parsePreservation(args.preservation).policy;
 } catch (err) {
   console.error((err as Error).message);
   process.exit(1);
@@ -159,7 +162,12 @@ app = createTuiApp({
   trace: args.trace,
   approve: resolveApproval(args, boot.config),
   compactionName: args.compaction,
-  slots: { ...ext.slots, ...(args.execution && { execution: args.execution }) },
+  slots: {
+    ...ext.slots,
+    ...(args.execution && { execution: args.execution }),
+    ...(args.steering === "turn" && { steering: queueToTurnEnd }),
+  },
+  ...(args.preservation && { preservationName: parsePreservation(args.preservation).label }),
   templates: discoverTemplates(),
   skills,
   sessionsDir: sessionDir,

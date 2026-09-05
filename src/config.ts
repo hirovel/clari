@@ -103,6 +103,14 @@ export type Preset = {
   approval?: ApprovalConfig;
   /** 执行槽:sequential(缺省)| parallel。 */
   execution?: "sequential" | "parallel";
+  /** 插话槽:step(缺省,下一步就注入)| turn(等模型停止调用工具)。 */
+  steering?: "step" | "turn";
+  /** 保留策略:"tokens 20000" 或 "ratio 0.3";缺省 keepRecentTokens(min(20000, window/4))。 */
+  preservation?: string;
+  /** 是否记录原始流到 <session>.trace.jsonl;缺省 true。 */
+  trace?: boolean;
+  /** 工具结果初始折叠;缺省 false。 */
+  fold?: boolean;
   /** 扩展模块路径列表。 */
   extensions?: string[];
   systemPromptFile?: string;
@@ -122,6 +130,11 @@ export type KernelConfig = {
   providers: Record<string, ProviderConfig>;
   /** 系统提示词组装的全局缺省(Q66)。 */
   prompt?: PromptConfig;
+  /**
+   * 全局缺省(Q90):与预设同形,每个可选项都能写在这里。解析顺序 命令行 > --preset 指的预设 > defaults > 内置缺省。
+   * 模板把每个旋钮的内置缺省值都列出来,改哪个就改哪个。
+   */
+  defaults?: Preset;
   /** 命名预设(Q15)。 */
   presets?: Record<string, Preset>;
   /** 会话文件目录;缺省工作目录下的 sessions/。环境变量 CLARI_SESSIONS 优先。 */
@@ -158,6 +171,23 @@ export const DEFAULT_CONFIG_PATH =
 export const CONFIG_TEMPLATE: KernelConfig = {
   default: "deepseek-v4-pro",
   verifiedAt: "2026-09-02",
+  // 每个可选项的内置缺省值(Q90)。命令行与预设可以覆盖;删掉某一项等于用内置缺省。
+  defaults: {
+    compaction: "llm",
+    approve: "all",
+    execution: "sequential",
+    steering: "step",
+    toolPrompts: "guided",
+    subagent: false,
+    trace: true,
+    fold: false,
+    prompt: {
+      sections: ["role", "env", "instructions", "memory", "skills", "append"],
+      instructionsAs: "system",
+      memory: false,
+      skills: { list: "system", load: "read" },
+    },
+  },
   providers: {
     deepseek: {
       protocol: "openai",

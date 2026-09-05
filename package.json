@@ -10,7 +10,9 @@
   "files": [
     "bin",
     "dist",
-    "README.md"
+    "README.md",
+    "README.zh-CN.md",
+    "CHANGELOG.md"
   ],
   "engines": {
     "node": ">=20"

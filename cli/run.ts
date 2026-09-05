@@ -16,6 +16,7 @@ import {
   loadExtensions,
   memoryFiles,
   parseCommonArgs,
+  parsePreservation,
   resolveApproval,
   resolveToolPrompts,
   sessionsDir,
@@ -64,6 +65,7 @@ let compaction: Awaited<ReturnType<typeof buildCompaction>>;
 let ext: Awaited<ReturnType<typeof loadExtensions>>;
 try {
   compaction = await buildCompaction(args.compaction, choice.contextWindow);
+  if (args.preservation) compaction.preservation = parsePreservation(args.preservation).policy;
   ext = await loadExtensions(args.extensions, { cwd: process.cwd(), log });
 } catch (err) {
   console.error((err as Error).message);

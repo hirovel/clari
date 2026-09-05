@@ -3,12 +3,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  applyPreset,
   beginSession,
   buildCompaction,
   latestSession,
   loadCompactionStrategy,
   openSession,
   parseCommonArgs,
+  parsePreservation,
   systemPromptFor,
 } from "../cli/bootstrap.js";
 import { createTuiApp } from "../cli/tui-app.js";
@@ -188,5 +190,87 @@ describe("会话恢复(Q54)", () => {
     expect(p.sections.map((s) => s.name)).toEqual(["Role and rules", "Environment"]);
     expect(p.sections.every((s) => s.chars > 0)).toBe(true);
     expect(p.text).toContain("working directory: ");
+  });
+});
+
+describe("配置里的可选项(Q90):命令行 > 预设 > defaults > 内置缺省", () => {
+  it("defaults 给全局缺省,预设覆盖它,显式命令行再覆盖预设;prompt 段与 skills 同序", () => {
+    const config = {
+      default: "p/m",
+      providers: {},
+      defaults: {
+        compaction: "clear",
+        approve: "policy" as const,
+        execution: "parallel" as const,
+        steering: "turn" as const,
+        preservation: "ratio 0.3",
+        toolPrompts: "terse" as const,
+        trace: false,
+        fold: true,
+        subagent: true,
+        prompt: {
+          memory: true,
+          instructionsAs: "user" as const,
+          skills: { list: "none" as const },
+        },
+      },
+      presets: {
+        fast: {
+          compaction: "llm",
+          approve: "all" as const,
+          toolPrompts: "strict" as const,
+          prompt: { memory: false },
+        },
+      },
+    };
+    const byDefaults = applyPreset(parseCommonArgs([]), config);
+    expect(byDefaults).toMatchObject({
+      compaction: "clear",
+      approve: "policy",
+      execution: "parallel",
+      steering: "turn",
+      preservation: "ratio 0.3",
+      toolPrompts: "terse",
+      trace: false,
+      fold: true,
+      subagent: true,
+      memory: true,
+      instructionsAs: "user",
+      skillsList: "none",
+    });
+    const byPreset = applyPreset(parseCommonArgs(["--preset", "fast"]), config);
+    expect(byPreset).toMatchObject({
+      compaction: "llm",
+      approve: "all",
+      toolPrompts: "strict",
+      memory: false,
+      execution: "parallel",
+      trace: false,
+    });
+    const byFlags = applyPreset(
+      parseCommonArgs([
+        "--preset",
+        "fast",
+        "--compaction",
+        "pipeline",
+        "--trace",
+        "--steering",
+        "step",
+      ]),
+      config,
+    );
+    expect(byFlags).toMatchObject({
+      compaction: "pipeline",
+      trace: true,
+      steering: "step",
+      approve: "all",
+    });
+    expect(() =>
+      applyPreset(parseCommonArgs([]), { ...config, defaults: { preservation: "lots" } }),
+    ).toThrow("preservation must be");
+    expect(() => parseCommonArgs(["--steering", "sideways"])).toThrow("--steering accepts");
+    expect(parsePreservation("tokens 5000").label).toBe("keepRecentTokens(5000)");
+    expect(parsePreservation("ratio 0.25").label).toBe("keepRatio(0.25)");
+    expect(() => parsePreservation("ratio 3")).toThrow("between 0 and 1");
   });
 });
