@@ -5,6 +5,12 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ## [Unreleased]
 
+### Changed
+
+- Compaction trigger is an option: `threshold` (default), `manual` (only on `/compact`), `remind` (status-bar hint past the threshold); reserve tokens configurable. `defaults.compactionTrigger`, `defaults.compactionReserve`, `--compaction-trigger`, `--compaction-reserve`, `/compaction threshold|manual|remind`.
+- Internal refactor: TUI, inspector and bootstrap split into single-purpose modules; session replay is near-linear (9000 events 48 s to 3.7 s); one token estimate; coverage 83% to 90%.
+- Architecture document rewritten around reading the code; decision numbers removed from code comments.
+
 ## [0.1.0] - 2026-09-04
 
 First installable release: `npx github:hirovel/clari`, `clari`, `clari once`, `clari replay`, `clari sessions`.
