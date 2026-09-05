@@ -1,7 +1,11 @@
 {
   "$schema": "node_modules/@biomejs/biome/configuration_schema.json",
   "files": {
-    "includes": ["src/**", "cli/**", "tests/**"]
+    "includes": [
+      "src/**",
+      "cli/**",
+      "tests/**"
+    ]
   },
   "formatter": {
     "indentStyle": "space",
@@ -12,5 +16,19 @@
     "rules": {
       "preset": "recommended"
     }
-  }
+  },
+  "overrides": [
+    {
+      "includes": [
+        "tests/**"
+      ],
+      "linter": {
+        "rules": {
+          "suspicious": {
+            "noTemplateCurlyInString": "off"
+          }
+        }
+      }
+    }
+  ]
 }

@@ -21,16 +21,18 @@
     "build": "tsc -p tsconfig.build.json",
     "prepare": "tsc -p tsconfig.build.json",
     "test": "vitest run",
-    "lint": "biome check .",
-    "check": "tsc --noEmit && biome check . && vitest run",
+    "lint": "biome check . --error-on-warnings",
+    "check": "tsc --noEmit && biome check . --error-on-warnings && vitest run",
     "tui": "tsx cli/tui.ts",
     "replay": "tsx cli/replay.ts",
     "once": "tsx cli/run.ts",
-    "demo": "node scripts/demo.mjs"
+    "demo": "node scripts/demo.mjs",
+    "coverage": "vitest run --coverage --coverage.include=src/** --coverage.include=cli/** --coverage.reporter=text-summary --coverage.reporter=html"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.0.0",
     "@types/node": "^22.10.0",
+    "@vitest/coverage-v8": "3.2.7",
     "@xterm/headless": "^6.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",

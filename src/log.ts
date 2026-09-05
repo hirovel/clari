@@ -23,7 +23,7 @@ export class EventLog {
 
   append(e: AgentEvent): void {
     this.events.push(e);
-    if (this.filePath) appendFileSync(this.filePath, JSON.stringify(e) + "\n");
+    if (this.filePath) appendFileSync(this.filePath, `${JSON.stringify(e)}\n`);
     for (const fn of this.listeners) {
       try {
         fn(e);

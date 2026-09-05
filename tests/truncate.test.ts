@@ -46,7 +46,7 @@ describe("truncation policies", () => {
 
   it("capLineLength:超长行截到上限并加标记,短行不动(Q29)", () => {
     const cap = capLineLength(10);
-    expect(cap("short\n" + "y".repeat(30))).toBe(
+    expect(cap(`short\n${"y".repeat(30)}`)).toBe(
       `short\n${"y".repeat(10)}…[line truncated to 10 chars]`,
     );
   });

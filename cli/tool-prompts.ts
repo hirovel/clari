@@ -84,7 +84,7 @@ export function styledDescription(tool: Tool, cfg: ToolPromptsConfig | undefined
   const base = baselineDescription(tool);
   const override = cfg?.descriptions?.[tool.name];
   if (override !== undefined) return override;
-  return (STYLES[cfg?.style ?? "guided"] ?? {})[tool.name] ?? base;
+  return STYLES[cfg?.style ?? "guided"]?.[tool.name] ?? base;
 }
 
 /** 原地换掉 tools 里每个工具的描述。返回描述变了的工具名。 */
