@@ -29,6 +29,7 @@ import {
 } from "./tui-edit.js";
 import { pct } from "./tui-format.js";
 import { ListPicker, LoginDialog, type PickRow } from "./tui-login.js";
+import { Palette, type PaletteItem } from "./tui-palette.js";
 import { slotCommand, slotsList } from "./tui-slots.js";
 
 export const COMMANDS = [
@@ -503,6 +504,87 @@ function openPicker(
 }
 
 /** /login:登录对话框。供应商、遮罩输入、验证、选模型,全部在界面里点选。 */
+/** 要参数的命令:面板里选中后填进输入框而不是直接跑。 */
+const NEEDS_ARG = new Set([
+  "edit",
+  "drop",
+  "compare",
+  "restore",
+  "rewind",
+  "raw",
+  "fork",
+  "key",
+  "effort",
+  "compaction",
+  "preservation",
+  "execution",
+  "steering",
+  "approve",
+  "toolprompts",
+]);
+
+/** Ctrl+K:命令面板。条目来自命令表、配置里的模型、技能、模板、每个供应商的登录。 */
+export function openPalette(ctx: TuiContext): void {
+  const items: PaletteItem[] = [];
+  const fill = (text: string) => {
+    ctx.editor.setText(text);
+    ctx.tui.requestRender();
+  };
+  for (const cmd of COMMANDS) {
+    items.push({
+      kind: "command",
+      label: `/${cmd.name}`,
+      note: cmd.description,
+      run: () => {
+        if (NEEDS_ARG.has(cmd.name)) fill(`/${cmd.name} `);
+        else void command(ctx, `/${cmd.name}`);
+      },
+    });
+  }
+  const s = ctx.deps.settings;
+  for (const name of s?.listModels() ?? []) {
+    const current = name === `${ctx.model.info.providerName}/${ctx.model.info.model}`;
+    items.push({
+      kind: "model",
+      label: name,
+      ...(current && { note: "current" }),
+      run: () => {
+        useModel(ctx, name, false);
+      },
+    });
+  }
+  for (const p of s?.providers?.() ?? []) {
+    items.push({
+      kind: "login",
+      label: `login ${p.name}`,
+      note: p.keySource ? `key set (${p.keySource})` : "key missing",
+      run: () => openLogin(ctx, { provider: p.name }),
+    });
+  }
+  for (const sk of ctx.skills) {
+    items.push({
+      kind: "skill",
+      label: `/${sk.name}`,
+      note: sk.description,
+      run: () => fill(`/${sk.name} `),
+    });
+  }
+  for (const t of ctx.templates) {
+    items.push({
+      kind: "template",
+      label: `/${t.name}`,
+      note: t.description,
+      run: () => fill(`/${t.name} `),
+    });
+  }
+  const palette = new Palette(
+    items,
+    () => ctx.dialog.close(),
+    () => ctx.tui.requestRender(),
+  );
+  ctx.dialog.open(palette);
+}
+
 export function openLogin(ctx: TuiContext, opts: { intro?: string; provider?: string }): void {
   const s = ctx.deps.settings;
   if (!s?.providers || !s.verifyKey) {

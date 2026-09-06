@@ -53,7 +53,7 @@ import {
 import { c, editorTheme, G } from "./theme.js";
 import type { MemoryFiles } from "./tools/memory.js";
 import { Block, SplitLine } from "./tui-block.js";
-import { COMMANDS, command, openLogin, submit } from "./tui-commands.js";
+import { COMMANDS, command, openLogin, openPalette, submit } from "./tui-commands.js";
 import { FOLD_HEAD, RAW_LINE_CAP, type TuiContext } from "./tui-context.js";
 import { contextAction } from "./tui-edit.js";
 import { brief, pct } from "./tui-format.js";
@@ -584,6 +584,12 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     if (matchesKey(data, Key.ctrl("c"))) {
       ctx.stop();
       ctx.exit();
+      return { consume: true };
+    }
+    if (matchesKey(data, Key.ctrl("k"))) {
+      if (ctx.inspector.overlay || approval.overlay) return undefined;
+      if (ctx.dialog.overlay) ctx.dialog.close();
+      else openPalette(ctx);
       return { consume: true };
     }
     if (matchesKey(data, Key.ctrl("g"))) {
