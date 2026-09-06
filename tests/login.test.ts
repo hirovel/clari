@@ -50,10 +50,14 @@ describe("LoginDialog", () => {
     const dlg = new LoginDialog(deps);
     let out = plain(dlg.render());
     expect(out).toContain("Set up a provider");
-    expect(out).toContain("▸ deepseek");
+    expect(out).toContain("▸ 1. deepseek");
     expect(out).toContain("key: missing");
     expect(out).toContain("anthropic");
     expect(out).toContain("key: set (env)");
+    // 数字键直接跳到该行;再按回到第 1 项
+    dlg.handleInput("2");
+    expect(plain(dlg.render())).toContain("▸ 2. anthropic");
+    dlg.handleInput("1");
     dlg.handleInput("\r");
     out = plain(dlg.render());
     expect(out).toContain("paste the API key");

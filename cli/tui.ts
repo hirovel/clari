@@ -162,6 +162,7 @@ app = createTuiApp({
   info: { model: first.model, providerName: first.providerName, sessionFile },
   settings: boot.settings,
   fold: args.fold,
+  ...(args.foldLines !== undefined && { foldLines: args.foldLines }),
   trace: args.trace,
   approve: resolveApproval(args, boot.config),
   compactionName: args.compaction,

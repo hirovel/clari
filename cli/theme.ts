@@ -13,6 +13,9 @@ function rgb(r: number, g: number, b: number): (s: string) => string {
 function sgr(open: number, close: number): (s: string) => string {
   return (s) => (enabled ? `\x1b[${open}m${s}\x1b[${close}m` : s);
 }
+function bg(r: number, g: number, b: number): (s: string) => string {
+  return (s) => (enabled ? `\x1b[48;2;${r};${g};${b}m${s}\x1b[49m` : s);
+}
 
 export const c = {
   zhu: rgb(214, 96, 78), // 朱
@@ -21,6 +24,10 @@ export const c = {
   soft: rgb(168, 162, 152), // 次要
   faint: rgb(118, 112, 104), // 最淡
   green: rgb(111, 174, 140),
+  // 底色只有三处:用户消息的底带,diff 的增删行。其余全靠前景明暗。
+  band: bg(41, 38, 34),
+  addBg: bg(30, 52, 40),
+  delBg: bg(66, 32, 30),
   bold: sgr(1, 22),
   dim: sgr(2, 22),
   italic: sgr(3, 23),

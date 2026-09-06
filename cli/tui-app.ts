@@ -39,8 +39,9 @@ import type { Skill } from "./prompt.js";
 import type { PromptTemplate } from "./templates.js";
 import { c, editorTheme } from "./theme.js";
 import type { MemoryFiles } from "./tools/memory.js";
+import { Block, SplitLine } from "./tui-block.js";
 import { COMMANDS, command, openLogin, submit } from "./tui-commands.js";
-import { RAW_LINE_CAP, type TuiContext } from "./tui-context.js";
+import { FOLD_HEAD, RAW_LINE_CAP, type TuiContext } from "./tui-context.js";
 import { contextAction } from "./tui-edit.js";
 import { brief, pct } from "./tui-format.js";
 import type { ProviderSummary } from "./tui-login.js";
@@ -101,6 +102,8 @@ export type TuiAppDeps = {
   onExit?: () => void;
   /** 工具结果初始是否折叠。缺省不折叠;Ctrl+O 随时切换。 */
   fold?: boolean;
+  /** 折叠时保留的结果行数;缺省 5。 */
+  foldLines?: number;
   /** 记录每次请求收到的原始流,供检视器"接收"分区逐行展示。 */
   trace?: boolean;
   /** 原始流旁路输出(如写 trace 文件)。requestIndex 是 request 事件在日志中的下标。 */
@@ -183,7 +186,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
   const header = new Text("", 1, 0);
   const transcript = new Container();
   const live = new Container();
-  const status = new Text("", 1, 0);
+  const status = new SplitLine();
   const editor = new Editor(tui, editorTheme, { paddingX: 1 });
   const templates = deps.templates ?? [];
   editor.setAutocompleteProvider(
@@ -196,15 +199,6 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     ),
   );
   tui.addChild(header);
-  tui.addChild(
-    new Text(
-      c.faint(
-        "Esc interrupt · Ctrl+R inspect · Ctrl+E context · Ctrl+O fold · Ctrl+T thinking · ? shortcuts",
-      ),
-      1,
-      0,
-    ),
-  );
   tui.addChild(new Spacer(1));
   tui.addChild(transcript);
   tui.addChild(live);
@@ -272,7 +266,8 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     skills: deps.skills ?? [],
     model: { info: deps.info, effortLevels: deps.effortLevels, contextWindow: compaction.window },
     view: {
-      foldResults: deps.fold ?? false,
+      foldResults: deps.fold ?? true,
+      foldLines: deps.foldLines ?? FOLD_HEAD,
       showReasoning: false,
       childMode: "tail",
       firstRun: undefined,
@@ -281,6 +276,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       reasoningView: undefined,
       reasoningBuffer: "",
       loader: undefined,
+      loaderTimer: undefined,
       resultNodes: [],
       reasoningNodes: [],
       lastUsage: undefined,
@@ -352,7 +348,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       },
     },
     note(text) {
-      transcript.addChild(new Text(text, 1, 0));
+      transcript.addChild(new Block(text));
       tui.requestRender();
     },
     updateHeader() {
@@ -364,15 +360,22 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       );
     },
     updateStatus,
+    // 工作行:spinner、在做什么、用时、怎么打断;用时每秒刷新。
     showLoader(message) {
       ctx.hideLoader();
-      const loader = new Loader(tui, c.zhu, c.faint, message);
+      const startedAt = Date.now();
+      const text = () =>
+        `${message} · ${Math.round((Date.now() - startedAt) / 1000)}s · Esc to interrupt`;
+      const loader = new Loader(tui, c.zhu, c.faint, text());
       ctx.view.loader = loader;
+      ctx.view.loaderTimer = setInterval(() => loader.setMessage(text()), 1000);
       live.addChild(loader);
       loader.start();
     },
     hideLoader() {
       const loader = ctx.view.loader;
+      if (ctx.view.loaderTimer) clearInterval(ctx.view.loaderTimer);
+      ctx.view.loaderTimer = undefined;
       if (!loader) return;
       loader.stop();
       live.removeChild(loader);
@@ -416,6 +419,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
   // 审批实现闭包引用 ctx,只能在 ctx 建好后装上;all 模式不装,内核缺省就是放行。
   if (approval.mode !== "all") agent.setSlot("approve", approveImpl(ctx));
 
+  /** 状态行:左边是状态与上下文占用,右边是会话累计与快捷键入口;放不下时右边先让。 */
   function updateStatus(): void {
     const state = agent.running ? c.zhu("● running") : c.green("○ idle");
     const t = ctx.threshold();
@@ -438,19 +442,17 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
           : "";
       tokens = `${tone(bar)} ${c.faint(`${room} · ${usage.inputTokens}→${usage.outputTokens} tok`)}${over}`;
     }
-    // 会话累计(含压缩摘要请求):输入、输出、缓存命中、费用。增量累计,每条事件到来时 render 喂进去。
-    const totals = ctx.usage.totals();
-    const sum =
-      totals.requests > 0
-        ? c.faint(
-            ` · total ↑${fmtTok(totals.inputTokens)} ↓${fmtTok(totals.outputTokens)}${totals.cacheReadTokens > 0 ? ` cache ${fmtTok(totals.cacheReadTokens)}` : ""}${totals.cost !== undefined ? ` ${fmtCost(totals.cost)}` : ""}`,
-          )
-        : "";
     const queued = agent.queued > 0 ? c.faint(` · queued ${agent.queued}`) : "";
     const effort = agent.effort ? c.faint(` · effort ${agent.effort}`) : "";
     const runningChildren = ctx.children.views.filter((v) => v.running).length;
     const kids = runningChildren > 0 ? c.faint(` · sub-agents ${runningChildren} running`) : "";
-    status.setText(`${state}  ${tokens}${sum}${effort}${queued}${kids}`);
+    // 会话累计(含压缩摘要请求):输入、输出、缓存命中、费用。增量累计,每条事件到来时 render 喂进去。
+    const totals = ctx.usage.totals();
+    const sum =
+      totals.requests > 0
+        ? `↑${fmtTok(totals.inputTokens)} ↓${fmtTok(totals.outputTokens)}${totals.cacheReadTokens > 0 ? ` · cache ${fmtTok(totals.cacheReadTokens)}` : ""}${totals.cost !== undefined ? ` · ${fmtCost(totals.cost)}` : ""} · `
+        : "";
+    status.set(`${state}  ${tokens}${effort}${queued}${kids}`, c.faint(`${sum}? shortcuts`));
     tui.requestRender();
   }
 

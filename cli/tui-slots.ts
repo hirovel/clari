@@ -33,13 +33,25 @@ type ApprovalChoice = { kind: "y" | "n" | "a"; reason?: string };
 /** 审批提示里最多显示的 diff 行数。 */
 const APPROVAL_DETAIL_LINES = 20;
 
+/** 审批的四个选项,顺序固定:允许一次、允许并记住(作用域写在文案里)、拒绝并说明、拒绝。 */
+type ApprovalOption = { kind: ApprovalChoice["kind"] | "r"; key: string; label: string };
+
+const OPTIONS = (tool: string): ApprovalOption[] => [
+  { kind: "y", key: "y", label: "Allow once" },
+  { kind: "a", key: "a", label: `Allow ${tool} for the rest of this session` },
+  { kind: "r", key: "r", label: "Deny and tell the model why" },
+  { kind: "n", key: "n", label: "Deny" },
+];
+
 /**
- * 审批提示:一行问题(带为什么要问)、edit/write 的 diff、一行按键说明;
- * y / n / a,r 进入输入理由,理由原样进工具结果喂回模型;Esc 视为拒绝。
+ * 审批提示:一行问题(工具、参数、为什么要问),edit/write 的 diff,四个纵向选项,一行淡色提示。
+ * ↑↓ 移动,Enter 选中;数字 1–4 或字母 y a r n 直接选;Esc 视为拒绝。
+ * r 进入输入理由,理由原样进工具结果喂回模型。
  */
 export class ApprovalPrompt implements Component {
   private mode: "choose" | "reason" = "choose";
   private reason = "";
+  private index = 0;
 
   constructor(
     private readonly call: ToolCall,
@@ -49,12 +61,12 @@ export class ApprovalPrompt implements Component {
   ) {}
 
   render(): string[] {
-    const head = `${c.zhu("?")} ${c.bold(c.ink("run"))} ${c.bold(c.ink(this.call.name))}  ${c.soft(formatArgs(this.call.args))}  ${c.faint(`(${this.why})`)}`;
+    const head = `${c.zhu("?")} ${c.bold(c.ink(this.call.name))}  ${c.soft(formatArgs(this.call.args))}  ${c.faint(this.why)}`;
     const detail = toolCallDetail(this.call.name, this.call.args);
     const all = detail ? detail.split("\n") : [];
     const shown = all.slice(0, APPROVAL_DETAIL_LINES).map((l) => `  ${l}`);
     if (all.length > APPROVAL_DETAIL_LINES)
-      shown.push(c.faint(`  … ${all.length - APPROVAL_DETAIL_LINES} more lines`));
+      shown.push(c.faint(`  … +${all.length - APPROVAL_DETAIL_LINES} lines`));
     if (this.mode === "reason") {
       return [
         head,
@@ -63,13 +75,25 @@ export class ApprovalPrompt implements Component {
         c.faint("  Enter deny with this reason · Esc back"),
       ];
     }
-    return [
-      head,
-      ...shown,
-      c.faint(
-        `  y allow · n deny · r deny with a reason · a always allow ${this.call.name} this session · Esc deny`,
-      ),
-    ];
+    const options = OPTIONS(this.call.name);
+    const width = Math.max(...options.map((o) => o.label.length));
+    const rows = options.map((o, i) => {
+      const cursor = i === this.index ? c.jin("▸") : " ";
+      const label = o.label.padEnd(width);
+      const text = i === this.index ? c.bold(c.ink(label)) : c.ink(label);
+      const key = o.kind === "n" ? `${o.key} · Esc` : o.key;
+      return `  ${cursor} ${c.faint(`${i + 1}.`)} ${text}  ${c.faint(key)}`;
+    });
+    return [head, ...shown, ...rows, c.faint("  ↑↓ choose · Enter confirm · 1-4 or the letter")];
+  }
+
+  private choose(o: ApprovalOption): void {
+    if (o.kind === "r") {
+      this.mode = "reason";
+      this.onChange();
+      return;
+    }
+    this.onDecide({ kind: o.kind });
   }
 
   handleInput(data: string): void {
@@ -85,13 +109,25 @@ export class ApprovalPrompt implements Component {
       this.onChange();
       return;
     }
-    if (data === "y" || data === "Y") this.onDecide({ kind: "y" });
-    else if (data === "a" || data === "A") this.onDecide({ kind: "a" });
-    else if (data === "r" || data === "R") {
-      this.mode = "reason";
-      this.onChange();
-    } else if (data === "n" || data === "N" || matchesKey(data, Key.escape))
+    const options = OPTIONS(this.call.name);
+    const byKey = options.find((o) => o.key === data.toLowerCase());
+    const byNumber = /^[1-4]$/.test(data) ? options[Number(data) - 1] : undefined;
+    if (data === "\x1b[A" || data === "k") this.index = (this.index + 3) % 4;
+    else if (data === "\x1b[B" || data === "j") this.index = (this.index + 1) % 4;
+    else if (matchesKey(data, Key.enter)) {
+      this.choose(options[this.index] as ApprovalOption);
+      return;
+    } else if (byKey) {
+      this.choose(byKey);
+      return;
+    } else if (byNumber) {
+      this.choose(byNumber);
+      return;
+    } else if (matchesKey(data, Key.escape)) {
       this.onDecide({ kind: "n" });
+      return;
+    }
+    this.onChange();
   }
 
   invalidate(): void {}

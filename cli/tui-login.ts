@@ -22,15 +22,30 @@ function isDown(data: string): boolean {
   return data === DOWN || data === "j";
 }
 
-/** 渲染一列可选行:▸ 标当前光标,disabled 淡显,current 泥金。 */
+/** 渲染一列可选行:▸ 标当前光标并加粗,行前编号(1–9 直接按),disabled 淡显,current 泥金。 */
 export function renderRows(rows: PickRow[], index: number): string[] {
   const width = Math.max(0, ...rows.map((r) => r.label.length));
+  const numWidth = String(rows.length).length;
   return rows.map((r, i) => {
     const mark = i === index ? c.jin("▸") : " ";
+    const num = i < 9 ? `${i + 1}.`.padStart(numWidth + 1) : " ".repeat(numWidth + 1);
     const label = r.label.padEnd(width);
-    const text = r.disabled ? c.faint(label) : r.current ? c.jin(label) : c.ink(label);
-    return `  ${mark} ${text}${r.note ? `  ${c.faint(r.note)}` : ""}`;
+    const text = r.disabled
+      ? c.faint(label)
+      : r.current
+        ? c.jin(label)
+        : i === index
+          ? c.bold(c.ink(label))
+          : c.ink(label);
+    return `  ${mark} ${r.disabled ? c.faint(num) : c.faint(num)} ${text}${r.note ? `  ${c.faint(r.note)}` : ""}`;
   });
+}
+
+/** 数字键 1–9 直接选中对应行;不可选的行不响应。 */
+export function numberedIndex(rows: PickRow[], data: string): number | undefined {
+  if (!/^[1-9]$/.test(data)) return undefined;
+  const i = Number(data) - 1;
+  return i < rows.length && !rows[i]?.disabled ? i : undefined;
 }
 
 function nextIndex(rows: PickRow[], from: number, step: 1 | -1): number {
@@ -69,8 +84,10 @@ export class ListPicker implements Component {
   }
 
   handleInput(data: string): void {
+    const numbered = numberedIndex(this.rows, data);
     if (isUp(data)) this.index = nextIndex(this.rows, this.index, -1);
     else if (isDown(data)) this.index = nextIndex(this.rows, this.index, 1);
+    else if (numbered !== undefined) this.index = numbered;
     else if (matchesKey(data, Key.enter) || data === "d") {
       const row = this.rows[this.index];
       if (row && !row.disabled) this.onPick(row, data === "d" ? "d" : "enter");
@@ -185,8 +202,10 @@ export class LoginDialog implements Component {
     const s = this.step;
     if (s.kind === "providers") {
       const rows = this.providerRows();
+      const numbered = numberedIndex(rows, data);
       if (isUp(data)) s.index = nextIndex(rows, s.index, -1);
       else if (isDown(data)) s.index = nextIndex(rows, s.index, 1);
+      else if (numbered !== undefined) s.index = numbered;
       else if (matchesKey(data, Key.enter)) {
         const provider = this.deps.providers()[s.index];
         if (provider) this.step = { kind: "key", provider, buffer: "" };
@@ -218,8 +237,10 @@ export class LoginDialog implements Component {
       return;
     }
     if (s.kind === "checking") return;
+    const numbered = numberedIndex(s.rows, data);
     if (isUp(data)) s.index = nextIndex(s.rows, s.index, -1);
     else if (isDown(data)) s.index = nextIndex(s.rows, s.index, 1);
+    else if (numbered !== undefined) s.index = numbered;
     else if (matchesKey(data, Key.enter) || data === "d") {
       const row = s.rows[s.index];
       if (row && !row.disabled) {

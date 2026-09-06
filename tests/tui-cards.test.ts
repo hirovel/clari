@@ -200,7 +200,11 @@ describe("屏幕:完整 turn、卡片、折叠、diff、错误、打断", () => 
     expect(doc).toContain("Request #2");
     expect(doc).toContain("messages   4 · ≈");
     expect(doc).toContain("same       params · system · tools");
-    expect(doc).toContain("行10"); // 默认完整显示
+    // 结果缺省折叠到 5 行:正文首行带 └,尾行说明还有多少与怎么展开。
+    expect(doc).toContain("└ 行1");
+    expect(doc).toContain("行5");
+    expect(doc).not.toContain("行10");
+    expect(doc).toContain("… +5 lines · Ctrl+O");
     // 思考缺省折成一行:首行 + 种类与行数;第二行不显示。
     expect(doc).toContain("thinking   先拿到输出");
     expect(doc).toContain("(? · 2 lines · Ctrl+T)");
@@ -208,12 +212,13 @@ describe("屏幕:完整 turn、卡片、折叠、diff、错误、打断", () => 
 
     term.feed("\x0f"); // Ctrl+O
     doc = text(app);
-    expect(doc).toContain("行3");
-    expect(doc).not.toContain("行10");
-    expect(doc).toContain("… 7 more lines · Ctrl+O");
-    expect(doc).toContain("· tool results folded (Ctrl+O to unfold)");
+    expect(doc).toContain("行10");
+    expect(doc).not.toContain("+5 lines");
+    expect(doc).toContain("· tool results unfolded");
     term.feed("\x0f");
-    expect(text(app)).toContain("行10");
+    doc = text(app);
+    expect(doc).not.toContain("行10");
+    expect(doc).toContain("· tool results folded (Ctrl+O to unfold)");
 
     term.feed("\x14"); // Ctrl+T:展开全文
     doc = text(app);

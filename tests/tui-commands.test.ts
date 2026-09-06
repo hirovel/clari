@@ -143,7 +143,7 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
 
     await app.command("/model");
     // 无参数:弹列表选择器,当前模型带 ▸;Esc 关闭
-    expect(app.dialogLines().map(stripAnsi).join("\n")).toContain("▸ fake/fake-model");
+    expect(app.dialogLines().map(stripAnsi).join("\n")).toContain("▸ 1. fake/fake-model");
     app.dialogInput("\x1b");
     expect(app.dialogLines()).toEqual([]);
 
@@ -322,10 +322,10 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
     const running = app.submit("跑");
     await tick();
     const prompt = app.approvalLines().map(stripAnsi).join("\n");
-    expect(prompt).toContain("? run echo");
-    expect(prompt).toContain(
-      "y allow · n deny · r deny with a reason · a always allow echo this session",
-    );
+    expect(prompt).toContain("? echo");
+    expect(prompt).toContain("▸ 1. Allow once");
+    expect(prompt).toContain("2. Allow echo for the rest of this session");
+    expect(prompt).toContain("4. Deny");
     term.feed("y");
     await tick();
     await tick();
@@ -699,8 +699,13 @@ describe("槽命令的分支", () => {
     app.approvalInput("\x7f");
     expect(plain(app.approvalLines().join("\n"))).toContain("reason: a");
     app.approvalInput("\x1b");
-    expect(plain(app.approvalLines().join("\n"))).toContain("y allow");
-    app.approvalInput("a");
+    expect(plain(app.approvalLines().join("\n"))).toContain("Allow once");
+    // ↓ 移到第 2 项再 Enter,与直接按 a 或 2 等价
+    app.approvalInput("\x1b[B");
+    expect(plain(app.approvalLines().join("\n"))).toContain(
+      "▸ 2. Allow echo for the rest of this session",
+    );
+    app.approvalInput("\r");
     await run;
     const d = doc(app);
     expect(d).toContain("allowed echo (not asked again this session)");

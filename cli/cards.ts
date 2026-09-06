@@ -298,7 +298,7 @@ export function sendCardLines(input: SendCardInput): string[] {
   const { n, request: r, messages, defs } = input;
   const width = input.width ?? 60;
   const lines: string[] = [
-    `${c.bold(c.jin(`Request #${n}`))}   ${c.soft(`${r.model} · ${requestKind(r)}${r.effort ? ` · effort ${r.effort}` : ""}`)}`,
+    `${c.soft(`Request #${n}`)}   ${c.faint(`${r.model} · ${requestKind(r)}${r.effort ? ` · effort ${r.effort}` : ""}`)}`,
   ];
   // 相同前缀只算一次,行表、changed 行、预计缓存都用它。
   const keep = unchangedPrefix(input.previous, messages);
@@ -422,9 +422,9 @@ function usageLine(input: ReceiveHeadInput, u: AssistantEvent["usage"]): string 
 /** 接收卡的头:一眼看到停止原因、耗时、费用;第二行是实测用量、缓存命中率与预计的对照。 */
 export function receiveHead(input: ReceiveHeadInput): string {
   const { n } = input;
-  const title = (tail: string) => `${c.bold(c.jin(`Response #${n}`))}   ${c.soft(tail)}`;
+  const title = (tail: string) => `${c.soft(`Response #${n}`)}   ${c.faint(tail)}`;
   if (input.error)
-    return `${c.bold(c.zhu(`Response #${n}`))}   ${c.zhu(`✗ ${firstLine(input.error, 80)}`)}`;
+    return `${c.zhu(`Response #${n}`)}   ${c.zhu(`✗ ${firstLine(input.error, 80)}`)}`;
   if (input.response) {
     const e = input.response;
     const cost = input.price && e.usage ? [fmtCost(costOf(e.usage, input.price))] : [];
@@ -441,7 +441,7 @@ export function receiveHead(input: ReceiveHeadInput): string {
       usageLine(input, k.usage),
     ].join("\n");
   }
-  return `${c.jin(`Response #${n}`)}   ${c.faint("waiting…")}`;
+  return `${c.soft(`Response #${n}`)}   ${c.faint("waiting…")}`;
 }
 
 /** 响应里除思考、文本、调用之外的块:回传物、供应商元数据。 */
@@ -512,12 +512,15 @@ export function thinkingLines(
   ];
 }
 
-/** 调用行。 */
+/** 调用行:⚙ 朱色(工具是朱的),名字加粗,参数次要色。 */
 export function callLine(name: string, args: string): string {
-  return g("call", `${c.jin("⚙")} ${c.bold(c.ink(name))}  ${c.soft(args)}`);
+  return g("call", `${c.zhu("⚙")} ${c.bold(c.ink(name))}  ${c.soft(args)}`);
 }
 
-/** 工具结果:一行头(✓/✗、名字、行数、耗时)加续行正文;折叠时只留前几行。 */
+/**
+ * 工具结果:一行头(✓/✗、名字、行数、耗时),正文首行带 └,其余缩到它后面;
+ * 折叠时只留前 head 行,尾行说明还有多少与怎么展开。
+ */
 export function resultLines(
   r: { name: string; content: string; isError: boolean; durationMs?: number },
   opts: { folded: boolean; head: number },
@@ -537,11 +540,12 @@ export function resultLines(
     ),
   ];
   const tone = r.isError ? c.soft : c.faint;
-  if (all.length === 0) lines.push(cont(c.faint("(no output)")));
+  const body = (l: string, i: number) => cont(`${i === 0 ? c.faint("└") : " "} ${tone(l)}`);
+  if (all.length === 0) lines.push(cont(`${c.faint("└")} ${c.faint("(no output)")}`));
   else if (opts.folded && all.length > opts.head + 1) {
-    lines.push(...all.slice(0, opts.head).map((l) => cont(tone(l))));
-    lines.push(cont(c.soft(`… ${all.length - opts.head} more lines · Ctrl+O`)));
-  } else lines.push(...all.map((l) => cont(tone(l))));
+    lines.push(...all.slice(0, opts.head).map(body));
+    lines.push(cont(`  ${c.soft(`… +${all.length - opts.head} lines · Ctrl+O`)}`));
+  } else lines.push(...all.map(body));
   return lines;
 }
 

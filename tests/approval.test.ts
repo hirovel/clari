@@ -134,9 +134,10 @@ describe("界面:策略提示、r 附理由、/approve 规则", () => {
     const pending = app.submit("one");
     await new Promise((r) => setTimeout(r, 20));
     let lines = plain(app.approvalLines().join("\n"));
-    expect(lines).toContain("? run echo");
-    expect(lines).toContain("(no rule for echo)");
-    expect(lines).toContain("r deny with a reason");
+    expect(lines).toContain("? echo");
+    expect(lines).toContain("1. Allow once");
+    expect(lines).toContain("no rule for echo");
+    expect(lines).toContain("3. Deny and tell the model why");
     app.approvalInput("r");
     for (const ch of "not now") app.approvalInput(ch);
     lines = plain(app.approvalLines().join("\n"));

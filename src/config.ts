@@ -116,8 +116,10 @@ export type Preset = {
   compactionReserve?: number;
   /** 是否记录原始流到 <session>.trace.jsonl;缺省 true。 */
   trace?: boolean;
-  /** 工具结果初始折叠;缺省 false。 */
+  /** 工具结果初始折叠;缺省 true,Ctrl+O 切换。 */
   fold?: boolean;
+  /** 折叠时保留的结果行数;缺省 5。 */
+  foldLines?: number;
   /** 扩展模块路径列表。 */
   extensions?: string[];
   systemPromptFile?: string;
@@ -204,7 +206,8 @@ export const CONFIG_TEMPLATE: KernelConfig = {
     toolPrompts: "explain",
     subagent: false,
     trace: true,
-    fold: false,
+    fold: true,
+    foldLines: 5,
     prompt: {
       sections: ["role", "env", "instructions", "memory", "skills", "append"],
       instructionsAs: "system",

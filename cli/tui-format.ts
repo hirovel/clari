@@ -28,7 +28,10 @@ export function formatArgs(args: unknown): string {
 /** 最多展示的改动行数;超出的折成一行计数。 */
 const DETAIL_MAX_LINES = 60;
 
-/** edit → 行级 diff(- 朱 / + 绿 / 上下文淡);write → 前几行加总行数。其它工具无详情。 */
+const DEL = (s: string) => c.delBg(c.zhu(s));
+const ADD = (s: string) => c.addBg(c.green(s));
+
+/** edit → 行级 diff(- 朱字深红底 / + 绿字深绿底 / 上下文淡字无底);write → 前几行加总行数。其它工具无详情。 */
 export function toolCallDetail(name: string, args: unknown): string {
   const a = (args ?? {}) as Record<string, unknown>;
   let lines: string[] = [];
@@ -36,9 +39,9 @@ export function toolCallDetail(name: string, args: unknown): string {
     lines = hunks(diffLines(a.oldText, a.newText)).map((l) => {
       switch (l.kind) {
         case "-":
-          return c.zhu(`- ${l.text}`);
+          return DEL(`- ${l.text}`);
         case "+":
-          return c.green(`+ ${l.text}`);
+          return ADD(`+ ${l.text}`);
         case "…":
           return c.faint(`  ${l.text}`);
         default:
@@ -47,7 +50,7 @@ export function toolCallDetail(name: string, args: unknown): string {
     });
   } else if (name === "write" && typeof a.content === "string") {
     const all = a.content.split("\n");
-    lines = all.slice(0, 12).map((l) => c.green(`+ ${l}`));
+    lines = all.slice(0, 12).map((l) => ADD(`+ ${l}`));
     if (all.length > 12) lines.push(c.faint(`… ${all.length} lines total`));
   }
   if (lines.length === 0) return "";

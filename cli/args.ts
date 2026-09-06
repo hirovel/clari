@@ -29,6 +29,8 @@ export type CommonArgs = {
   subagent: boolean;
   trace: boolean;
   fold: boolean;
+  /** 折叠时保留的结果行数(配置 foldLines)。 */
+  foldLines?: number;
   /** 恢复指定会话文件。 */
   resume?: string;
   /** 恢复最近一次会话。 */
@@ -118,7 +120,7 @@ export function parseCommonArgs(argv: string[]): CommonArgs {
     compaction: "llm",
     subagent: false,
     trace: true,
-    fold: false,
+    fold: true,
     continue: false,
     json: false,
     help: false,
@@ -314,7 +316,7 @@ Options
   --max-steps N                  termination guard (default: no limit)
   --subagent                     add the task tool (sub-agents)
   --no-trace                     do not record the raw stream (default: every received line is written to <session>.trace.jsonl; view with /raw N)
-  --fold                         tool results start folded (Ctrl+O toggles)
+  --fold                         tool results start folded (the default; config fold: false starts unfolded; Ctrl+O toggles)
   --json                         one-shot mode: print a structured result
   --events                       one-shot mode: write every event to stdout as a JSON line
   -h, --help
@@ -366,6 +368,8 @@ export function applyPreset(args: CommonArgs, config: KernelConfig): CommonArgs 
       out.fold = layer.fold;
       settled.add("fold");
     }
+    if (out.foldLines === undefined && layer.foldLines !== undefined)
+      out.foldLines = layer.foldLines;
     if (out.toolPrompts === undefined && layer.toolPrompts) out.toolPrompts = layer.toolPrompts;
     if (out.approval === undefined && layer.approval) out.approval = layer.approval;
     if (out.systemPromptFile === undefined && layer.systemPromptFile)

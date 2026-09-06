@@ -61,7 +61,8 @@ Every command-line option has a counterpart in `~/.clari/config.json`. The templ
   "toolPrompts": "explain",
   "subagent": false,
   "trace": true,
-  "fold": false,
+  "fold": true,
+  "foldLines": 5,
   "prompt": { "sections": ["role", "env", "instructions", "memory", "skills", "append"], "instructionsAs": "system", "memory": false, "skills": { "list": "system", "load": "read" } }
 }
 ```
@@ -113,7 +114,7 @@ clari replay sessions/<file>.jsonl --compaction 1 --json
 clari sessions prune --older-than 30d --yes
 ```
 
-In the UI: `Esc` interrupts, `Ctrl+R` inspector (Tab cycles requests, events, compactions, context; `s` switches session), `Ctrl+E` context panel, `Ctrl+O` folds tool results, `Ctrl+T` thinking, `?` shortcuts, `/help`.
+In the UI: `Esc` interrupts, `Ctrl+R` inspector (Tab cycles requests, events, compactions, context; `s` switches session), `Ctrl+E` context panel, `Ctrl+O` unfolds tool results (they start folded to `foldLines`, 5 by default), `Ctrl+T` thinking, `?` shortcuts, `/help`. Approval prompts and pickers are numbered lists: `↑↓` or `1`–`9` to choose, `Enter` to confirm, `Esc` to back out (in an approval prompt `Esc` denies); the letters `y a r n` still work.
 
 ## Layout
 

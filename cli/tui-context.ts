@@ -6,7 +6,6 @@ import type {
   Container,
   Editor,
   Loader,
-  Markdown,
   OverlayHandle,
   Text,
   TuiMainScreen,
@@ -25,11 +24,12 @@ import type { Skill } from "./prompt.js";
 import type { PromptTemplate } from "./templates.js";
 import { c } from "./theme.js";
 import type { TuiAppDeps } from "./tui-app.js";
-import type { ChildView } from "./tui-render.js";
+import type { Block, SplitLine } from "./tui-block.js";
+import type { ChildView, LabeledMarkdown } from "./tui-render.js";
 import type { ApprovalPrompt } from "./tui-slots.js";
 
-/** 折叠时保留的工具结果行数。 */
-export const FOLD_HEAD = 3;
+/** 折叠时保留的工具结果行数的缺省;配置 foldLines 可改。 */
+export const FOLD_HEAD = 5;
 /** 子 agent 尾窗保留的行数。 */
 export const CHILD_TAIL = 3;
 /** 引导线:子 agent 的每一行都带它,一眼分清层级;不是框线。 */
@@ -47,18 +47,22 @@ export type TuiInfo = TuiAppDeps["info"];
 /** 显示状态:折叠/隐藏只改屏幕,不改日志;切换键重绘已有节点。 */
 export type ViewState = {
   foldResults: boolean;
+  /** 折叠时保留的结果行数。 */
+  foldLines: number;
   /** 思考缺省折成一行(首行 + 种类 + 行数),Ctrl+T 展开全文。 */
   showReasoning: boolean;
   childMode: ChildMode;
   /** 首屏(新会话且还没有用户消息时显示),第一条消息一到就撤。 */
   firstRun: Text | undefined;
-  streaming: Markdown | undefined;
+  streaming: LabeledMarkdown | undefined;
   streamBuffer: string;
-  reasoningView: Text | undefined;
+  reasoningView: Block | undefined;
   reasoningBuffer: string;
   loader: Loader | undefined;
-  resultNodes: ({ node: Text } & ResultRecord)[];
-  reasoningNodes: { node: Text; text: string; kind?: "full" | "summary" }[];
+  /** 工作行的用时刷新计时器。 */
+  loaderTimer: ReturnType<typeof setInterval> | undefined;
+  resultNodes: ({ node: Block } & ResultRecord)[];
+  reasoningNodes: { node: Block; text: string; kind?: "full" | "summary" }[];
   lastUsage: { inputTokens: number; outputTokens: number } | undefined;
 };
 
@@ -74,14 +78,14 @@ export type RequestState = {
   providersAt: Map<number, Provider>;
   rawAt: Map<number, string[]>;
   rawLines: number;
-  receiveHeads: Map<number, Text>;
+  receiveHeads: Map<number, Block>;
   predictedAt: Map<number, number>;
   /** 上一次正常步发出的消息:发送卡"未变 / 新增"的比较基线。 */
   lastSent: Message[] | undefined;
   /** 上一次发出的工具定义全文;变了发送卡才标 changed。 */
   lastToolSig: string;
   lastParams: string | undefined;
-  lastCard: { node: Text; lines: string[] } | undefined;
+  lastCard: { node: Block; lines: string[] } | undefined;
 };
 
 /** 审批:规则对象被策略实现闭包引用,/approve 改它即生效。 */
@@ -113,7 +117,7 @@ export type TuiContext = {
   header: Text;
   transcript: Container;
   live: Container;
-  status: Text;
+  status: SplitLine;
   editor: Editor;
   templates: PromptTemplate[];
   skills: Skill[];

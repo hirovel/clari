@@ -1,6 +1,7 @@
 // 把带 ANSI SGR 的终端行转成 HTML,用于在浏览器里预览 TUI 观感。只支持本项目用到的序列。
 type Style = {
   fg: string | undefined;
+  bg: string | undefined;
   bold: boolean;
   dim: boolean;
   italic: boolean;
@@ -11,6 +12,7 @@ type Style = {
 
 const fresh = (): Style => ({
   fg: undefined,
+  bg: undefined,
   bold: false,
   dim: false,
   italic: false,
@@ -26,6 +28,7 @@ function escapeHtml(s: string): string {
 function css(st: Style): string {
   const parts: string[] = [];
   if (st.fg) parts.push(`color:${st.fg}`);
+  if (st.bg) parts.push(`background:${st.bg}`);
   if (st.bold) parts.push("font-weight:700");
   if (st.dim) parts.push("opacity:.6");
   if (st.italic) parts.push("font-style:italic");
@@ -64,8 +67,12 @@ export function ansiLineToHtml(line: string): string {
       else if (code === 27) st.inverse = false;
       else if (code === 29) st.strike = false;
       else if (code === 39) st.fg = undefined;
+      else if (code === 49) st.bg = undefined;
       else if (code === 38 && codes[i + 1] === 2) {
         st.fg = `rgb(${codes[i + 2]},${codes[i + 3]},${codes[i + 4]})`;
+        i += 4;
+      } else if (code === 48 && codes[i + 1] === 2) {
+        st.bg = `rgb(${codes[i + 2]},${codes[i + 3]},${codes[i + 4]})`;
         i += 4;
       }
     }
