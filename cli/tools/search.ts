@@ -137,6 +137,7 @@ export function createGrepTool(opts: { useRipgrep?: boolean; maxResults?: number
           "rg",
           [
             "--line-number",
+            "--with-filename",
             "--no-heading",
             "--color",
             "never",
@@ -146,9 +147,15 @@ export function createGrepTool(opts: { useRipgrep?: boolean; maxResults?: number
             ...(args.glob ? ["-g", args.glob] : []),
             "-e",
             args.pattern,
-            ...(rootIsFile ? [basename(root)] : []),
+            // 路径必须显式给:stdin 不是终端时 rg 会改读 stdin,子进程里正是这种情况。
+            rootIsFile ? basename(root) : ".",
           ],
-          { cwd: rootIsFile ? dirname(root) : root, encoding: "utf8", maxBuffer: 8 * 1024 * 1024 },
+          {
+            cwd: rootIsFile ? dirname(root) : root,
+            encoding: "utf8",
+            maxBuffer: 8 * 1024 * 1024,
+            stdio: ["ignore", "pipe", "pipe"],
+          },
         );
         if (!rg.error) {
           if (rg.status === 1) return "(no matches)";
@@ -158,7 +165,7 @@ export function createGrepTool(opts: { useRipgrep?: boolean; maxResults?: number
               .split(/\r?\n/)
               .map((l) => {
                 const file = l.split(":")[0] ?? "";
-                const rel = rootIsFile ? given : file.split(sep).join("/");
+                const rel = rootIsFile ? given : file.split(sep).join("/").replace(/^\.\//, "");
                 return withBase(rel) + l.slice(file.length);
               });
             const shown = lines.slice(0, maxResults);

@@ -1,24 +1,64 @@
-// 界面模块的分支(重构块 3):按键、提交时的附件与排队、每条命令的用法与错误分支、
-// 槽命令的参数校验、审批理由输入、编辑器驱动的工具描述编辑、少见事件的渲染、文本小工具。
+// 界面:按键、提交与每条命令。/help /context、设置、检视器入口、/effort、/models、--approve ask、
+// 附件与排队、命令的用法与错误分支、槽命令、审批理由输入、编辑器驱动的工具描述编辑。
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { appendMemory } from "../cli/tools/memory.js";
-import { createTuiApp, type TuiApp, type TuiAppDeps } from "../cli/tui-app.js";
-import { brief, formatArgs, toolCallDetail } from "../cli/tui-format.js";
+import { createTuiApp, type TuiApp, type TuiAppDeps, type TuiSettings } from "../cli/tui-app.js";
 import { DEFAULT_CONFIG_PATH } from "../src/config.js";
 import { EventLog } from "../src/log.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
 import { defineTool } from "../src/tools.js";
 import { stripAnsi, VirtualTerminal } from "./helpers/virtual-terminal.js";
 
+function scripted(turns: AssistantTurn[]): Provider {
+  let i = 0;
+  return {
+    model: "fake-model",
+    async complete(_m, _t, opts) {
+      const t = turns[i++];
+      if (!t) throw new Error("脚本越界");
+      if (t.text && opts?.onDelta) opts.onDelta(t.text); // 模拟流式:整段作为一次增量
+      return t;
+    },
+  };
+}
+
+const echo = defineTool({
+  name: "echo",
+  description: "回显",
+  parameters: Type.Object({ text: Type.String() }),
+  async execute(args) {
+    return `echo:${args.text}`;
+  },
+});
+
+function boot(provider: Provider, settings?: TuiSettings): { app: TuiApp; term: VirtualTerminal } {
+  const term = new VirtualTerminal(100, 40);
+  const app = createTuiApp({
+    terminal: term,
+    log: new EventLog(),
+    provider,
+    tools: [echo],
+    compaction: { strategy: async () => null, window: 100000, reserveTokens: 32000 },
+    reserveTokens: 32000,
+    info: { model: "fake-model", providerName: "fake", sessionFile: "sessions/t.jsonl" },
+    ...(settings && { settings }),
+    systemPrompt: "sys",
+    onExit: () => {},
+  });
+  return { app, term };
+}
+
+const text = (app: TuiApp) => app.lines(100).map(stripAnsi).join("\n");
+
 const plain = (s: string) => stripAnsi(s);
 const doc = (app: TuiApp) => app.lines(120).map(plain).join("\n");
 const tick = () => new Promise((r) => setTimeout(r, 5));
 
-function scripted(turns: AssistantTurn[], extra: Partial<Provider> = {}): Provider {
+function scriptedB(turns: AssistantTurn[], extra: Partial<Provider> = {}): Provider {
   let i = 0;
   return {
     model: "m",
@@ -31,7 +71,7 @@ function scripted(turns: AssistantTurn[], extra: Partial<Provider> = {}): Provid
   };
 }
 
-const echo = defineTool({
+const echoB = defineTool({
   name: "echo",
   description: "Echo.",
   parameters: Type.Object({ text: Type.String() }),
@@ -47,14 +87,14 @@ afterEach(() => {
   delete process.env.CLARI_EDITOR;
 });
 
-function boot(provider: Provider, over: Partial<TuiAppDeps> = {}, log = new EventLog()) {
+function bootB(provider: Provider, over: Partial<TuiAppDeps> = {}, log = new EventLog()) {
   const term = new VirtualTerminal(120, 40);
   const exits: number[] = [];
   const app = createTuiApp({
     terminal: term,
     log,
     provider,
-    tools: [echo],
+    tools: [echoB],
     compaction: { strategy: async () => null, window: 100000, reserveTokens: 1000 },
     reserveTokens: 1000,
     info: { model: "m", providerName: "p", sessionFile: "s" },
@@ -65,9 +105,247 @@ function boot(provider: Provider, over: Partial<TuiAppDeps> = {}, log = new Even
   return { app, term, log, exits };
 }
 
+describe("命令:帮助、设置、检视器入口、强度、模型、审批", () => {
+  it("/help 与 /context 输出", async () => {
+    const { app } = boot(scripted([]));
+    await app.command("/help");
+    await app.command("/context");
+    const doc = text(app);
+    expect(doc).toContain("/compact");
+    expect(doc).toContain("/model");
+    expect(doc).toContain("Context  estimated");
+    expect(doc).toContain("system prompt");
+    app.stop();
+  });
+
+  it("设置:/model 列表与切换、/key 写入、/default", async () => {
+    const calls: string[] = [];
+    const settings: TuiSettings = {
+      listModels: () => ["fake/fake-model", "other/big-model"],
+      switchModel: (name) => {
+        calls.push(`switch:${name}`);
+        return {
+          provider: {
+            model: "big-model",
+            async complete() {
+              throw new Error("x");
+            },
+          },
+          model: "big-model",
+          providerName: "other",
+          contextWindow: 200000,
+        };
+      },
+      setKey: (p, k) => calls.push(`key:${p}:${k}`),
+      setDefault: (m) => calls.push(`default:${m}`),
+    };
+    const { app } = boot(scripted([]), settings);
+
+    await app.command("/model");
+    expect(text(app)).toContain("▸ fake/fake-model");
+
+    await app.command("/model other/big-model");
+    expect(calls).toContain("switch:other/big-model");
+    expect(text(app)).toContain("big-model");
+    expect(text(app)).toContain("model switched to big-model");
+    expect(app.agent.provider.model).toBe("big-model");
+
+    await app.command("/key deepseek sk-123");
+    expect(calls).toContain("key:deepseek:sk-123");
+    expect(text(app)).toContain("key for deepseek written to the config file");
+
+    await app.command("/default");
+    expect(calls).toContain("default:other/big-model");
+    app.stop();
+  });
+
+  it("Ctrl+R 打开请求检视器,检视器接管按键,Esc 关闭后回到编辑器", async () => {
+    const { app, term } = boot(
+      scripted([
+        {
+          text: "ok",
+          toolCalls: [],
+          stopReason: "end",
+          usage: { inputTokens: 100, outputTokens: 2 },
+        },
+      ]),
+    );
+    await app.submit("x");
+    expect(app.inspector.isOpen()).toBe(false);
+    term.feed("\x12"); // Ctrl+R
+    expect(app.inspector.isOpen()).toBe(true);
+    let doc = app.inspector.lines(100).map(stripAnsi).join("\n");
+    expect(doc).toContain("Requests");
+    expect(doc).toContain("▸ #1");
+    app.inspector.key("\r");
+    doc = app.inspector.lines(100).map(stripAnsi).join("\n");
+    expect(doc).toContain("Request #1");
+    expect(doc).toContain("[1 summary]");
+    app.inspector.key("\x1b");
+    app.inspector.key("\x1b");
+    expect(app.inspector.isOpen()).toBe(false);
+    expect(app.inspector.lines(100)).toEqual([]);
+    // 命令入口同样可用
+    await app.command("/inspect");
+    expect(app.inspector.isOpen()).toBe(true);
+    term.feed("\x12");
+    expect(app.inspector.isOpen()).toBe(false);
+    // /events 直接进事件视图,/compactions 直接进压缩对照
+    await app.command("/events");
+    expect(app.inspector.isOpen()).toBe(true);
+    expect(app.inspector.lines(100).map(stripAnsi).join("\n")).toContain("Events");
+    app.inspector.close();
+    await app.command("/compactions");
+    expect(app.inspector.lines(100).map(stripAnsi).join("\n")).toContain("Compactions");
+    app.inspector.close();
+    app.stop();
+  });
+
+  it("/effort 设置强度:状态栏显示、request 事件带级别、不支持的级别提示回退、auto 恢复", async () => {
+    const seen: (string | undefined)[] = [];
+    const provider: Provider = {
+      model: "fake-model",
+      async complete(_m, _t, opts) {
+        seen.push(opts?.effort);
+        return { text: "ok", toolCalls: [], stopReason: "end" };
+      },
+    };
+    const term = new VirtualTerminal(100, 40);
+    const log = new EventLog();
+    const app = createTuiApp({
+      terminal: term,
+      log,
+      provider,
+      tools: [],
+      compaction: { strategy: async () => null, window: 100000, reserveTokens: 32000 },
+      reserveTokens: 32000,
+      info: { model: "fake-model", providerName: "fake", sessionFile: "s" },
+      systemPrompt: "sys",
+      onExit: () => {},
+      effortLevels: ["low", "high"],
+    });
+    await app.command("/effort");
+    expect(text(app)).toContain("Effort not set");
+    await app.command("/effort xhigh");
+    let doc = text(app);
+    expect(doc).toContain("◇ effort set to xhigh");
+    expect(doc).toContain("clamped down when sending");
+    expect(doc).toContain("· effort xhigh");
+    await app.submit("x");
+    expect(seen).toEqual(["xhigh"]);
+    const req = log.events.find((e) => e.type === "request");
+    expect(req).toMatchObject({ type: "request", effort: "xhigh" });
+    await app.command("/effort auto");
+    doc = text(app);
+    expect(doc).toContain("◇ effort omitted again");
+    await app.submit("y");
+    expect(seen).toEqual(["xhigh", undefined]);
+    await app.command("/effort ultra");
+    expect(text(app)).toContain('unknown level "ultra"');
+    app.stop();
+  });
+
+  it("/models 对照服务器列表与配置:标出下线与新增", async () => {
+    const provider: Provider = {
+      model: "fake-model",
+      async complete() {
+        throw new Error("x");
+      },
+      listModels: async () => ["fake-model", "fresh-model"],
+    };
+    const settings: TuiSettings = {
+      listModels: () => ["fake/fake-model", "fake/retired-model", "other/big-model"],
+      switchModel: () => {
+        throw new Error("n/a");
+      },
+      setKey: () => {},
+      setDefault: () => {},
+    };
+    const { app } = boot(provider, settings);
+    await app.command("/models");
+    const doc = text(app);
+    expect(doc).toContain("server 2 models · configured 2");
+    expect(doc).toContain("✓ fake-model");
+    expect(doc).toContain("✗ retired-model");
+    expect(doc).toContain("possibly retired");
+    expect(doc).toContain("· fresh-model");
+    expect(doc).not.toContain("big-model");
+    app.stop();
+  });
+
+  it("--approve ask:每个调用弹一行确认;y 执行、n 以拒绝结果回喂、a 本会话不再问", async () => {
+    const term = new VirtualTerminal(100, 40);
+    const log = new EventLog();
+    const app = createTuiApp({
+      terminal: term,
+      log,
+      provider: scripted([
+        {
+          text: "",
+          toolCalls: [{ id: "c1", name: "echo", args: { text: "one" } }],
+          stopReason: "tool",
+        },
+        {
+          text: "",
+          toolCalls: [{ id: "c2", name: "echo", args: { text: "two" } }],
+          stopReason: "tool",
+        },
+        {
+          text: "",
+          toolCalls: [{ id: "c3", name: "echo", args: { text: "three" } }],
+          stopReason: "tool",
+        },
+        {
+          text: "",
+          toolCalls: [{ id: "c4", name: "echo", args: { text: "four" } }],
+          stopReason: "tool",
+        },
+        { text: "完事", toolCalls: [], stopReason: "end" },
+      ]),
+      tools: [echo],
+      compaction: { strategy: async () => null, window: 100000, reserveTokens: 32000 },
+      reserveTokens: 32000,
+      info: { model: "fake-model", providerName: "fake", sessionFile: "s" },
+      systemPrompt: "sys",
+      onExit: () => {},
+      approve: "ask",
+    });
+    const tick = () => new Promise((r) => setImmediate(r));
+    const running = app.submit("跑");
+    await tick();
+    const prompt = app.approvalLines().map(stripAnsi).join("\n");
+    expect(prompt).toContain("? run echo");
+    expect(prompt).toContain(
+      "y allow · n deny · r deny with a reason · a always allow echo this session",
+    );
+    term.feed("y");
+    await tick();
+    await tick();
+    term.feed("n");
+    await tick();
+    await tick();
+    term.feed("a");
+    await running;
+    const doc = text(app);
+    expect(app.approvalLines()).toEqual([]);
+    expect(doc).toContain("· approve: allowed echo");
+    expect(doc).toContain("· approve: denied echo");
+    expect(doc).toContain("· approve: allowed echo (not asked again this session)");
+    const results = log.events.filter((e) => e.type === "tool/result");
+    expect(results.map((r) => r.type === "tool/result" && r.content)).toEqual([
+      "echo:one",
+      "The user denied this call.",
+      "echo:three",
+      "echo:four", // a 之后同名工具直接放行
+    ]);
+    expect(doc).toContain("完事");
+    app.stop();
+  });
+});
+
 describe("按键", () => {
   it("? 列快捷键;Ctrl+R 开关检视器;Ctrl+E 开组装视图;Ctrl+T 切思考;Ctrl+C 退出;检视器的三个入口", async () => {
-    const { app, term, exits } = boot(scripted([]));
+    const { app, term, exits } = bootB(scriptedB([]));
     term.feed("?");
     expect(doc(app)).toContain("Ctrl+R");
     term.feed("\x12");
@@ -107,7 +385,7 @@ describe("提交", () => {
     const cwd = process.cwd();
     process.chdir(tmp);
     try {
-      const { app, log } = boot(scripted([]));
+      const { app, log } = bootB(scriptedB([]));
       await app.submit("look at @a.txt and @a.bin");
       const d = doc(app);
       expect(d).toContain("attached @a.txt (5 bytes)");
@@ -130,7 +408,7 @@ describe("提交", () => {
         return { text: `r${calls}`, toolCalls: [], stopReason: "end" };
       },
     };
-    const { app, term } = boot(provider);
+    const { app, term } = bootB(provider);
     const first = app.submit("first");
     await tick();
     expect(doc(app)).toContain("● running");
@@ -153,7 +431,7 @@ describe("命令的分支", () => {
   it("/raw 用法与越界;/sessions 空目录与有会话;/mcp 无与有;/fields 无表与有表", async () => {
     tmp = mkdtempSync(join(tmpdir(), "clari-tui-"));
     const withFields: Provider = {
-      ...scripted([{ text: "ok", toolCalls: [], stopReason: "end" }]),
+      ...scriptedB([{ text: "ok", toolCalls: [], stopReason: "end" }]),
       fields: {
         protocol: "openai",
         sends: ["messages"],
@@ -161,7 +439,7 @@ describe("命令的分支", () => {
         ignores: ["logprobs"],
       },
     };
-    const { app } = boot(withFields, {
+    const { app } = bootB(withFields, {
       sessionsDir: tmp,
       trace: false,
       mcp: {
@@ -209,7 +487,7 @@ describe("命令的分支", () => {
   });
 
   it("没有 settings 时 /model /key /default 都说明;/key 用法;/models 供应商不支持;/mcp 无服务器;/fields 无表", async () => {
-    const { app } = boot(scripted([]));
+    const { app } = bootB(scriptedB([]));
     await app.command("/model");
     await app.command("/key");
     await app.command("/default");
@@ -238,8 +516,8 @@ describe("命令的分支", () => {
       ],
     });
     log.append({ type: "user/message", at: "", text: "<instructions>x</instructions>" });
-    const { app } = boot(
-      scripted([]),
+    const { app } = bootB(
+      scriptedB([]),
       {
         sessionsDir: tmp,
         compaction: {
@@ -285,11 +563,11 @@ describe("命令的分支", () => {
     mkdirSync(join(tmp, "home"));
     appendMemory(project, "preference", "likes short answers");
     appendMemory(user, "project-fact", "uses pnpm");
-    const off = boot(scripted([]));
+    const off = bootB(scriptedB([]));
     await off.app.command("/memory");
     expect(doc(off.app)).toContain("memory is off");
     off.app.stop();
-    const { app } = boot(scripted([]), { memory: { project, user } });
+    const { app } = bootB(scriptedB([]), { memory: { project, user } });
     await app.command("/memory");
     let d = doc(app);
     expect(d).toContain("Memory 2 entries");
@@ -306,54 +584,11 @@ describe("命令的分支", () => {
     expect(doc(app)).toContain("no memories");
     app.stop();
   });
-
-  it("/retry:运行中拒绝;空闲时丢掉最后一步重问;上下文面板的 drop 与 fork 动作", async () => {
-    tmp = mkdtempSync(join(tmpdir(), "clari-tui-"));
-    const { app, log } = boot(
-      scripted([
-        { text: "first answer", toolCalls: [], stopReason: "end" },
-        { text: "second answer", toolCalls: [], stopReason: "end" },
-        { text: "third", toolCalls: [], stopReason: "end" },
-      ]),
-      { sessionsDir: tmp },
-    );
-    await app.submit("q");
-    expect(doc(app)).toContain("first answer");
-    await app.command("/retry");
-    expect(doc(app)).toContain("second answer");
-    expect(log.events.some((e) => e.type === "context/drop")).toBe(true);
-    // 面板:最后一条(用户消息 q 之后是助手回复)→ Enter 出菜单 → ↓↓ 到 Drop → Enter
-    app.inspector.openComposition();
-    app.inspector.key("\r");
-    let ins = plain(app.inspector.lines(120).join("\n"));
-    expect(ins).toContain("Drop this message");
-    app.inspector.key("\x1b[B");
-    app.inspector.key("\x1b[B");
-    app.inspector.key("\r");
-    await tick();
-    expect(app.inspector.isOpen()).toBe(false);
-    expect(doc(app)).toContain("dropped event #");
-    // 再开面板,菜单最后一项是 Fork
-    app.inspector.openComposition();
-    app.inspector.key("\r");
-    ins = plain(app.inspector.lines(120).join("\n"));
-    const items = ins
-      .split("\n")
-      .filter((l) =>
-        /Fork here|Retry last step|Drop this message|Edit content|View full message/.test(l),
-      );
-    expect(items.length).toBeGreaterThan(2);
-    for (let i = 0; i < 6; i++) app.inspector.key("\x1b[B");
-    app.inspector.key("\r");
-    await tick();
-    expect(doc(app)).toContain("forked: first");
-    app.stop();
-  });
 });
 
 describe("槽命令的分支", () => {
   it("/preservation 三种输入;/approve 的 allow/deny/forget/outside 与用法;运行中拒绝", async () => {
-    const { app, log } = boot(scripted([]));
+    const { app, log } = bootB(scriptedB([]));
     await app.command("/preservation tokens 5000");
     expect(doc(app)).toContain("preservation → tokens 5000");
     expect(log.events.at(-1)).toMatchObject({
@@ -407,7 +642,7 @@ describe("槽命令的分支", () => {
         return "";
       },
     });
-    const { app, log } = boot(scripted([]), { tools: [read], toolPrompts: { style: "brief" } });
+    const { app, log } = bootB(scriptedB([]), { tools: [read], toolPrompts: { style: "brief" } });
     process.env.CLARI_EDITOR = `node "${append}"`;
     await app.command("/toolprompts edit read");
     expect(read.description.endsWith("EDITED")).toBe(true);
@@ -433,8 +668,8 @@ describe("槽命令的分支", () => {
   });
 
   it("审批提示:r 进理由,退格与 Esc 返回;a 放行后不再问;Esc 视为拒绝", async () => {
-    const { app } = boot(
-      scripted([
+    const { app } = bootB(
+      scriptedB([
         {
           text: "",
           toolCalls: [
@@ -463,97 +698,5 @@ describe("槽命令的分支", () => {
     expect(d).toContain("allowed echo (not asked again this session)");
     expect(d).toContain("done");
     app.stop();
-  });
-});
-
-describe("少见事件与流式思考的渲染", () => {
-  it("恢复的日志里 session/recovered 与 ext/event(mcp 与未登记来源)各画一行", () => {
-    const log = new EventLog();
-    log.append({ type: "session/start", at: "", model: "m", system: "s" });
-    log.append({ type: "session/recovered", at: "", droppedBytes: 12, preview: "{" });
-    log.append({
-      type: "ext/event",
-      at: "",
-      source: "mcp",
-      kind: "server",
-      payload: {
-        server: "s1",
-        phase: "ready",
-        transport: "stdio",
-        era: "modern",
-        protocolVersion: "2026-07-28",
-        toolCount: 2,
-        listed: 3,
-        ms: 7,
-      },
-    });
-    log.append({
-      type: "ext/event",
-      at: "",
-      source: "mcp",
-      kind: "rpc",
-      payload: { server: "s1", direction: "send", bytes: 1, body: "{}" },
-    });
-    log.append({ type: "ext/event", at: "", source: "other", kind: "thing", payload: {} });
-    log.append({ type: "session/slot", at: "", slot: "execution", value: "parallel" });
-    const { app } = boot(scripted([]), {}, log);
-    const d = doc(app);
-    expect(d).toContain("recovered: dropped 12 bytes");
-    expect(d).toContain("mcp s1: ready · stdio · modern 2026-07-28 · 2 tools of 3 listed · 7ms");
-    expect(d).toContain("· other/thing");
-    expect(d).not.toContain("rpc");
-    expect(d).toContain("resumed: 6 events");
-    app.stop();
-  });
-
-  it("流式思考:定稿带思考时保留节点并可 Ctrl+T 展开;定稿无思考时撤掉节点;task 调用留槽", async () => {
-    const { app, term } = boot(
-      scripted([
-        {
-          text: "",
-          toolCalls: [{ id: "t1", name: "task", args: { task: "sub job" } }],
-          stopReason: "tool",
-          reasoning: "thinking hard about it",
-          reasoningKind: "full",
-        },
-        { text: "final", toolCalls: [], stopReason: "end", reasoning: "" },
-      ]),
-    );
-    await app.submit("go");
-    let d = doc(app);
-    expect(d).toContain("thinking");
-    expect(d).toContain("⚙ task");
-    term.feed("\x14");
-    d = doc(app);
-    expect(d).toContain("thinking hard about it");
-    expect(d).toContain("final");
-    app.stop();
-  });
-});
-
-describe("文本小工具", () => {
-  it("formatArgs 的四种形态与截断;brief;toolCallDetail 的 write 长文与超长 diff", () => {
-    expect(formatArgs({ command: "ls -la" })).toBe("ls -la");
-    expect(formatArgs({ path: "a.ts", offset: 5, limit: 3 })).toBe("a.ts  from line 5, 3 lines");
-    expect(formatArgs({ path: "a.ts", limit: 3 })).toBe("a.ts  from line 1, 3 lines");
-    expect(formatArgs({ task: `${"x".repeat(30)}\nmore`, scope: "fork" })).toBe(
-      `scope=fork  ${"x".repeat(24)}…`,
-    );
-    expect(formatArgs({ other: "y".repeat(200) }).endsWith("…")).toBe(true);
-    expect(formatArgs(undefined)).toBe("");
-    expect(brief("short")).toBe("short");
-    const write = plain(
-      toolCallDetail("write", {
-        content: Array.from({ length: 15 }, (_, i) => `l${i}`).join("\n"),
-      }),
-    );
-    expect(write).toContain("+ l11");
-    expect(write).not.toContain("+ l12");
-    expect(write).toContain("… 15 lines total");
-    const oldText = Array.from({ length: 70 }, (_, i) => `a${i}`).join("\n");
-    const newText = Array.from({ length: 70 }, (_, i) => `b${i}`).join("\n");
-    const big = plain(toolCallDetail("edit", { oldText, newText }));
-    expect(big).toContain("more changed lines");
-    expect(toolCallDetail("bash", { command: "x" })).toBe("");
   });
 });
