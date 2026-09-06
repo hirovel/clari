@@ -144,7 +144,7 @@ function save(name: string, title: string, lines: string[]) {
 }
 
 scene = "1";
-// ---------- 1 卡片与工具描述档 ----------
+// ---------- 1 对话流与工具描述档 ----------
 {
   const provider = scripted([
     {
@@ -167,7 +167,7 @@ scene = "1";
       stopReason: "end",
       usage: { inputTokens: 4120, outputTokens: 188, cacheReadTokens: 2800 },
     },
-    { text: "Descriptions changed; the request card marks the tool definitions as changed.", toolCalls: [], stopReason: "end", usage: { inputTokens: 4300, outputTokens: 20 } },
+    { text: "Descriptions changed; the next request carries the new definitions.", toolCalls: [], stopReason: "end", usage: { inputTokens: 4300, outputTokens: 20 } },
   ]);
   const { app } = boot(provider, { toolPrompts: { style: "explain" } });
   await app.submit("Why does the queue-mode test fail?");
@@ -177,7 +177,7 @@ scene = "1";
   await app.command("/toolprompts brief");
   await app.command("/tools");
   await app.submit("Say one line.");
-  shots.push(...divider("after /toolprompts brief: /tools and a request card with changed tool definitions"), ...app.lines(W).slice(-26));
+  shots.push(...divider("after /toolprompts brief: /tools with the new token totals"), ...app.lines(W).slice(-26));
   app.stop();
   save("1-cards", "1 Cards, thinking, tool results, description levels", shots);
 }

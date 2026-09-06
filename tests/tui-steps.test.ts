@@ -39,6 +39,11 @@ function boot(extra: Record<string, unknown> = {}) {
   return { app, term, doc };
 }
 
+/** 展开的回复正文:从正文列起(边距一格 + 标记列两格);折起的账目行里同样的字前面是 · 。 */
+function open(n: number): RegExp {
+  return new RegExp(`^ {3}reply number ${n}(?!\\d)`, "m");
+}
+
 describe("账簿折叠", () => {
   it("最新三步展开,更早的折成一行账目;用户消息永远不折", async () => {
     const { app, doc } = boot();
@@ -47,10 +52,10 @@ describe("账簿折叠", () => {
     expect(d).toContain("≡ #1");
     expect(d).toContain("≡ #2");
     expect(d).not.toContain("≡ #3");
-    expect(d).not.toContain("reply      reply number 1");
-    expect(d).not.toContain("reply      reply number 2");
-    expect(d).toContain("reply      reply number 3");
-    expect(d).toContain("reply      reply number 5");
+    expect(d).not.toMatch(open(1));
+    expect(d).not.toMatch(open(2));
+    expect(d).toMatch(open(3));
+    expect(d).toMatch(open(5));
     // 账目里有停止原因、用量与回复首行;用户消息还在
     expect(d).toMatch(/≡ #1 {2}end · ↑100 ↓10 · reply number 1/);
     for (let i = 1; i <= 5; i++) expect(d).toContain(`› question ${i}`);
@@ -69,10 +74,10 @@ describe("账簿折叠", () => {
     expect(doc()).toContain("▸ #1"); // 折起的账目行带光标
     term.feed("\r"); // 展开
     let d = doc();
-    expect(d).toContain("reply      reply number 1");
+    expect(d).toMatch(open(1));
     expect(d).not.toContain("▸ #1");
     term.feed("\r"); // 再折起
-    expect(doc()).not.toContain("reply      reply number 1");
+    expect(doc()).not.toMatch(open(1));
     term.feed("\r"); // 展开并 pin
     term.feed("\x1b[6~"); // PgDn → step 2
     expect(doc()).toContain("step 2/4");
@@ -81,7 +86,7 @@ describe("账簿折叠", () => {
     await app.submit("q 5");
     // #1 手动展开过,不再自动折;#2 被折
     d = doc();
-    expect(d).toContain("reply      reply number 1");
+    expect(d).toMatch(open(1));
     expect(d).toContain("≡ #2");
     app.stop();
   });
@@ -91,7 +96,7 @@ describe("账簿折叠", () => {
     for (let i = 1; i <= 5; i++) await app.submit(`q ${i}`);
     const d = doc();
     expect(d).not.toContain("≡ #");
-    expect(d).toContain("reply      reply number 1");
+    expect(d).toMatch(open(1));
     expect(d).toMatch(/[▁▂▃▄▅▆▇█]{5}/);
     app.stop();
   });

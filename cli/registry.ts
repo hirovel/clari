@@ -264,7 +264,7 @@ export function describeInferred(inf: Inferred): string {
   ].join(" · ");
 }
 
-function fmtWindow(n: number): string {
+export function fmtWindow(n: number): string {
   return n >= 1_000_000 ? `${Math.round(n / 100_000) / 10}M` : `${Math.round(n / 1024)}k`;
 }
 

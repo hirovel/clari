@@ -1,7 +1,6 @@
 // 现代终端能力:备用屏布局真的画到了 xterm 的备用缓冲区;焦点事件与通知;/copy 的 OSC 52;
-// 路径的 OSC 8 链接;窄屏的短标签;流式合帧;提示标记在整行最前。
+// 路径的 OSC 8 链接;流式合帧;提示标记在整行最前。
 import { describe, expect, it } from "vitest";
-import { gutter, setCompact, shortLabel } from "../cli/layout.js";
 import { fileUrl, osc8, PROMPT_MARK } from "../cli/terminal-extras.js";
 import { createTuiApp } from "../cli/tui-app.js";
 import { Block } from "../cli/tui-block.js";
@@ -137,18 +136,7 @@ describe("通知、标题、剪贴板、链接", () => {
   });
 });
 
-describe("窄屏与合帧", () => {
-  it("80 列以下标签沟缩到 7,长标签用短形;回到宽屏恢复", () => {
-    setCompact(70);
-    expect(gutter()).toBe(7);
-    expect(shortLabel("messages")).toBe("msgs");
-    expect(shortLabel("thinking")).toBe("think");
-    expect(shortLabel("changed")).toBe("changed");
-    setCompact(120);
-    expect(gutter()).toBe(9);
-    expect(shortLabel("messages")).toBe("messages");
-  });
-
+describe("合帧", () => {
   it("流式增量按帧合并:一帧内的多段只落一次屏,结束时全文到位", async () => {
     const term = new VirtualTerminal(100, 24);
     const log = new EventLog();
@@ -173,7 +161,7 @@ describe("窄屏与合帧", () => {
     await app.submit("go");
     await tick();
     const doc = app.lines(100).map(stripAnsi).join("\n");
-    expect(doc).toContain("reply      abcd");
+    expect(doc).toMatch(/^ {3}abcd\b/m);
     app.stop();
   });
 });

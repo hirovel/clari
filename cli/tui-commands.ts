@@ -778,7 +778,7 @@ export function codeBlocks(text: string): string[] {
 /** /copy [N]:把上一条回复(或它的第 N 个代码块)写进系统剪贴板(OSC 52)。 */
 function copyCommand(ctx: TuiContext, arg: string): string {
   const last = [...ctx.log.events].reverse().find((e) => e.type === "assistant/message" && e.text);
-  if (!last || last.type !== "assistant/message") return c.zhu("nothing to copy yet");
+  if (last?.type !== "assistant/message") return c.zhu("nothing to copy yet");
   let text = last.text;
   let what = "the last reply";
   if (arg.trim()) {

@@ -64,6 +64,8 @@ export const G = {
   running: "●",
   idle: "○",
   ask: "?",
+  edited: "✎",
+  fold: "≡",
 } as const;
 
 export const selectListTheme: SelectListTheme = {

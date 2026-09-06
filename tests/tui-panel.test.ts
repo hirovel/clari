@@ -196,9 +196,10 @@ describe("上下文面板的动作与后果", () => {
     await app.submit("second");
     doc = plain(app.lines(120).join("\n"));
     expect(doc).not.toContain("Ask anything");
-    expect(doc).toContain("Request #2");
-    expect(doc).toContain("+2 new");
-    expect(doc).toContain("reply");
+    expect(doc).toContain("› second");
+    // 直印:正常追加不印变化说明,没有请求卡
+    expect(doc).not.toContain("Request #");
+    expect(doc).not.toContain("recomputed");
 
     // Ctrl+E → 上下文面板;选最后一条(事件 #6,request 事件也占号)→ Enter 出菜单;↓ 到 Edit 看后果。
     app.inspector.openComposition();

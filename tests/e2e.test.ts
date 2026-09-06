@@ -188,7 +188,11 @@ describe("端到端(假服务器)", () => {
       "≈ compacted (llmSummarize(structuredFull, replay)): summary covers events",
     );
     expect(doc).toContain("完成:文件已看过");
-    expect(doc).toMatch(/Response #\d+ .*in 900 \(estimated ≈\S+ · cache 600 · 67%/);
+    // 直印:失败的请求一行 ✗,溢出重发一行 ≈;用量不进正文(命中 67% 不低,不出声)
+    expect(doc).toContain("✗ request #2 failed  overflow · HTTP 400");
+    expect(doc).toContain("≈ overflow retry");
+    expect(doc).not.toContain("Response #");
+    expect(doc).not.toContain("expected ≤");
     expect(doc).toContain("○ idle");
 
     // 检视器视角:四条记录,压缩请求有自己的一行,接收分区有原始流

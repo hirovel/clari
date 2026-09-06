@@ -14,6 +14,9 @@ import type { SubagentApproval, SubagentType } from "./subagent.js";
 import type { DescriptionLevel } from "./tools.js";
 
 /** 每百万 token 的价格(美元)。缺哪项就不计哪项;整个缺省 = 不显示费用。 */
+/** 工具结果在对话流里的可见度:count 只报行数,head 前几行,tail 后几行,all 全部。 */
+export type ResultView = "count" | "head" | "tail" | "all";
+
 export type ModelPrice = {
   input: number;
   output: number;
@@ -120,6 +123,8 @@ export type Preset = {
   fold?: boolean;
   /** 折叠时保留的结果行数;缺省 5。 */
   foldLines?: number;
+  /** 每个工具的结果可见度:count 只报行数,head 前几行,tail 后几行,all 全部;没写的工具按 head。 */
+  results?: Record<string, ResultView>;
   /** 账簿:保持展开的最新步数,更早的折成一行;缺省 3,0 = 从不自动折。 */
   foldSteps?: number;
   /** 屏幕模式:alt(缺省,备用屏,头尾固定、自己滚、鼠标、搜索)| main(主屏,保留终端回滚)。 */
@@ -214,6 +219,14 @@ export const CONFIG_TEMPLATE: KernelConfig = {
     trace: true,
     fold: true,
     foldLines: 5,
+    results: {
+      read: "count",
+      edit: "count",
+      write: "count",
+      glob: "count",
+      grep: "count",
+      bash: "tail",
+    },
     foldSteps: 3,
     screen: "alt",
     notify: "unfocused",

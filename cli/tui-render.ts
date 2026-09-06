@@ -1,27 +1,24 @@
 // 呈现:UI 是事件流的订阅者。每条事件到屏幕的映射都在 render 里;历史回放与新事件走同一个函数。
+// 对话流直印:用户、回复、调用、结果;记账不进正文,只在上下文发生了别的工具看不见的事时多一行说明。
 // 这里还有子 agent 视图、流式回复与思考的增量绘制、折叠/展开两个显示开关。
 import { type Component, Container, Markdown, Spacer } from "@earendil-works/pi-tui";
 import type { AgentEvent } from "../src/events.js";
 import { type Composition, composeContext, type Message } from "../src/messages.js";
-import { parseEffort } from "../src/provider.js";
 import { classifyError, type ErrorKind, hintFor } from "../src/providers/errors.js";
 import type { ChildInfo } from "../src/subagent.js";
 import {
+  cacheNote,
   callLine,
-  cont,
+  changeNote,
   errorCardLines,
-  paramsLine,
   predictedCache,
-  rawRow,
-  receiveBlockLines,
-  receiveHead,
   resultLines,
-  sendCardLines,
+  resultView,
   unchangedPrefix,
+  userLine,
 } from "./cards.js";
 import { renderExtEvent } from "./ext-events.js";
 import { fmtMs, fmtTok, messagesFor } from "./inspector.js";
-import { gutter, setCompact, shortLabel } from "./layout.js";
 import { PROMPT_MARK } from "./terminal-extras.js";
 import { c, G, markdownTheme } from "./theme.js";
 import { Block } from "./tui-block.js";
@@ -36,22 +33,25 @@ import {
 import { formatArgs, toolCallDetail } from "./tui-format.js";
 import { autoFold, beginStep } from "./tui-steps.js";
 
+/** 散文的最大行宽(列):再宽的屏幕上一行也不超过它,读起来不累;代码与工具输出不受它管。 */
+export const PROSE_WIDTH = 96;
+/** 正文列:标记列两格。 */
+const CONTENT = "  ";
+
 /** 工具结果的屏幕文本。折叠只是显示状态,内容原封不动留在节点里。 */
 export function resultText(ctx: TuiContext, r: ResultRecord): string {
-  return resultLines(r, { folded: ctx.view.foldResults, head: ctx.view.foldLines }).join("\n");
+  return resultLines(r, {
+    folded: ctx.view.foldResults,
+    head: ctx.view.foldLines,
+    view: resultView(ctx.view.results, r.name),
+  }).join("\n");
 }
 
-/**
- * 带标签的 Markdown:标签占标签沟,正文从内容列起,首行与标签同一行。
- * 流式回复与回放都用它;setText 换正文,标签不动。
- */
-export class LabeledMarkdown implements Component {
+/** 回复的 Markdown:从正文列起,行宽封顶 PROSE_WIDTH。流式回复与回放都用它;setText 换正文。 */
+export class ReplyMarkdown implements Component {
   private readonly md: Markdown;
 
-  constructor(
-    private readonly label: string,
-    text = "",
-  ) {
+  constructor(text = "") {
     this.md = new Markdown(text, 0, 0, markdownTheme, { color: c.ink });
   }
 
@@ -64,12 +64,8 @@ export class LabeledMarkdown implements Component {
   }
 
   render(width: number): string[] {
-    const g = gutter();
-    const inner = Math.max(10, width - g - 4);
-    const lines = this.md.render(inner);
-    const first = ` ${c.faint(shortLabel(this.label).padEnd(g))}  `;
-    const rest = ` ${" ".repeat(g)}  `;
-    return lines.map((l, i) => (i === 0 ? first : rest) + l);
+    const inner = Math.max(10, Math.min(PROSE_WIDTH, width - 4));
+    return this.md.render(inner).map((l) => ` ${CONTENT}${l}`);
   }
 }
 
@@ -112,11 +108,11 @@ function flushStream(ctx: TuiContext): void {
   ctx.tui.requestRender();
 }
 
-/** 流式回复正文:一行 reply 标签,正文缩进到标签沟的内容列,Markdown 照常渲染。增量按帧合并。 */
+/** 流式回复正文:直接印,Markdown 照常渲染。增量按帧合并。 */
 export function streamDelta(ctx: TuiContext, d: string): void {
   const v = ctx.view;
   if (!v.streaming) {
-    v.streaming = new LabeledMarkdown("reply");
+    v.streaming = new ReplyMarkdown();
     ctx.transcript.addChild(v.streaming);
     v.streamBuffer = d;
     flushStream(ctx);
@@ -136,29 +132,6 @@ export function streamReasoning(ctx: TuiContext, d: string): void {
   v.reasoningBuffer += d;
   v.reasoningView.setText(ctx.renderReasoning(v.reasoningBuffer));
   ctx.tui.requestRender();
-}
-
-/** 更新某次请求的接收卡头行;n 是它的请求序号。 */
-export function setReceiveHead(
-  ctx: TuiContext,
-  requestIndex: number,
-  n: number,
-  fill: Partial<Parameters<typeof receiveHead>[0]>,
-): void {
-  const node = ctx.req.receiveHeads.get(requestIndex);
-  const req = ctx.log.events[requestIndex];
-  if (!node || req?.type !== "request") return;
-  const price = ctx.priceFor(req.model);
-  const predicted = ctx.req.predictedAt.get(requestIndex);
-  node.setText(
-    receiveHead({
-      n,
-      estimated: req.estimatedTokens,
-      ...(price && { price }),
-      ...(predicted !== undefined && { predictedCache: predicted }),
-      ...fill,
-    }),
-  );
 }
 
 // ---------- 子 agent 视图 ----------
@@ -326,9 +299,10 @@ function renderUser(ctx: TuiContext, text: string): void {
     ctx.root.removeChild(ctx.view.firstRun);
     ctx.view.firstRun = undefined;
   }
-  // 用户消息:朱色 › 起头,正文加粗,整块一条底带;续行缩到 › 之后。
+  // 提示标记(OSC 133;A)贴在用户消息上:备用屏里 Ctrl+↑ / Ctrl+↓ 在提问之间跳。
   ctx.transcript.addChild(new Spacer(1));
-  ctx.transcript.addChild(new Block(`${c.zhu(G.you)} ${c.bold(c.ink(text))}`, { bg: c.band }));
+  ctx.transcript.addChild(new Block(PROMPT_MARK + userLine(text)));
+  ctx.view.afterUser = true;
 }
 
 function renderAssistant(
@@ -336,8 +310,6 @@ function renderAssistant(
   e: Extract<AgentEvent, { type: "assistant/message" }>,
 ): void {
   const { view: v, transcript, req } = ctx;
-  // 接收卡头行:停止原因、耗时、实测用量、缓存命中率、费用。
-  setReceiveHead(ctx, req.lastTurnIndex, req.count, { response: e });
   if (v.reasoningView) {
     if (e.reasoning) {
       v.reasoningView.setText(ctx.renderReasoning(e.reasoning, e.reasoningKind));
@@ -366,20 +338,26 @@ function renderAssistant(
     v.streaming = undefined;
     v.streamBuffer = "";
   } else if (e.text) {
-    transcript.addChild(new LabeledMarkdown("reply", e.text));
+    transcript.addChild(new ReplyMarkdown(e.text));
   }
-  if (e.usage) v.lastUsage = e.usage;
+  if (e.usage) {
+    v.lastUsage = e.usage;
+    // 缓存命中明显低于预计才说一句;正常命中不出声。
+    const note = cacheNote(e.usage, req.predictedAt.get(req.lastTurnIndex));
+    if (note) transcript.addChild(new Block(note));
+  }
   for (const tc of e.toolCalls) {
     transcript.addChild(new Block(callLine(tc.name, formatArgs(tc.args))));
-    // edit/write 的改动内容直接可见:diff 从参数算出,不进日志。续行缩进到内容列。
+    // edit/write 的改动内容直接可见:diff 从参数算出,不进日志。代码不折行,超宽截断。
     const detail = toolCallDetail(tc.name, tc.args);
     if (detail) {
       transcript.addChild(
         new Block(
           detail
             .split("\n")
-            .map((l) => cont(l))
+            .map((l) => CONTENT + l)
             .join("\n"),
+          { truncate: true },
         ),
       );
     }
@@ -390,27 +368,20 @@ function renderAssistant(
       transcript.addChild(slot);
     }
   }
-  // 响应里除思考与文本之外的块:私有回传物(签名思考块、加密推理项)。
-  for (const l of receiveBlockLines(e)) transcript.addChild(new Block(l));
-  // 原始流缺省开:每张接收卡尾行说明收了几行、去哪看。
-  if (ctx.deps.trace) {
-    const raw = req.rawAt.get(req.lastTurnIndex);
-    if (raw) transcript.addChild(new Block(rawRow(raw.length, req.count)));
-  }
   if (e.stopReason === "aborted") ctx.note(c.faint("— interrupted —"));
   if (e.stopReason === "length")
     ctx.note(c.zhu("· output truncated; the model was asked to resend"));
 }
 
 function renderToolResult(ctx: TuiContext, e: Extract<AgentEvent, { type: "tool/result" }>): void {
-  // 默认完整显示,不折叠;Ctrl+O 切换折叠,内容仍在节点里。
+  // 可见度按工具定(配置 results);Ctrl+O 切换折叠,内容仍在节点里。工具输出不折行,超宽截断。
   const rec: ResultRecord = {
     name: e.name,
     content: e.content,
     isError: e.isError,
     ...(e.durationMs !== undefined && { durationMs: e.durationMs }),
   };
-  const node = new Block(resultText(ctx, rec));
+  const node = new Block(resultText(ctx, rec), { truncate: true });
   ctx.view.resultNodes.push({ node, ...rec });
   ctx.transcript.addChild(node);
   const child = ctx.children.views.find((v) => v.info.callId === e.callId && v.running);
@@ -418,8 +389,8 @@ function renderToolResult(ctx: TuiContext, e: Extract<AgentEvent, { type: "tool/
 }
 
 /**
- * 发送卡(可见性的核心):这次实际发出的消息(正常步 = 之前事件的投影;摘要请求 = 记录的 body),
- * 与上一次正常步比出"未变 / 新增",参数来自 provider.wire,与线路正文同源。
+ * 请求:开一步,投影出这次实际发出的消息(正常步 = 之前事件的投影;摘要请求 = 记录的 body),
+ * 与上一次正常步比;有别的工具看不见的变化才印一行说明。全文永远在检视器。
  */
 function renderRequest(ctx: TuiContext, e: Extract<AgentEvent, { type: "request" }>): void {
   const { log, agent, req } = ctx;
@@ -433,8 +404,10 @@ function renderRequest(ctx: TuiContext, e: Extract<AgentEvent, { type: "request"
   ctx.view.pulse.push(threshold > 0 ? e.estimatedTokens / threshold : 0);
   if (ctx.view.pulse.length > PULSE_STEPS) ctx.view.pulse.shift();
   const transcript = ctx.transcript;
+  // 步与步之间一个空行;用户消息前面已经有了。
+  if (!ctx.view.afterUser) transcript.addChild(new Spacer(1));
+  ctx.view.afterUser = false;
   // 来历:正常步的正文就是之前事件的投影,每条都能对回事件号;摘要请求的正文由策略记的 body 重建,没有来历。
-  // 一次投影同时给消息与来历,不再算两遍。
   let messages: Message[];
   let provenance: Composition["provenance"] | undefined;
   if (e.body) {
@@ -450,68 +423,36 @@ function renderRequest(ctx: TuiContext, e: Extract<AgentEvent, { type: "request"
     messages = comp.messages;
     provenance = comp.provenance;
   }
-  const activeDefs = ctx.defs().filter((d) => e.tools.includes(d.name));
-  setCompact(ctx.deps.terminal.columns);
-  const level = e.effort ? parseEffort(e.effort) : undefined;
-  const wire = agent.provider.wire?.(messages, activeDefs, level ? { effort: level } : {});
-  const start = log.events.find((x) => x.type === "session/start");
-  const toolSig = JSON.stringify(activeDefs);
-  transcript.addChild(new Spacer(1));
-  const cardLines = sendCardLines({
+  const note = changeNote({
     n: req.count,
     request: e,
     messages,
     ...(req.lastSent && { previous: req.lastSent }),
-    ...(wire !== undefined && { wire }),
-    ...(req.lastParams !== undefined && { previousParams: req.lastParams }),
-    defs: activeDefs,
-    ...(start?.type === "session/start" && start.sections && { sections: start.sections }),
     ...(provenance && { provenance }),
-    width: Math.max(24, ctx.deps.terminal.columns - 52),
-    toolsUnchanged: toolSig === req.lastToolSig,
-    // 回放历史:不是最后一次的请求卡马上会折成两行,只画那两行。
-    collapsed: req.lastIndex < req.finalRequestIndex,
     dropsThinking: agent.provider.fields?.protocol.startsWith("anthropic") ?? false,
     ...(ctx.model.info.capabilitySource && { limitSource: ctx.model.info.capabilitySource }),
+    contextWindow: ctx.model.contextWindow,
   });
-  // 旧的 Request 卡折成两行(头 + changed,):当步的信息在新卡上,全文永远在检视器。
-  if (req.lastCard) req.lastCard.node.setText(req.lastCard.lines.slice(0, 2).join("\n"));
-  // 每张请求卡的头行带提示标记:备用屏里 Ctrl+↑ / Ctrl+↓ 一步一跳。
-  cardLines[0] = PROMPT_MARK + cardLines[0];
-  const cardNode = new Block(cardLines.join("\n"));
-  req.lastCard = { node: cardNode, lines: cardLines };
-  transcript.addChild(cardNode);
+  if (note) transcript.addChild(new Block(note));
   req.predictedAt.set(
     req.lastIndex,
     predictedCache(req.lastSent, messages, unchangedPrefix(req.lastSent, messages)),
   );
-  req.lastToolSig = toolSig;
-  req.lastParams = paramsLine(wire);
   if (e.reason === "compaction") req.lastCompactionIndex = req.lastIndex;
   else {
     req.lastTurnIndex = req.lastIndex;
     req.lastSent = messages;
   }
-  // 接收卡头行先占位,响应到了再填。思考与正文节点随后接在它下面。
-  const headNode = new Block("");
-  req.receiveHeads.set(req.lastIndex, headNode);
-  transcript.addChild(headNode);
-  setReceiveHead(ctx, req.lastIndex, req.count, {});
 }
 
 function renderRequestError(
   ctx: TuiContext,
   e: Extract<AgentEvent, { type: "request/error" }>,
 ): void {
-  // 接收卡头行标成失败,下面画错误卡:分类、供应商原话、下一步、原始体在哪。
   const { req, log } = ctx;
   const info = ctx.model.info;
   const request = log.events[req.lastIndex];
   const kind = (e.kind ?? classifyError(new Error(e.error))) as ErrorKind;
-  // 头行只写分类与状态码;原话与下一步在错误卡里,不重复。
-  setReceiveHead(ctx, req.lastIndex, req.count, {
-    error: `${kind}${e.status !== undefined ? ` · HTTP ${e.status}` : ""}`,
-  });
   const lines = errorCardLines(e, {
     n: req.count,
     providerName: info.providerName,
@@ -522,13 +463,6 @@ function renderRequestError(
 }
 
 function renderCompaction(ctx: TuiContext, e: Extract<AgentEvent, { type: "compaction" }>): void {
-  const { req, log } = ctx;
-  if (e.usage) {
-    const n = log.events
-      .slice(0, req.lastCompactionIndex + 1)
-      .filter((x) => x.type === "request").length;
-    setReceiveHead(ctx, req.lastCompactionIndex, n, { compaction: e });
-  }
   const parts: string[] = [];
   if (e.summary !== undefined)
     parts.push(`summary covers events ${e.coversFrom ?? 1}-${e.coversUpTo}`);

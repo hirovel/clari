@@ -130,10 +130,9 @@ describe("raw 缺省开;/raw N;/tools", () => {
 
     await app.submit("hi");
     doc = plain(app.lines(120).join("\n"));
-    expect(doc).toContain("extras");
-    expect(doc).toContain("id x1 · finish_reason stop");
-    expect(doc).toContain("raw");
-    expect(doc).toContain("2 lines as received · /raw 1");
+    // 供应商元数据与原始流不进对话流,在检视器的接收分区
+    expect(doc).not.toContain("finish_reason");
+    expect(doc).not.toContain("as received");
 
     await app.command("/raw 9");
     expect(plain(app.lines(120).join("\n"))).toContain("No request #9");

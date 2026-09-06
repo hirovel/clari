@@ -1,21 +1,22 @@
-// 主屏的文本块:和 pi-tui 的 Text 一样是多行文本,只多一件事,续行悬挂缩进。
-// 标签沟版式里正文从第 12 列起,pi-tui 的换行会把折下来的部分顶回第 0 列;
-// 这里按每行的形态算出缩进列(标签行 11,子 agent 引导行 4,记号行 2,其余照前导空格),折行后补齐。
-// 可选底色:用户消息的底带,整行铺满到终端宽度。
+// 主屏的文本块:和 pi-tui 的 Text 一样是多行文本,只多两件事:续行悬挂缩进,以及可选的不折行截断。
+// 标记列版式里正文从第 2 列起,pi-tui 的换行会把折下来的部分顶回第 0 列;
+// 这里按每行的形态算出缩进列(记号行 2,子 agent 引导行 4,其余照前导空格),折行后补齐。
+// 截断模式给代码与工具输出:折行的代码比截断的更难读,超宽的行切到宽度并以 … 收尾。
+// 可选底色:整行铺满到终端宽度。
 import {
   type Component,
   sliceByColumn,
   stripTerminalSequences,
+  truncateToWidth,
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import { gutter } from "./layout.js";
 import { PROMPT_MARK } from "./terminal-extras.js";
 import { c } from "./theme.js";
 
 const GUIDE_PLAIN = "  ┆ ";
-/** 行首记号:用户消息、调用、结果、提示。续行缩到记号之后。 */
-const MARK = /^[›⚙✓✗◇?●•·] /;
+/** 行首记号:用户、调用、结果、思考与说明、上下文变化、编辑、失败、折起的步、光标。续行缩到记号之后。 */
+const MARK = /^[›»└✓✗≈✎≡▸◇?●•·] /;
 
 /** 一行的悬挂缩进列数。 */
 export function hangingIndent(plain: string): number {
@@ -23,9 +24,6 @@ export function hangingIndent(plain: string): number {
   const leading = plain.length - plain.trimStart().length;
   if (leading > 0) return leading;
   if (MARK.test(plain)) return 2;
-  // 标签行:前 9 列(窄屏 7 列)是标签,紧接两个空格,正文从其后起。
-  const g = gutter();
-  if (plain.length > g + 2 && plain.slice(g, g + 2) === "  " && plain[0] !== " ") return g + 2;
   return 0;
 }
 
@@ -51,7 +49,7 @@ export class Block implements Component {
 
   constructor(
     text = "",
-    private readonly opts: { bg?: (s: string) => string; padX?: number } = {},
+    private readonly opts: { bg?: (s: string) => string; padX?: number; truncate?: boolean } = {},
   ) {
     this.text = text;
   }
@@ -75,7 +73,10 @@ export class Block implements Component {
         // 提示标记(OSC 133;A)要在整行最前面,备用屏按它跳步;剥下来,折行后再贴回首行。
         const marked = raw.startsWith(PROMPT_MARK);
         const body = marked ? raw.slice(PROMPT_MARK.length) : raw;
-        hangLine(body, inner).forEach((l, i) => {
+        const rows = this.opts.truncate
+          ? [truncateToWidth(body, inner, "…")]
+          : hangLine(body, inner);
+        rows.forEach((l, i) => {
           const line = margin + l;
           const pad = " ".repeat(Math.max(0, width - visibleWidth(line)));
           const full = this.opts.bg ? this.opts.bg(line + pad) : line + pad;

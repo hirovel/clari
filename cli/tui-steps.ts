@@ -1,14 +1,15 @@
-// 账簿:每次请求是一步,一步一个容器。最新几步全开,更早的自动折成一行账目(停止原因、调用数、用量、费用、回复首行);
+// 账簿:每次请求是一步,一步一个容器。最新几步全开,更早的自动折成一行账目(停止原因、调用、用量、缓存命中率、回复首行);
 // PgUp / PgDn 在步之间移动光标并把那一步滚到视野顶,Enter 展开或折起,Esc 放开光标。
 // 折叠只换屏幕上的节点,原节点留在内存里,展开就是放回去;日志一个字不动。
+// 费用不在这一行:它是算出来的,放在状态行的累计与检视器里。
 import { Container } from "@earendil-works/pi-tui";
-import { costOf, fmtCost } from "../src/cost.js";
 import type { AgentEvent } from "../src/events.js";
 import { firstLine } from "./cards.js";
 import { fmtTok } from "./inspector.js";
-import { c } from "./theme.js";
+import { c, G } from "./theme.js";
 import { Block } from "./tui-block.js";
 import type { StepView, TuiContext } from "./tui-context.js";
+import { formatArgs } from "./tui-format.js";
 
 /** 缺省保持展开的最新步数;配置 foldSteps,0 = 从不自动折。 */
 export const FOLD_STEPS = 3;
@@ -37,10 +38,10 @@ export function stepSummary(ctx: TuiContext, step: StepView): string {
   const req = events[step.requestIndex];
   let stop = "";
   let calls = 0;
-  let results = 0;
+  let firstCall = "";
   let input = 0;
   let output = 0;
-  let cost: number | undefined;
+  let cacheRead: number | undefined;
   let reply = "";
   let failed: string | undefined;
   let compacted = false;
@@ -50,26 +51,29 @@ export function stepSummary(ctx: TuiContext, step: StepView): string {
     if (e.type === "assistant/message") {
       stop = e.stopReason;
       calls += e.toolCalls.length;
+      const tc = e.toolCalls[0];
+      if (tc && !firstCall)
+        firstCall = `${G.call} ${tc.name} ${firstLine(formatArgs(tc.args), 40)}`;
       if (e.usage) {
         input += e.usage.inputTokens;
         output += e.usage.outputTokens;
-        const price = req?.type === "request" ? ctx.priceFor(req.model) : undefined;
-        if (price) cost = (cost ?? 0) + costOf(e.usage, price);
+        if (e.usage.cacheReadTokens !== undefined)
+          cacheRead = (cacheRead ?? 0) + e.usage.cacheReadTokens;
       }
       if (e.text && !reply) reply = firstLine(e.text, 50);
-    } else if (e.type === "tool/result") results += 1;
-    else if (e.type === "request/error") failed = e.kind ?? "error";
+    } else if (e.type === "request/error") failed = e.kind ?? "error";
     else if (e.type === "compaction") compacted = true;
   }
   const kind = req?.type === "request" && req.reason === "compaction" ? "compaction" : stop || "…";
   const parts = [
     failed ? c.zhu(`✗ ${failed}`) : kind,
-    ...(calls > 0 ? [`${calls} call${calls === 1 ? "" : "s"}`] : []),
-    ...(results > 0 && results !== calls ? [`${results} results`] : []),
+    ...(calls > 1 ? [`${calls} calls`] : []),
     ...(input > 0 ? [`↑${fmtTok(input)} ↓${fmtTok(output)}`] : []),
-    ...(cost !== undefined ? [fmtCost(cost)] : []),
+    ...(cacheRead !== undefined && input > 0
+      ? [`cache ${Math.round((cacheRead / input) * 100)}%`]
+      : []),
     ...(compacted ? ["≈ compacted"] : []),
-    ...(reply ? [reply] : []),
+    ...(reply ? [reply] : firstCall ? [firstCall] : []),
   ];
   return parts.join(" · ");
 }
@@ -78,8 +82,8 @@ function summaryText(ctx: TuiContext, step: StepView, selected: boolean): string
   const head = `#${step.n}`;
   const body = stepSummary(ctx, step);
   return selected
-    ? `${c.ink("▸")} ${c.bold(c.ink(head))}  ${c.ink(body)}`
-    : `${c.faint("≡")} ${c.soft(head)}  ${c.faint(body)}`;
+    ? `${c.ink(G.cursor)} ${c.bold(c.ink(head))}  ${c.ink(body)}`
+    : `${c.faint(G.fold)} ${c.soft(head)}  ${c.faint(body)}`;
 }
 
 export function foldStep(ctx: TuiContext, step: StepView): void {

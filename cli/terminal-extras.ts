@@ -25,6 +25,7 @@ export function copySequence(text: string): string {
 
 /** 桌面通知:OSC 9(iTerm2、Windows Terminal 等)、OSC 777(rxvt、WezTerm 等),再加一声铃。 */
 export function notifySequence(title: string, body: string): string {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: 控制字符与分号会截断 OSC 串,必须换掉
   const safe = (s: string) => s.replace(/[\x00-\x1f;]/g, " ");
   return `\x1b]9;${safe(`${title}: ${body}`)}${BEL}\x1b]777;notify;${safe(title)};${safe(body)}${BEL}${BEL}`;
 }

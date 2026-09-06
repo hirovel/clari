@@ -1,16 +1,9 @@
-// 界面:卡片与屏幕渲染。完整 turn、请求卡与响应卡、折叠与思考、diff 预览、错误行、打断、
-// 少见事件与流式思考、changed 行与消息表、文本小工具。
+// 界面:直印的对话流。完整 turn、结果可见度与折叠、思考、diff 预览、错误行、打断、
+// 少见事件与流式思考、变化说明与缓存说明、文本小工具。
 import { rmSync } from "node:fs";
 import { Type } from "@sinclair/typebox";
 import { afterEach, describe, expect, it } from "vitest";
-import {
-  changedLine,
-  firstRunLines,
-  messageRows,
-  messageTableLines,
-  sendCardLines,
-  thinkingLines,
-} from "../cli/cards.js";
+import { cacheNote, changeNote, firstRunLines, messageMarks, thinkingLines } from "../cli/cards.js";
 import { createTuiApp, type TuiApp, type TuiAppDeps, type TuiSettings } from "../cli/tui-app.js";
 import { brief, formatArgs, toolCallDetail } from "../cli/tui-format.js";
 import { now } from "../src/events.js";
@@ -154,7 +147,7 @@ describe("屏幕:完整 turn、卡片、折叠、diff、错误、打断", () => 
     app.stop();
   });
 
-  it("每步一张请求卡与响应卡;Ctrl+O 折叠/展开工具结果;Ctrl+T 展开/收起思考", async () => {
+  it("直印:没有请求卡与响应卡;结果按可见度折叠,Ctrl+O 展开;思考一行,Ctrl+T 展开", async () => {
     const long = defineTool({
       name: "long",
       description: "",
@@ -191,23 +184,22 @@ describe("屏幕:完整 turn、卡片、折叠、diff、错误、打断", () => 
     });
     await app.submit("跑");
     let doc = text(app);
-    // 请求卡:头行、changed 行、messages 行(条数与合计);响应卡:头行与 usage 行(实测用量)。
-    expect(doc).toContain("Request #1");
-    expect(doc).toContain("first request · 2 messages");
-    expect(doc).not.toContain("messages   2 · ≈"); // 旧卡折成两行(头 + changed)
-    expect(doc).toContain("Response #1");
-    expect(doc).toContain("in 1.2k (estimated ≈");
-    expect(doc).toContain("Request #2");
-    expect(doc).toContain("messages   4 · ≈");
-    expect(doc).toContain("same       params · system · tools");
-    // 结果缺省折叠到 5 行:正文首行带 └,尾行说明还有多少与怎么展开。
-    expect(doc).toContain("└ 行1");
+    // 直印:正文里没有请求卡、响应卡、用量与费用;正常追加不印变化说明。
+    expect(doc).toContain("› 跑");
+    expect(doc).not.toContain("Request #");
+    expect(doc).not.toContain("Response #");
+    expect(doc).not.toContain("estimated");
+    expect(doc).not.toContain("recomputed");
+    expect(doc).toContain("» long");
+    // 未知工具按 head:头行(└ ✓ 名字 行数)加前 5 行,尾行说明还有多少与怎么展开。
+    expect(doc).toContain("└ ✓ long  10 lines");
+    expect(doc).toContain("行1");
     expect(doc).toContain("行5");
     expect(doc).not.toContain("行10");
     expect(doc).toContain("… +5 lines · Ctrl+O");
-    // 思考缺省折成一行:首行 + 种类与行数;第二行不显示。
-    expect(doc).toContain("thinking   先拿到输出");
-    expect(doc).toContain("(? · 2 lines · Ctrl+T)");
+    // 思考缺省折成一行:· 起头的淡斜体首句加行数;第二行不显示。
+    expect(doc).toContain("· 先拿到输出");
+    expect(doc).toContain("(2 lines · Ctrl+T)");
     expect(doc).not.toContain("再看结果");
 
     term.feed("\x0f"); // Ctrl+O
@@ -278,7 +270,7 @@ describe("屏幕:完整 turn、卡片、折叠、diff、错误、打断", () => 
     const { app } = boot(provider);
     await app.submit("x");
     const doc = text(app);
-    expect(doc).toContain("Request #1 failed");
+    expect(doc).toContain("✗ request #1 failed");
     expect(doc).toContain("网络断了");
     expect(doc).toContain("○ idle");
     app.stop();
@@ -372,8 +364,8 @@ describe("少见事件与流式思考的渲染", () => {
   });
 });
 
-describe("Request 卡:changed 行与消息表", () => {
-  it("第一次请求说 first request;之后按前缀比出 new / edited / summary,未变超过 3 条折叠", () => {
+describe("变化说明与缓存说明", () => {
+  it("只在有事时印:编辑、压缩、前缀重算、摘要请求、假设的窗口;第一次请求与正常追加不印", () => {
     const prev = [user("a"), assistant("b"), user("c"), assistant("d"), user("e")];
     const cur = [
       ...prev,
@@ -385,8 +377,7 @@ describe("Request 卡:changed 行与消息表", () => {
       event: i + 1,
       stages: i === 5 ? ["edited:text"] : i === 7 ? ["summary(covers #1–#3)"] : [],
     }));
-    const rows = messageRows(cur, prev, provenance);
-    expect(rows.map((r) => r.state)).toEqual([
+    expect(messageMarks(cur, prev, provenance).map((r) => r.state)).toEqual([
       "same",
       "same",
       "same",
@@ -396,11 +387,6 @@ describe("Request 卡:changed 行与消息表", () => {
       "new",
       "summary",
     ]);
-    const table = plain(messageTableLines(rows).join("\n"));
-    expect(table).toContain("…  3 unchanged");
-    expect(table).toContain("✎   6  assistant");
-    expect(table).toContain("+   7  user");
-    expect(table).toContain("≈   8  user");
     const request = {
       type: "request" as const,
       at: now(),
@@ -411,38 +397,66 @@ describe("Request 卡:changed 行与消息表", () => {
       estimatedTokens: 40,
       threshold: 1000,
     };
-    const changed = plain(
-      changedLine(
-        {
-          n: 2,
-          request,
-          messages: cur,
-          previous: prev,
-          defs: [],
-          toolsUnchanged: true,
-          provenance,
-        },
-        rows,
-      ),
-    );
-    expect(changed).toContain("+1 new");
+    const note = (input: Parameters<typeof changeNote>[0]) => plain(changeNote(input) ?? "");
+    // 编辑与压缩同时在:✎ 起头,写明改了哪条、压缩了几条、重算几条、缓存上限。
+    const changed = note({ n: 2, request, messages: cur, previous: prev, provenance });
+    expect(changed.startsWith("✎ ")).toBe(true);
     expect(changed).toContain("1 edited (#6)");
-    expect(changed).toContain("1 summary (#8)");
-    expect(changed).toContain("3 recomputed");
-    const first = plain(
-      sendCardLines({ n: 1, request, messages: cur, defs: [], toolsUnchanged: false }).join("\n"),
+    expect(changed).toContain("compacted · 1 summary");
+    expect(changed).toContain("→ 3 recomputed");
+    expect(changed).toMatch(/cache ≤\S+ of \S+/);
+    // 第一次请求、正常追加:不印。
+    expect(changeNote({ n: 1, request, messages: cur })).toBeUndefined();
+    expect(
+      changeNote({ n: 2, request, messages: [...prev, user("f")], previous: prev }),
+    ).toBeUndefined();
+    // 上次发过的消息没了(丢弃、回退):前缀重算,≈ 起头。
+    const broke = note({ n: 2, request, messages: prev.slice(0, 3), previous: prev });
+    expect(broke.startsWith("≈ ")).toBe(true);
+    expect(broke).toContain("prefix recomputed from #4");
+    // 摘要请求与溢出重发各一行;第一次请求时窗口是假设值多一行 ?。
+    expect(note({ n: 3, request: { ...request, reason: "compaction" }, messages: cur })).toContain(
+      "summary request · 8 messages",
     );
-    expect(first).toContain("Request #1");
-    expect(first).toContain("first request · 8 messages");
-    expect(first).toContain("limit");
-    expect(first).toContain("tok until the compaction threshold");
+    expect(
+      note({ n: 3, request: { ...request, reason: "overflow-retry" }, messages: cur }),
+    ).toContain("overflow retry");
+    const assumed = note({
+      n: 1,
+      request,
+      messages: cur,
+      limitSource: "assumed",
+      contextWindow: 65536,
+    });
+    expect(assumed.startsWith("? ")).toBe(true);
+    expect(assumed).toContain("context window assumed 64k");
+    expect(
+      changeNote({ n: 2, request, messages: cur, limitSource: "assumed", contextWindow: 65536 }),
+    ).toBeUndefined();
+  });
+
+  it("缓存说明:命中率低于一半才印;预计太少或供应商不报命中时不评判", () => {
+    const low = plain(
+      cacheNote({ inputTokens: 4000, outputTokens: 5, cacheReadTokens: 400 }, 3000) ?? "",
+    );
+    expect(low.startsWith("≈ cache 10%")).toBe(true);
+    expect(low).toContain("expected ≤");
+    expect(
+      cacheNote({ inputTokens: 4000, outputTokens: 5, cacheReadTokens: 3000 }, 3000),
+    ).toBeUndefined();
+    expect(
+      cacheNote({ inputTokens: 4000, outputTokens: 5, cacheReadTokens: 0 }, 500),
+    ).toBeUndefined();
+    expect(cacheNote({ inputTokens: 4000, outputTokens: 5 }, 3000)).toBeUndefined();
   });
 
   it("思考缺省一行,展开后逐行;首屏五个动词", () => {
     const collapsed = plain(thinkingLines("line one\nline two", "full", false).join("\n"));
     expect(collapsed.split("\n")).toHaveLength(1);
+    expect(collapsed.startsWith("· ")).toBe(true);
     expect(collapsed).toContain("line one");
-    expect(collapsed).toContain("(full · 2 lines · Ctrl+T)");
+    expect(collapsed).toContain("(2 lines · Ctrl+T)");
+    expect(plain(thinkingLines("one line only", "full", false).join("\n"))).not.toContain("Ctrl+T");
     const expanded = plain(thinkingLines("line one\nline two", "summary", true).join("\n"));
     expect(expanded).toContain("summary · the model reads the opaque block");
     expect(expanded).toContain("line two");

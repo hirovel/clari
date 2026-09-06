@@ -13,7 +13,7 @@ import type {
 } from "@earendil-works/pi-tui";
 import type { Agent } from "../src/agent.js";
 import type { ApprovalConfig } from "../src/approval.js";
-import type { ToolPromptsConfig } from "../src/config.js";
+import type { ResultView, ToolPromptsConfig } from "../src/config.js";
 import type { Price, UsageAccumulator } from "../src/cost.js";
 import type { EventLog } from "../src/log.js";
 import type { CompactionConfig } from "../src/loop.js";
@@ -26,7 +26,7 @@ import type { PromptTemplate } from "./templates.js";
 import { c } from "./theme.js";
 import type { TuiAppDeps } from "./tui-app.js";
 import type { Block, SplitLine } from "./tui-block.js";
-import type { ChildView, LabeledMarkdown } from "./tui-render.js";
+import type { ChildView, ReplyMarkdown } from "./tui-render.js";
 import type { ApprovalPrompt } from "./tui-slots.js";
 
 /** 折叠时保留的工具结果行数的缺省;配置 foldLines 可改。 */
@@ -65,6 +65,10 @@ export type ViewState = {
   foldResults: boolean;
   /** 折叠时保留的结果行数。 */
   foldLines: number;
+  /** 每个工具的结果可见度(配置 results);没写的按 head。 */
+  results: Record<string, ResultView>;
+  /** 上一个画出的节点是用户消息:下一步开头不再补空行。 */
+  afterUser: boolean;
   /** 保持展开的最新步数;0 = 从不自动折。 */
   foldSteps: number;
   /** 账簿光标:选中的步(steps 的下标);没有就是 undefined。 */
@@ -78,7 +82,7 @@ export type ViewState = {
   childMode: ChildMode;
   /** 首屏(新会话且还没有用户消息时显示),第一条消息一到就撤。 */
   firstRun: Text | undefined;
-  streaming: LabeledMarkdown | undefined;
+  streaming: ReplyMarkdown | undefined;
   streamBuffer: string;
   /** 流式合帧:增量先攒着,每 33ms 落一次屏。 */
   streamTimer: ReturnType<typeof setTimeout> | undefined;
@@ -96,7 +100,7 @@ export type ViewState = {
   lastUsage: { inputTokens: number; outputTokens: number } | undefined;
 };
 
-/** 请求层记录:发出每个请求时用的 provider、原始流、接收卡头节点。都不进日志。 */
+/** 请求层记录:发出每个请求时用的 provider、原始流、预计缓存。都不进日志。 */
 export type RequestState = {
   count: number;
   lastIndex: number;
@@ -108,14 +112,10 @@ export type RequestState = {
   providersAt: Map<number, Provider>;
   rawAt: Map<number, string[]>;
   rawLines: number;
-  receiveHeads: Map<number, Block>;
+  /** 每次请求发出前算的缓存命中上限;响应回来与实测对照。 */
   predictedAt: Map<number, number>;
-  /** 上一次正常步发出的消息:发送卡"未变 / 新增"的比较基线。 */
+  /** 上一次正常步发出的消息:变化说明的比较基线。 */
   lastSent: Message[] | undefined;
-  /** 上一次发出的工具定义全文;变了发送卡才标 changed。 */
-  lastToolSig: string;
-  lastParams: string | undefined;
-  lastCard: { node: Block; lines: string[] } | undefined;
 };
 
 /** 审批:规则对象被策略实现闭包引用,/approve 改它即生效。 */

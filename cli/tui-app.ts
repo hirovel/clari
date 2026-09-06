@@ -29,18 +29,17 @@ import {
 import { Agent, type DeliverAs } from "../src/agent.js";
 import type { ApprovalConfig } from "../src/approval.js";
 import { contextTokens } from "../src/compaction.js";
-import type { ModelConfig, ToolPromptsConfig } from "../src/config.js";
-import { fmtCost, type Price, UsageAccumulator } from "../src/cost.js";
+import type { ModelConfig, ResultView, ToolPromptsConfig } from "../src/config.js";
+import { fmtCostApprox, type Price, UsageAccumulator } from "../src/cost.js";
 import { type AgentEvent, now } from "../src/events.js";
 import type { EventLog } from "../src/log.js";
 import { type CompactionConfig, compactionThreshold, type TurnDeps } from "../src/loop.js";
 import type { EffortLevel, Provider, ToolDef } from "../src/provider.js";
 import type { ChildInfo } from "../src/subagent.js";
 import type { Tool } from "../src/tools.js";
-import { firstRunLines, GUTTER, shortcutLines, thinkingLines } from "./cards.js";
+import { DEFAULT_RESULT_VIEWS, firstRunLines, shortcutLines, thinkingLines } from "./cards.js";
 import { editInExternalEditor } from "./editor.js";
 import { fmtTok, RequestInspector, type SessionSource } from "./inspector.js";
-import { setCompact } from "./layout.js";
 import type { McpServerStatus } from "./mcp/bridge.js";
 import type { Skill } from "./prompt.js";
 import type { CapabilitySource, Inferred } from "./registry.js";
@@ -135,6 +134,8 @@ export type TuiAppDeps = {
   fold?: boolean;
   /** 折叠时保留的结果行数;缺省 5。 */
   foldLines?: number;
+  /** 每个工具的结果可见度;没写的按 DEFAULT_RESULT_VIEWS,再没有按 head。 */
+  results?: Record<string, ResultView>;
   /** 账簿保持展开的最新步数;缺省 3,0 = 从不自动折。 */
   foldSteps?: number;
   /** 屏幕模式:alt(缺省)备用屏,main 主屏。 */
@@ -252,7 +253,6 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
   const live = new Container();
   const status = new SplitLine();
   const editor = new Editor(tui, editorTheme, { paddingX: 1 });
-  setCompact(deps.terminal.columns);
   const templates = deps.templates ?? [];
   editor.setAutocompleteProvider(
     new CombinedAutocompleteProvider(
@@ -367,6 +367,8 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     view: {
       foldResults: deps.fold ?? true,
       foldLines: deps.foldLines ?? FOLD_HEAD,
+      results: { ...DEFAULT_RESULT_VIEWS, ...deps.results },
+      afterUser: false,
       foldSteps: deps.foldSteps ?? FOLD_STEPS,
       selectedStep: undefined,
       pulse: [],
@@ -396,12 +398,8 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       providersAt: new Map(),
       rawAt: new Map(),
       rawLines: 0,
-      receiveHeads: new Map(),
       predictedAt: new Map(),
       lastSent: undefined,
-      lastToolSig: "",
-      lastParams: undefined,
-      lastCard: undefined,
     },
     usage: new UsageAccumulator((model) => ctx.priceFor(model)),
     approval,
@@ -513,12 +511,9 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       deps.settings?.priceFor?.(model) ?? (model === ctx.model.info.model ? deps.price : undefined),
     defs,
     renderReasoning: (s, kind) =>
-      thinkingLines(
-        s,
-        kind,
-        ctx.view.showReasoning,
-        Math.max(20, deps.terminal.columns - GUTTER - 24),
-      ).join("\n"),
+      thinkingLines(s, kind, ctx.view.showReasoning, Math.max(20, deps.terminal.columns - 24)).join(
+        "\n",
+      ),
     onRaw(line) {
       const r = ctx.req;
       if (deps.trace) {
@@ -594,7 +589,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     const totals = ctx.usage.totals();
     const sum =
       totals.requests > 0
-        ? `↑${fmtTok(totals.inputTokens)} ↓${fmtTok(totals.outputTokens)}${totals.cacheReadTokens > 0 ? ` · cache ${fmtTok(totals.cacheReadTokens)}` : ""}${totals.cost !== undefined ? ` · ${fmtCost(totals.cost)}` : ""} · `
+        ? `↑${fmtTok(totals.inputTokens)} ↓${fmtTok(totals.outputTokens)}${totals.cacheReadTokens > 0 ? ` · cache ${fmtTok(totals.cacheReadTokens)}` : ""}${totals.cost !== undefined ? ` · ${fmtCostApprox(totals.cost)}` : ""} · `
         : "";
     // 上下文脉搏:最近十次请求的占用比各一格,压缩发生在哪、上下文在涨还是稳,一眼看到。
     const pulse =

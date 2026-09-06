@@ -92,3 +92,14 @@ export function fmtCost(usd: number): string {
   if (usd < 1) return `$${usd.toFixed(3)}`;
   return `$${usd.toFixed(2)}`;
 }
+
+/**
+ * 费用的粗略形态:两位有效数字,前面带 ≈。费用是实测 token 乘目录单价算出来的,不是账单,
+ * 屏幕上常驻的那份不该假装精确;四位小数留给检视器。
+ */
+export function fmtCostApprox(usd: number): string {
+  if (usd <= 0) return "≈$0";
+  if (usd < 0.0001) return "≈$0.0001";
+  const s = usd < 1 ? Number(usd.toPrecision(2)).toString() : usd.toFixed(2);
+  return `≈$${s}`;
+}

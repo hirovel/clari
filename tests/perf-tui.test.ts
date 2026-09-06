@@ -100,7 +100,7 @@ describe("用量累计", () => {
 });
 
 describe("界面回放", () => {
-  it("2102 条事件的会话回放在 1.5 秒内,画面完整(最后一张卡展开、旧卡两行)", () => {
+  it("2102 条事件的会话回放在 1.5 秒内,画面完整(最新三步展开、旧步各一行账目)", () => {
     const log = bigSession(700);
     const provider: Provider = {
       model: "m",
@@ -124,10 +124,9 @@ describe("界面回放", () => {
     });
     expect(took).toBeLessThan(1500 * slack);
     const lines = (app as ReturnType<typeof createTuiApp>).lines(120).join("\n");
-    expect(lines).toContain("Request #700");
     expect(lines).toContain("resumed: 2102 events");
-    // 账簿:最新三步展开,其余 697 步各折成一行账目
-    expect(lines.match(/Request #/g)?.length).toBe(3);
+    // 账簿:最新三步展开,其余 697 步各折成一行账目;没有请求卡
+    expect(lines).not.toContain("Request #");
     expect(stripAnsi(lines).match(/≡ #/g)?.length).toBe(697);
     (app as ReturnType<typeof createTuiApp>).stop();
   });

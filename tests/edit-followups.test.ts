@@ -1,6 +1,6 @@
-// 编辑上下文的收口:压缩与清除当作编辑点、Anthropic 编辑点断点、发送卡的编辑点行与预计命中、/retry。
+// 编辑上下文的收口:压缩与清除当作编辑点、Anthropic 编辑点断点、变化说明里的编辑点与预计命中、/retry。
 import { describe, expect, it } from "vitest";
-import { predictedCache, receiveHead, sendCardLines } from "../cli/cards.js";
+import { cacheNote, changeNote, predictedCache } from "../cli/cards.js";
 import { Agent } from "../src/agent.js";
 import type { AgentEvent } from "../src/events.js";
 import { EventLog } from "../src/log.js";
@@ -88,7 +88,7 @@ describe("Anthropic 编辑点断点", () => {
   });
 });
 
-describe("发送卡的编辑点与预计命中", () => {
+describe("变化说明里的编辑点与预计命中", () => {
   const req: Extract<AgentEvent, { type: "request" }> = {
     type: "request",
     at: "",
@@ -105,42 +105,22 @@ describe("发送卡的编辑点与预计命中", () => {
     ];
     const prev = deriveMessages(base());
     const cur = deriveMessages(events);
-    const lines = sendCardLines({
-      n: 3,
-      request: req,
-      messages: cur,
-      previous: prev,
-      defs: [],
-      toolsUnchanged: true,
-      dropsThinking: true,
-    }).map(plain);
-    // 编辑点信息现在在 changed 行:改了哪条、从哪起重算、丢几条思考、预计命中上限。
-    const edit = lines.find((l) => l.startsWith("changed"));
+    // 编辑点信息在变化说明里:改了哪条、从哪起重算、丢几条思考、预计命中上限。
+    const edit = plain(
+      changeNote({ n: 3, request: req, messages: cur, previous: prev, dropsThinking: true }) ?? "",
+    );
+    expect(edit.startsWith("✎ ")).toBe(true);
     expect(edit).toContain("1 edited (#6)");
     expect(edit).toContain("2 recomputed");
     expect(edit).toContain("1 thinking block dropped");
     expect(edit).toMatch(/cache ≤\S+ of \S+/);
-    // 消息表里被改的那条标 ✎ edited,前缀未变的折成一行。
-    expect(lines.some((l) => /✎\s+6\s+user\b.*\bedited\b/.test(l))).toBe(true);
-    expect(lines.some((l) => l.includes("3 unchanged"))).toBe(true);
     const predicted = predictedCache(prev, cur);
     expect(predicted).toBeGreaterThan(0);
-    const head = plain(
-      receiveHead({
-        n: 3,
-        estimated: 100,
-        predictedCache: predicted,
-        response: {
-          type: "assistant/message",
-          at: "",
-          text: "",
-          toolCalls: [],
-          stopReason: "end",
-          usage: { inputTokens: 100, outputTokens: 5, cacheReadTokens: 40 },
-        },
-      }),
+    // 实测命中明显低于预计时才有缓存说明;预计与实测并排。
+    const note = plain(
+      cacheNote({ inputTokens: 5000, outputTokens: 5, cacheReadTokens: 1000 }, 4000) ?? "",
     );
-    expect(head).toContain("cache 40 · 40% · expected ≤");
+    expect(note).toMatch(/^≈ cache 20% · \S+ of \S+ hit · expected ≤\S+$/);
   });
 });
 

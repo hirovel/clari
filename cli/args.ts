@@ -5,6 +5,7 @@ import {
   type KernelConfig,
   type Preset,
   type PromptSectionName,
+  type ResultView,
   type ToolPromptStyle,
   type ToolPromptsConfig,
 } from "../src/config.js";
@@ -31,6 +32,8 @@ export type CommonArgs = {
   fold: boolean;
   /** 折叠时保留的结果行数(配置 foldLines)。 */
   foldLines?: number;
+  /** 每个工具的结果可见度(配置 results)。 */
+  results?: Record<string, ResultView>;
   /** 账簿保持展开的最新步数(配置 foldSteps)。 */
   foldSteps?: number;
   /** 屏幕模式(--screen / 配置 screen)。 */
@@ -391,6 +394,7 @@ export function applyPreset(args: CommonArgs, config: KernelConfig): CommonArgs 
     }
     if (out.foldLines === undefined && layer.foldLines !== undefined)
       out.foldLines = layer.foldLines;
+    if (out.results === undefined && layer.results !== undefined) out.results = layer.results;
     if (out.foldSteps === undefined && layer.foldSteps !== undefined)
       out.foldSteps = layer.foldSteps;
     if (out.screen === undefined && layer.screen !== undefined) out.screen = layer.screen;
