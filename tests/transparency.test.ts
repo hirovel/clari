@@ -197,7 +197,7 @@ describe("请求层记录", () => {
       tools: [echo],
       slots: { termination: maxSteps(1) },
     });
-    expect(out).toEqual({ stopped: "已达步数上限 1" });
+    expect(out).toEqual({ stopped: "step limit 1 reached" });
     const last = log2.events.at(-1);
     expect(last).toMatchObject({ type: "decision", slot: "termination", steps: 1 });
   });

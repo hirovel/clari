@@ -3,3 +3,4 @@ sessions/
 .preview/
 dist/
 coverage/
+.claude/

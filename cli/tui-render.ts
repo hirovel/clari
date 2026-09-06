@@ -126,6 +126,7 @@ export class ChildView {
   private readonly startedAt = Date.now();
   private finishedAt: number | undefined;
   private timer: ReturnType<typeof setInterval> | undefined;
+  private unsubscribe: (() => void) | undefined;
 
   constructor(
     private readonly ctx: TuiContext,
@@ -134,7 +135,8 @@ export class ChildView {
     this.block.addChild(this.progress);
     this.block.addChild(this.body);
     // 起始事件(继承的父上下文、任务简报)不重画:父屏幕上已经有它们;只画子自己产生的。
-    info.log.subscribe((e) => {
+    // 结束即退订:续聊在同一日志上再跑,新事件归新的视图,旧视图定格。
+    this.unsubscribe = info.log.subscribe((e) => {
       this.absorb(e);
       this.refresh();
     });
@@ -157,12 +159,16 @@ export class ChildView {
 
   finish(): void {
     this.finishedAt = Date.now();
+    this.unsubscribe?.();
+    this.unsubscribe = undefined;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
     this.refresh();
   }
 
   dispose(): void {
+    this.unsubscribe?.();
+    this.unsubscribe = undefined;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
   }

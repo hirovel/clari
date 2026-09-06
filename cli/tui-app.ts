@@ -23,6 +23,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { Agent, type DeliverAs } from "../src/agent.js";
 import type { ApprovalConfig } from "../src/approval.js";
+import { contextTokens } from "../src/compaction.js";
 import type { ToolPromptsConfig } from "../src/config.js";
 import { fmtCost, type Price, UsageAccumulator } from "../src/cost.js";
 import { type AgentEvent, now } from "../src/events.js";
@@ -388,7 +389,8 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     const usage = ctx.view.lastUsage;
     if (usage) {
       // 上下文占用条:以自动压缩阈值为满格;过七成转朱色提醒。
-      const used = Math.min(1, usage.inputTokens / t);
+      // 口径与请求卡的 limit 行一致:实测优先、压缩后按估算,手动 /compact 之后状态栏立刻回落。
+      const used = Math.min(1, contextTokens(log.events) / t);
       const cells = used > 0 ? Math.max(1, Math.round(used * 10)) : 0;
       const bar = "▰".repeat(cells) + "▱".repeat(10 - cells);
       const tone = used >= 0.7 ? c.zhu : c.jin;

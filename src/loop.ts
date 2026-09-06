@@ -27,7 +27,7 @@ export const untilIdle: TerminationPolicy = () => null;
 
 /** Anthropic 立场:步数保底。 */
 export function maxSteps(limit: number): TerminationPolicy {
-  return ({ steps }) => (steps >= limit ? `已达步数上限 ${limit}` : null);
+  return ({ steps }) => (steps >= limit ? `step limit ${limit} reached` : null);
 }
 
 /** 插话策略:在给定边界要不要排空留言队列。 */

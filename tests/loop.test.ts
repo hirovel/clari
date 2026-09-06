@@ -138,7 +138,7 @@ describe("runTurn", () => {
       tools: [echoTool],
       slots: { termination: maxSteps(2) },
     });
-    expect(outcome).toEqual({ stopped: "已达步数上限 2" });
+    expect(outcome).toEqual({ stopped: "step limit 2 reached" });
   });
 
   it("length:一个都不执行,逐个补错误应答后让模型重发", async () => {
