@@ -34,7 +34,7 @@ function css(st: Style): string {
   if (st.italic) parts.push("font-style:italic");
   if (st.underline) parts.push("text-decoration:underline");
   if (st.strike) parts.push("text-decoration:line-through");
-  if (st.inverse) parts.push("background:#e8e4dc;color:#16150f");
+  if (st.inverse) parts.push("background:#e2ddd5;color:#1b1916");
   return parts.join(";");
 }
 
@@ -86,7 +86,7 @@ export function ansiToHtmlDocument(lines: string[], title = "TUI 预览"): strin
   const body = lines.map((l) => `<div class="l">${ansiLineToHtml(l)}</div>`).join("\n");
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>${escapeHtml(title)}</title>
 <style>
-body{margin:0;background:#16150f;color:#e8e4dc;font:15px/1.45 "Cascadia Code",Consolas,"Sarasa Mono SC",monospace;padding:24px}
+body{margin:0;background:#1b1916;color:#e2ddd5;font:15px/1.45 "Cascadia Code",Consolas,"Sarasa Mono SC",monospace;padding:24px}
 .l{white-space:pre;min-height:1.45em}
 </style></head><body>${body}</body></html>`;
 }

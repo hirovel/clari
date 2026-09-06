@@ -466,7 +466,7 @@ export class RequestInspector implements Component {
     const list = this.sessions();
     if (list.length <= 1) return undefined;
     const items = list.map((s, i) =>
-      i === this.sessionIndex ? c.jin(`▸ ${s.name}`) : c.faint(`  ${s.name}`),
+      i === this.sessionIndex ? c.ink(`▸ ${s.name}`) : c.faint(`  ${s.name}`),
     );
     return `${items.join("   ")}   ${c.faint("s switch session")}`;
   }
@@ -491,7 +491,7 @@ export class RequestInspector implements Component {
 
     if (this.mode === "list") {
       const recs = this.records();
-      const title = `${c.bold(c.jin("Requests"))}  ${c.soft(`${recs.length} requests`)}  ${c.faint("one line per API request · Tab: events · compactions · context")}`;
+      const title = `${c.bold(c.ink("Requests"))}  ${c.soft(`${recs.length} requests`)}  ${c.faint("one line per API request · Tab: events · compactions · context")}`;
       const columns = c.faint(
         "  #    time      model  sent (msgs · est. tok)  → measured (cache)  +out  latency  stop",
       );
@@ -514,7 +514,7 @@ export class RequestInspector implements Component {
     }
 
     if (this.mode === "events") {
-      const title = `${c.bold(c.jin("Events"))}  ${c.soft(`${events.length} events`)}  ${c.faint("this array is the whole kernel state; the screen, the requests and what the model sees are projections of it")}`;
+      const title = `${c.bold(c.ink("Events"))}  ${c.soft(`${events.length} events`)}  ${c.faint("this array is the whole kernel state; the screen, the requests and what the model sees are projections of it")}`;
       const columns = c.faint("  #     time      type                  size   visibility  state");
       const head = withSession([pad(title), pad(columns), pad(rule)]);
       const foot = [
@@ -534,7 +534,7 @@ export class RequestInspector implements Component {
 
     if (this.mode === "event") {
       const e = events[this.eventSelected];
-      const title = `${c.bold(c.jin(`Event #${this.eventSelected}`))}  ${c.ink(e?.type ?? "")}  ${c.faint(e ? clock(e.at) : "")}  ${c.faint(`(${this.eventSelected + 1}/${events.length})`)}`;
+      const title = `${c.bold(c.ink(`Event #${this.eventSelected}`))}  ${c.ink(e?.type ?? "")}  ${c.faint(e ? clock(e.at) : "")}  ${c.faint(`(${this.eventSelected + 1}/${events.length})`)}`;
       const head = [pad(title), pad(rule)];
       const content = this.cached(cacheKey(`event:${this.eventSelected}`), () =>
         eventLines(events, this.eventSelected).flatMap((l) => wrapTextWithAnsi(l, inner)),
@@ -551,7 +551,7 @@ export class RequestInspector implements Component {
 
     if (this.mode === "compactions") {
       const comps = this.compactions();
-      const title = `${c.bold(c.jin("Compactions"))}  ${c.soft(`${comps.length} compactions`)}  ${c.faint("what became what; the original always stays in the array")}`;
+      const title = `${c.bold(c.ink("Compactions"))}  ${c.soft(`${comps.length} compactions`)}  ${c.faint("what became what; the original always stays in the array")}`;
       const columns = c.faint(
         "  #    time      strategy  original (events · tok) → summary tok · ratio  cleared",
       );
@@ -583,7 +583,7 @@ export class RequestInspector implements Component {
     if (this.mode === "composition") {
       const { rows: crows, omitted } = this.composition();
       const total = crows.reduce((s, r) => s + messageTokens(r.message), 0);
-      const title = `${c.bold(c.jin("Context"))}  ${c.soft(`${crows.length} messages · ≈${total} tok`)}  ${c.faint("what the model sees on the next request · event # is what /edit and /drop take · Tab: requests")}`;
+      const title = `${c.bold(c.ink("Context"))}  ${c.soft(`${crows.length} messages · ≈${total} tok`)}  ${c.faint("what the model sees on the next request · event # is what /edit and /drop take · Tab: requests")}`;
       const columns = c.faint(
         "    #  event wire  role            tokens  stages                 preview",
       );
@@ -622,12 +622,12 @@ export class RequestInspector implements Component {
       const items = actionsFor(events, r, crows.length);
       const sel = Math.min(this.actionSelected, items.length - 1);
       const m = r.message;
-      const title = `${c.bold(c.jin(`Message #${r.i}`))}  ${c.ink(roleLabel(m))}  ${c.soft(`event #${r.event} · ≈${messageTokens(m)} tok${m.edited ? " · edited" : ""}`)}`;
+      const title = `${c.bold(c.ink(`Message #${r.i}`))}  ${c.ink(roleLabel(m))}  ${c.soft(`event #${r.event} · ≈${messageTokens(m)} tok${m.edited ? " · edited" : ""}`)}`;
       const head = [pad(title), pad(rule)];
       const previewSrc = m.content
         ? m.content.split("\n").slice(0, 6)
         : m.role === "assistant" && m.toolCalls.length > 0
-          ? m.toolCalls.map((t) => `⚙ ${t.name} ${JSON.stringify(t.args)}`)
+          ? m.toolCalls.map((t) => `» ${t.name} ${JSON.stringify(t.args)}`)
           : ["(empty)"];
       const chosen = items[sel] as ActionItem;
       const body = [
@@ -637,7 +637,7 @@ export class RequestInspector implements Component {
         ...items.map((it, i) =>
           pad(
             i === sel
-              ? `  ${c.jin("▸")} ${c.bold(c.ink(it.label.padEnd(24)))} ${c.faint(it.hint)}`
+              ? `  ${c.ink("▸")} ${c.bold(c.ink(it.label.padEnd(24)))} ${c.faint(it.hint)}`
               : `    ${c.soft(it.label.padEnd(24))} ${c.faint(it.hint)}`,
           ),
         ),
@@ -661,7 +661,7 @@ export class RequestInspector implements Component {
         this.mode = "composition";
         return this.render(width);
       }
-      const title = `${c.bold(c.jin(`Message #${r.i}`))}  ${c.ink(roleLabel(r.message))}  ${c.faint(`event #${r.event}`)}  ${c.faint(`(${this.messageSelected + 1}/${crows.length})`)}`;
+      const title = `${c.bold(c.ink(`Message #${r.i}`))}  ${c.ink(roleLabel(r.message))}  ${c.faint(`event #${r.event}`)}  ${c.faint(`(${this.messageSelected + 1}/${crows.length})`)}`;
       const head = [pad(title), pad(rule)];
       const content = this.cached(cacheKey(`message:${r.event}:${r.i}`), () =>
         compositionLines(events, r).flatMap((l) => wrapTextWithAnsi(l, inner)),
@@ -686,10 +686,10 @@ export class RequestInspector implements Component {
       const tabs = COMPACTION_SECTIONS.map((name, i) => {
         const n = i + 1;
         return n === this.compactionSection
-          ? c.bold(c.jin(`[${n} ${name}]`))
+          ? c.bold(c.ink(`[${n} ${name}]`))
           : c.soft(` ${n} ${name} `);
       }).join(" ");
-      const title = `${c.bold(c.jin(`Compaction #${rec.n}`))}  ${c.ink(rec.event.strategy ?? "")}  ${c.faint(clock(rec.event.at))}  ${c.faint(`(${this.compactionSelected + 1}/${comps.length})`)}`;
+      const title = `${c.bold(c.ink(`Compaction #${rec.n}`))}  ${c.ink(rec.event.strategy ?? "")}  ${c.faint(clock(rec.event.at))}  ${c.faint(`(${this.compactionSelected + 1}/${comps.length})`)}`;
       const head = [pad(title), pad(tabs), pad(rule)];
       const content = this.cached(
         cacheKey(`compaction:${rec.index}:${this.compactionSection}`),
@@ -716,9 +716,9 @@ export class RequestInspector implements Component {
     }
     const tabs = SECTIONS.map((name, i) => {
       const n = i + 1;
-      return n === this.section ? c.bold(c.jin(`[${n} ${name}]`)) : c.soft(` ${n} ${name} `);
+      return n === this.section ? c.bold(c.ink(`[${n} ${name}]`)) : c.soft(` ${n} ${name} `);
     }).join(" ");
-    const title = `${c.bold(c.jin(`Request #${rec.n}`))}  ${c.ink(rec.request.model)}  ${c.faint(clock(rec.request.at))}  ${c.faint(`(${this.selected + 1}/${recs.length})`)}`;
+    const title = `${c.bold(c.ink(`Request #${rec.n}`))}  ${c.ink(rec.request.model)}  ${c.faint(clock(rec.request.at))}  ${c.faint(`(${this.selected + 1}/${recs.length})`)}`;
     const head = [pad(title), pad(tabs), pad(rule)];
     const content = this.cached(
       cacheKey(`detail:${rec.index}:${this.section}:${this.folded}`),

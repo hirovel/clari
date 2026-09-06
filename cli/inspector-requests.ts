@@ -206,7 +206,7 @@ export function summaryLines(rec: RequestRecord, messages: Message[]): string[] 
   }
   for (const [k, v] of [...byRole.entries()].sort((a, b) => b[1] - a[1])) {
     const bar = "█".repeat(Math.max(1, Math.round((v / Math.max(1, total)) * 24))).padEnd(24);
-    lines.push(`${c.jin(bar)} ${pctOf(v, total).padStart(4)}  ${c.soft(`${v} tok · ${k}`)}`);
+    lines.push(`${c.faint(bar)} ${pctOf(v, total).padStart(4)}  ${c.soft(`${v} tok · ${k}`)}`);
   }
   return lines;
 }
@@ -217,7 +217,7 @@ export function decisionLines(rec: RequestRecord): string[] {
   if (auto !== undefined) {
     lines.push(
       rec.request.estimatedTokens > auto
-        ? `${c.jin("◇")} auto-compaction check: estimated ${rec.request.estimatedTokens} > threshold ${auto}, triggered`
+        ? `${c.soft("·")} auto-compaction check: estimated ${rec.request.estimatedTokens} > threshold ${auto}, triggered`
         : `${c.faint("·")} auto-compaction check: estimated ${rec.request.estimatedTokens} ≤ threshold ${auto}, not triggered`,
     );
   } else {
@@ -234,25 +234,25 @@ export function decisionLines(rec: RequestRecord): string[] {
         if (e.usage)
           parts.push(`summary request ${e.usage.inputTokens}→${e.usage.outputTokens} tok`);
         lines.push(
-          `${c.jin("◇")} compaction${e.strategy ? ` (${e.strategy})` : ""}: ${parts.join(", ")}`,
+          `${c.jin("≈")} compaction${e.strategy ? ` (${e.strategy})` : ""}: ${parts.join(", ")}`,
         );
         break;
       }
       case "decision":
         lines.push(
           e.slot === "steering"
-            ? `${c.jin("◇")} steering injected ${e.injected} (${e.boundary} boundary)`
+            ? `${c.soft("·")} steering injected ${e.injected} (${e.boundary} boundary)`
             : e.slot === "execution"
-              ? `${c.jin("◇")} parallel execution of ${e.parallel} calls: ${e.tools.join(", ")}`
-              : `${c.jin("◇")} termination stopped the loop at step ${e.steps}: ${e.reason}`,
+              ? `${c.soft("·")} parallel execution of ${e.parallel} calls: ${e.tools.join(", ")}`
+              : `${c.soft("·")} termination stopped the loop at step ${e.steps}: ${e.reason}`,
         );
         break;
       case "session/interrupt":
-        lines.push(`${c.zhu("◇")} interrupted by the user`);
+        lines.push(`${c.zhu("·")} interrupted by the user`);
         break;
       case "session/recovered":
         lines.push(
-          `${c.zhu("◇")} recovered: dropped ${e.droppedBytes} bytes of a half-written line at the end of the log`,
+          `${c.zhu("·")} recovered: dropped ${e.droppedBytes} bytes of a half-written line at the end of the log`,
         );
         break;
       case "ext/event": {
@@ -261,19 +261,19 @@ export function decisionLines(rec: RequestRecord): string[] {
         break;
       }
       case "session/model":
-        lines.push(`${c.jin("◇")} model switched to ${e.model}`);
+        lines.push(`${c.soft("·")} model switched to ${e.model}`);
         break;
       case "session/slot":
-        lines.push(`${c.jin("◇")} slot ${e.slot} → ${e.value}`);
+        lines.push(`${c.soft("·")} slot ${e.slot} → ${e.value}`);
         break;
       case "context/edit":
         lines.push(
-          `${c.zhu("◇")} the user edited event #${e.target}.${e.field} (${e.value.length} chars${e.note ? `; ${e.note}` : ""})`,
+          `${c.zhu("·")} the user edited event #${e.target}.${e.field} (${e.value.length} chars${e.note ? `; ${e.note}` : ""})`,
         );
         break;
       case "context/drop":
         lines.push(
-          `${c.zhu("◇")} the user dropped event #${e.target}${e.note ? ` (${e.note})` : ""}`,
+          `${c.zhu("·")} the user dropped event #${e.target}${e.note ? ` (${e.note})` : ""}`,
         );
         break;
       default:
@@ -282,16 +282,16 @@ export function decisionLines(rec: RequestRecord): string[] {
   }
   for (const r of rec.retries) {
     lines.push(
-      `${c.zhu("◇")} retry ${r.attempt}: ${r.status ?? ""} ${firstLine(r.error)}, waited ${fmtMs(r.delayMs)}`,
+      `${c.zhu("·")} retry ${r.attempt}: ${r.status ?? ""} ${firstLine(r.error)}, waited ${fmtMs(r.delayMs)}`,
     );
   }
   if (rec.error) lines.push(`${c.zhu("✗")} failed: ${rec.error.status ?? ""} ${rec.error.error}`);
   if (rec.response?.stopReason === "length")
     lines.push(
-      `${c.jin("◇")} output truncated: tool calls in this step are not executed; the model is asked to resend`,
+      `${c.soft("·")} output truncated: tool calls in this step are not executed; the model is asked to resend`,
     );
   if (rec.response?.stopReason === "aborted")
-    lines.push(`${c.zhu("◇")} response interrupted: the partial text is in the log`);
+    lines.push(`${c.zhu("·")} response interrupted: the partial text is in the log`);
   lines.push("");
   lines.push(c.faint("Every decision the kernel made in this step. Nothing else happened."));
   return lines;
@@ -314,7 +314,7 @@ export function sentLines(
   messages.forEach((m, i) => {
     const tok = messageTokens(m);
     lines.push(
-      `${c.jin(`[${i + 1}] ${roleLabel(m)}`)}  ${c.soft(`${tok} tok · ${pctOf(tok, total)}`)}${m.edited ? c.jin("  ✎ edited (original in the events view)") : ""}`,
+      `${c.ink(`[${i + 1}] ${roleLabel(m)}`)}  ${c.soft(`${tok} tok · ${pctOf(tok, total)}`)}${m.edited ? c.jin("  ✎ edited (original in the events view)") : ""}`,
     );
     // 系统提示词按段拆开:角色、环境、项目指令各占多少。
     if (m.role === "system" && sections && sections.length > 0) {
@@ -346,7 +346,7 @@ export function sentLines(
         const args = JSON.stringify(tc.args);
         lines.push(
           c.soft(
-            `    ⚙ ${tc.name} ${folded ? truncateToWidth(args, 100, "…") : args}  ${c.faint(tc.id)}`,
+            `    » ${tc.name} ${folded ? truncateToWidth(args, 100, "…") : args}  ${c.faint(tc.id)}`,
           ),
         );
       }
@@ -365,7 +365,7 @@ export function toolLines(defs: ToolDef[]): string[] {
     "",
   ];
   for (const d of defs) {
-    lines.push(`${c.jin(d.name)}  ${c.soft(`${estimateTokens(JSON.stringify(d))} tok`)}`);
+    lines.push(`${c.ink(d.name)}  ${c.soft(`${estimateTokens(JSON.stringify(d))} tok`)}`);
     lines.push(...indent(d.description || "(no description)").map((l) => c.ink(l)));
     lines.push(...indent(JSON.stringify(d.parameters, null, 2)).map((l) => c.faint(l)));
     lines.push("");
@@ -409,7 +409,7 @@ export function receivedLines(rec: RequestRecord, raw: string[] | undefined): st
     );
     if (k.usage) lines.push(`${c.soft("usage")} ${c.ink(JSON.stringify(k.usage))}`);
     lines.push("");
-    lines.push(c.jin("summary (enters later requests as one user message)"));
+    lines.push(c.bold(c.soft("summary (enters later requests as one user message)")));
     lines.push(...indent(k.summary ?? "(none)").map((l) => c.ink(l)));
     lines.push("");
   } else if (!rec.response) {
@@ -441,14 +441,14 @@ export function receivedLines(rec: RequestRecord, raw: string[] | undefined): st
       lines.push("");
     }
     if (r.extras && Object.keys(r.extras).length > 0) {
-      lines.push(c.jin("extras (provider metadata, not interpreted)"));
+      lines.push(c.bold(c.soft("extras (provider metadata, not interpreted)")));
       lines.push(...indent(JSON.stringify(r.extras, null, 2)).map((l) => c.faint(l)));
       lines.push("");
     }
     if (r.opaque !== undefined) {
       const o = r.opaque as { kind?: string; blocks?: unknown[]; items?: unknown[] };
       const n = o.blocks?.length ?? o.items?.length ?? 0;
-      lines.push(c.jin("opaque (private echo-back)"));
+      lines.push(c.bold(c.soft("opaque (private echo-back)")));
       lines.push(
         c.faint(
           `    ${o.kind ?? "unknown"} · ${n} items · ${JSON.stringify(r.opaque).length} chars · echoed back verbatim next turn, never interpreted; full JSON in the written section`,
@@ -456,19 +456,19 @@ export function receivedLines(rec: RequestRecord, raw: string[] | undefined): st
       );
       lines.push("");
     }
-    lines.push(c.jin("text"));
+    lines.push(c.bold(c.soft("text")));
     lines.push(...(r.text ? indent(r.text).map((l) => c.ink(l)) : [c.faint("    (empty)")]));
     lines.push("");
     if (r.toolCalls.length > 0) {
-      lines.push(c.jin(`tool calls ${r.toolCalls.length}`));
+      lines.push(c.bold(c.soft(`tool calls ${r.toolCalls.length}`)));
       for (const tc of r.toolCalls) {
-        lines.push(`    ${c.zhu("⚙")} ${c.ink(tc.name)}  ${c.faint(tc.id)}`);
+        lines.push(`    ${c.zhu("»")} ${c.ink(tc.name)}  ${c.faint(tc.id)}`);
         lines.push(...indent(JSON.stringify(tc.args, null, 2), "      ").map((l) => c.soft(l)));
       }
       lines.push("");
     }
   }
-  lines.push(c.jin("raw stream"));
+  lines.push(c.bold(c.soft("raw stream")));
   if (!raw)
     lines.push(
       c.faint(
@@ -529,7 +529,7 @@ export function writtenLines(
     const e = events[i];
     if (!e) continue;
     lines.push(
-      `${c.jin(`#${i}`)} ${c.ink(e.type)}  ${c.soft(`${JSON.stringify(e).length} chars · ${visibility(e)}`)}`,
+      `${c.ink(`#${i}`)} ${c.ink(e.type)}  ${c.soft(`${JSON.stringify(e).length} chars · ${visibility(e)}`)}`,
     );
     lines.push(...jsonLines(e, "    ").map((l) => c.faint(l)));
     lines.push("");

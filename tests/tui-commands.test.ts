@@ -231,7 +231,7 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
     expect(text(app)).toContain("Effort not set");
     await app.command("/effort xhigh");
     let doc = text(app);
-    expect(doc).toContain("◇ effort set to xhigh");
+    expect(doc).toContain("· effort set to xhigh");
     expect(doc).toContain("clamped down when sending");
     expect(doc).toContain("· effort xhigh");
     await app.submit("x");
@@ -240,7 +240,7 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
     expect(req).toMatchObject({ type: "request", effort: "xhigh" });
     await app.command("/effort auto");
     doc = text(app);
-    expect(doc).toContain("◇ effort omitted again");
+    expect(doc).toContain("· effort omitted again");
     await app.submit("y");
     expect(seen).toEqual(["xhigh", undefined]);
     await app.command("/effort ultra");

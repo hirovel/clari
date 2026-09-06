@@ -22,7 +22,7 @@ import {
 } from "./cards.js";
 import { renderExtEvent } from "./ext-events.js";
 import { fmtMs, fmtTok, messagesFor } from "./inspector.js";
-import { c, markdownTheme } from "./theme.js";
+import { c, G, markdownTheme } from "./theme.js";
 import { Block } from "./tui-block.js";
 import {
   CHILD_TAIL,
@@ -212,9 +212,9 @@ export class ChildView {
     const head = this.running
       ? `${c.zhu("●")} ${c.soft(`${who} · running · ${stats}`)}`
       : status === "completed"
-        ? `${c.green("✓")} ${c.soft(`${who} · done · ${stats}`)}`
+        ? `${c.soft(G.ok)} ${c.soft(`${who} · done · ${stats}`)}`
         : status === "stopped"
-          ? `${c.jin("◇")} ${c.soft(`${who} · stopped (${this.info.state.reason ?? "termination policy"}) · resumable · ${stats}`)}`
+          ? `${c.soft(G.note)} ${c.soft(`${who} · stopped (${this.info.state.reason ?? "termination policy"}) · resumable · ${stats}`)}`
           : `${c.zhu("✗")} ${c.soft(`${who} · partial · ${stats}`)}`;
     this.progress.setText(GUIDE + head);
     let body: string;
@@ -249,11 +249,11 @@ export function attachChild(ctx: TuiContext, child: ChildInfo): void {
   ctx.updateStatus();
 }
 
-/** 子 agent 事件的屏幕行(不含引导线),与主屏同一套记号:› ⚙ ✓ ✗ ◇。 */
+/** 子 agent 事件的屏幕行(不含引导线),与主屏同一套记号:› » ✓ ✗ ·。 */
 export function childEventLines(e: AgentEvent): string[] {
   switch (e.type) {
     case "user/message":
-      return [`${c.zhu("›")} ${c.ink(e.text)}`];
+      return [`${c.zhu(G.you)} ${c.ink(e.text)}`];
     case "assistant/message": {
       const lines: string[] = [];
       if (e.reasoning)
@@ -271,13 +271,13 @@ export function childEventLines(e: AgentEvent): string[] {
             .map((l) => c.ink(l)),
         );
       for (const tc of e.toolCalls) {
-        lines.push(`${c.zhu("⚙")} ${c.bold(c.ink(tc.name))}  ${c.soft(formatArgs(tc.args))}`);
+        lines.push(`${c.zhu(G.call)} ${c.bold(c.ink(tc.name))}  ${c.soft(formatArgs(tc.args))}`);
       }
       if (e.stopReason === "aborted") lines.push(c.faint("— interrupted —"));
       return lines;
     }
     case "tool/result": {
-      const mark = e.isError ? c.zhu("✗") : c.green("✓");
+      const mark = e.isError ? c.zhu(G.err) : c.soft(G.ok);
       const body = e.content.trim().split("\n");
       const meta = [
         ...(body.length > 1 ? [`${body.length} lines`] : []),
@@ -293,7 +293,7 @@ export function childEventLines(e: AgentEvent): string[] {
     case "request/error":
       return [c.zhu(`✗ request failed: ${e.error.split("\n")[0]}`)];
     case "compaction":
-      return [c.jin(`◇ compacted${e.strategy ? ` (${e.strategy})` : ""}`)];
+      return [c.jin(`≈ compacted${e.strategy ? ` (${e.strategy})` : ""}`)];
     default:
       return [];
   }
@@ -308,7 +308,7 @@ function renderUser(ctx: TuiContext, text: string): void {
   }
   // 用户消息:朱色 › 起头,正文加粗,整块一条底带;续行缩到 › 之后。
   ctx.transcript.addChild(new Spacer(1));
-  ctx.transcript.addChild(new Block(`${c.zhu("›")} ${c.bold(c.ink(text))}`, { bg: c.band }));
+  ctx.transcript.addChild(new Block(`${c.zhu(G.you)} ${c.bold(c.ink(text))}`, { bg: c.band }));
 }
 
 function renderAssistant(
@@ -377,7 +377,7 @@ function renderAssistant(
   }
   if (e.stopReason === "aborted") ctx.note(c.faint("— interrupted —"));
   if (e.stopReason === "length")
-    ctx.note(c.jin("◇ output truncated; the model was asked to resend"));
+    ctx.note(c.zhu("· output truncated; the model was asked to resend"));
 }
 
 function renderToolResult(ctx: TuiContext, e: Extract<AgentEvent, { type: "tool/result" }>): void {
@@ -505,7 +505,7 @@ function renderCompaction(ctx: TuiContext, e: Extract<AgentEvent, { type: "compa
     : "";
   const who = e.strategy ? ` (${e.strategy})` : "";
   ctx.note(
-    `${c.jin(`◇ compacted${who}: ${parts.join(", ")}`)}${c.faint(`${cost}  /compactions to compare original and summary`)}`,
+    `${c.jin(`≈ compacted${who}: ${parts.join(", ")}`)}${c.faint(`${cost}  /compactions to compare original and summary`)}`,
   );
 }
 
@@ -545,7 +545,7 @@ export function render(ctx: TuiContext, e: AgentEvent): void {
       renderCompaction(ctx, e);
       break;
     case "session/model":
-      ctx.note(c.jin(`◇ model switched to ${e.model}`));
+      ctx.note(c.soft(`· model switched to ${e.model}`));
       break;
     case "session/slot":
       // 恢复会话时把历史切换也画出来;当前会话里 slotCommand 已经打过确认行,这里只补状态。
@@ -553,8 +553,8 @@ export function render(ctx: TuiContext, e: AgentEvent): void {
       break;
     case "session/recovered":
       ctx.note(
-        c.jin(
-          `◇ recovered: dropped ${e.droppedBytes} bytes of a half-written line at the end of the log (the process died mid-write)`,
+        c.soft(
+          `· recovered: dropped ${e.droppedBytes} bytes of a half-written line at the end of the log (the process died mid-write)`,
         ),
       );
       break;

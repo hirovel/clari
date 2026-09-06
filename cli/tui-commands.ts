@@ -200,7 +200,7 @@ export async function submit(
     const pending = agent.prompt(text);
     ctx.updateStatus();
     const outcome = await pending;
-    if (typeof outcome === "object") ctx.note(c.jin(`◇ loop stopped: ${outcome.stopped}`));
+    if (typeof outcome === "object") ctx.note(c.soft(`· loop stopped: ${outcome.stopped}`));
   } catch (err) {
     // 请求层的失败已由 request/error 事件画成错误卡;这里只兜住循环之外的异常。
     if (log.events.at(-1)?.type !== "request/error") ctx.note(c.zhu(`✗ ${(err as Error).message}`));
@@ -214,9 +214,9 @@ export async function submit(
 
 function helpText(ctx: TuiContext): string {
   return [
-    ...COMMANDS.map((x) => `${c.jin(`/${x.name}`.padEnd(12))} ${c.soft(x.description)}`),
+    ...COMMANDS.map((x) => `${c.ink(`/${x.name}`.padEnd(12))} ${c.soft(x.description)}`),
     ...ctx.templates.map(
-      (t) => `${c.jin(`/${t.name}`.padEnd(12))} ${c.soft(`template: ${t.description}`)}`,
+      (t) => `${c.ink(`/${t.name}`.padEnd(12))} ${c.soft(`template: ${t.description}`)}`,
     ),
     c.faint(
       "Alt+Enter queues a message for after the current step · @path attaches a file · ? shortcuts",
@@ -234,7 +234,7 @@ function toolsList(ctx: TuiContext): string {
     const params = Object.keys(
       (t.parameters as { properties?: Record<string, unknown> }).properties ?? {},
     );
-    return `  ${c.jin(t.name.padEnd(10))} ${c.soft(String(tokOf(t.name)).padStart(5))} ${c.faint("tok")}  ${c.faint((t.concurrency === "parallel" ? "parallel" : "sequential").padEnd(10))} ${c.ink(t.description.split("\n")[0]?.slice(0, 70) ?? "")}\n${" ".repeat(13)}${c.faint(`params: ${params.join(", ") || "(none)"}`)}`;
+    return `  ${c.ink(t.name.padEnd(10))} ${c.soft(String(tokOf(t.name)).padStart(5))} ${c.faint("tok")}  ${c.faint((t.concurrency === "parallel" ? "parallel" : "sequential").padEnd(10))} ${c.ink(t.description.split("\n")[0]?.slice(0, 70) ?? "")}\n${" ".repeat(13)}${c.faint(`params: ${params.join(", ") || "(none)"}`)}`;
   });
   return [
     `${c.soft("Tools")} ${c.ink(`${ctx.tools.length}`)}  ${c.faint(`≈${total} tok of definitions sent with every request · style ${ctx.slots.state.toolPrompts} (/toolprompts) · full JSON in Ctrl+R → tool definitions`)}`,
@@ -258,7 +258,7 @@ function skillsList(ctx: TuiContext): string {
       ...(s.allowedTools.length ? [`allowed-tools: ${s.allowedTools.join(" ")}`] : []),
       ...(s.argumentHint ? [`args: ${s.argumentHint}`] : []),
     ].join(" · ");
-    return `  ${c.jin(`/${s.name}`.padEnd(16))} ${c.ink(s.description || "(no description)")}\n${" ".repeat(19)}${c.faint(`${s.path} · listing ${desc} tok · body ${body} tok · ${flags}`)}`;
+    return `  ${c.ink(`/${s.name}`.padEnd(16))} ${c.ink(s.description || "(no description)")}\n${" ".repeat(19)}${c.faint(`${s.path} · listing ${desc} tok · body ${body} tok · ${flags}`)}`;
   });
   return [
     `${c.soft("Skills")} ${c.ink(`${skills.length}`)}  ${c.faint("/<name> args to run one now; the model picks from the system prompt list (or the skill tool when skills.load = tool)")}`,
@@ -285,7 +285,7 @@ function mcpList(ctx: TuiContext): string {
   return [
     `${c.soft("MCP")} ${c.ink(`${list.length} servers`)}  ${c.faint("tools are named mcp__<server>__<tool>; approval rules mcp:<server>:<tool>; every RPC is an ext/event with source mcp")}`,
     ...list.map(
-      (s) => `  ${s.phase === "ready" ? c.green("✓") : c.zhu("✗")} ${c.ink(describeStatus(s))}`,
+      (s) => `  ${s.phase === "ready" ? c.soft("✓") : c.zhu("✗")} ${c.ink(describeStatus(s))}`,
     ),
   ].join("\n");
 }
@@ -295,7 +295,7 @@ function renderFields(ctx: TuiContext): string {
   const f = ctx.agent.provider.fields;
   if (!f) return c.faint("this provider has no field table");
   const block = (title: string, rows: string[]) => [
-    c.jin(title),
+    c.bold(c.ink(title)),
     ...rows.map((r) => `  ${c.soft("·")} ${c.ink(r)}`),
   ];
   return [
@@ -318,7 +318,7 @@ function renderPrompt(ctx: TuiContext): string {
   ];
   for (const s of sections) {
     lines.push(
-      `  ${c.jin(s.name.padEnd(8))} ${c.soft(`${String(Math.ceil(s.chars / 4)).padStart(6)} tok · ${pct(total > 0 ? s.chars / total : 0).padStart(4)}`)}${s.source ? c.faint(`  ${s.source}`) : ""}`,
+      `  ${c.ink(s.name.padEnd(8))} ${c.soft(`${String(Math.ceil(s.chars / 4)).padStart(6)} tok · ${pct(total > 0 ? s.chars / total : 0).padStart(4)}`)}${s.source ? c.faint(`  ${s.source}`) : ""}`,
     );
   }
   const preamble = log.events[1];
@@ -355,21 +355,21 @@ function memoryCommand(ctx: TuiContext, arg: string): string {
   const [sub, ...restArgs] = arg.split(/\s+/).filter(Boolean);
   if (sub === "clear") {
     const n = files.reduce((acc, f) => acc + clearMemory(f), 0);
-    return c.jin(`◇ cleared ${n} memories`);
+    return c.soft(`· cleared ${n} memories`);
   }
   if (sub === "forget") {
     const idx = Number(restArgs[0]);
     const target = all[idx - 1];
     if (!target) return c.zhu(`no entry ${restArgs[0] ?? "?"} (${all.length} total)`);
     const removed = forgetMemory(target.file, target.i);
-    return c.jin(`◇ removed: ${removed}`);
+    return c.soft(`· removed: ${removed}`);
   }
   if (all.length === 0) return c.faint(`no memories. files: ${files.join(", ")}`);
   const lines = [
     `${c.soft("Memory")} ${c.ink(`${all.length} entries`)}  ${c.faint("injected at the start of the next session · /memory forget N removes one")}`,
   ];
   all.forEach((m, k) => {
-    lines.push(`  ${c.jin(String(k + 1).padStart(2))} ${c.ink(m.text)}  ${c.faint(m.file)}`);
+    lines.push(`  ${c.ink(String(k + 1).padStart(2))} ${c.ink(m.text)}  ${c.faint(m.file)}`);
   });
   return lines.join("\n");
 }
@@ -394,7 +394,7 @@ export function renderContext(ctx: TuiContext): string {
   for (const p of b.parts) {
     const bar = "█".repeat(Math.max(1, Math.round(p.share * 24))).padEnd(24);
     lines.push(
-      `${c.jin(bar)} ${pct(p.share).padStart(4)}  ${c.soft(`${p.tokens} tok · ${p.count} · ${p.label}`)}`,
+      `${c.faint(bar)} ${pct(p.share).padStart(4)}  ${c.soft(`${p.tokens} tok · ${p.count} · ${p.label}`)}`,
     );
   }
   const start = log.events.find((e) => e.type === "session/start");
@@ -438,7 +438,7 @@ function useModel(ctx: TuiContext, name: string, setDefault: boolean): boolean {
     ctx.updateStatus();
     if (setDefault) {
       deps.settings.setDefault(`${choice.providerName}/${choice.model}`);
-      ctx.note(c.jin(`◇ default model set to ${choice.providerName}/${choice.model}`));
+      ctx.note(c.soft(`· default model set to ${choice.providerName}/${choice.model}`));
     }
     return true;
   } catch (err) {
@@ -469,7 +469,7 @@ function switchModel(ctx: TuiContext, arg: string): void {
   }
   openPicker(
     ctx,
-    `${c.bold(c.jin("Model"))}  ${c.faint("configured models; /models asks the server")}`,
+    `${c.bold(c.ink("Model"))}  ${c.faint("configured models; /models asks the server")}`,
     rows,
     "↑↓ choose · Enter switch · d switch and make it the default · Esc close",
     (row, key) => useModel(ctx, row.label, key === "d"),
@@ -511,7 +511,7 @@ export function openLogin(ctx: TuiContext, opts: { intro?: string; provider?: st
       verifyKey: (p, k) => settings.verifyKey?.(p, k) ?? Promise.resolve([]),
       setKey: (p, k) => {
         settings.setKey(p, k);
-        ctx.note(c.jin(`◇ key for ${p} saved to the credentials file`));
+        ctx.note(c.soft(`· key for ${p} saved to the credentials file`));
       },
       useModel: (name, setDefault) => {
         useModel(ctx, name, setDefault);
@@ -532,7 +532,7 @@ function setEffort(ctx: TuiContext, arg: string): void {
     const rows = EFFORT_LEVELS.map((l) => {
       const current = l === agent.effort;
       const unsupported = levels && !levels.includes(l);
-      return `  ${current ? c.jin("▸") : " "} ${current ? c.jin(l) : c.soft(l)}${unsupported ? c.faint("  not declared by this model; clamped down when sending") : ""}`;
+      return `  ${current ? c.ink("▸") : " "} ${current ? c.bold(c.ink(l)) : c.soft(l)}${unsupported ? c.faint("  not declared by this model; clamped down when sending") : ""}`;
     });
     ctx.note(
       `${c.soft("Effort")} ${c.ink(agent.effort ?? "not set (omitted; provider default)")}\n${rows.join("\n")}\n${c.faint("Usage: /effort <level>; /effort auto omits it again")}`,
@@ -541,7 +541,7 @@ function setEffort(ctx: TuiContext, arg: string): void {
   }
   if (arg === "auto") {
     agent.setEffort(undefined);
-    ctx.note(c.jin("◇ effort omitted again"));
+    ctx.note(c.soft("· effort omitted again"));
     ctx.updateStatus();
     return;
   }
@@ -557,7 +557,7 @@ function setEffort(ctx: TuiContext, arg: string): void {
     levels && !levels.includes(level)
       ? c.faint(`  this model declares ${levels.join("/")}; clamped down when sending`)
       : "";
-  ctx.note(c.jin(`◇ effort set to ${level}; applies from the next request`) + clamped);
+  ctx.note(c.soft(`· effort set to ${level}; applies from the next request`) + clamped);
   ctx.updateStatus();
 }
 
@@ -592,7 +592,7 @@ async function listRemoteModels(ctx: TuiContext): Promise<void> {
     label: m,
     ...(m === currentModel && { current: true }),
     note: remote.includes(m)
-      ? `${c.green("✓")} on the server${m === currentModel ? " · current" : ""}`
+      ? `${c.soft("✓")} on the server${m === currentModel ? " · current" : ""}`
       : `${c.zhu("✗")} not on the server; possibly retired`,
   }));
   for (const m of remote) {
@@ -601,7 +601,7 @@ async function listRemoteModels(ctx: TuiContext): Promise<void> {
   }
   openPicker(
     ctx,
-    `${c.bold(c.jin("Models"))}  ${c.soft(providerName)}  ${c.faint(`server ${remote.length} · configured ${configured.length}`)}`,
+    `${c.bold(c.ink("Models"))}  ${c.soft(providerName)}  ${c.faint(`server ${remote.length} · configured ${configured.length}`)}`,
     rows,
     "↑↓ choose · Enter switch · d switch and make it the default · Esc close",
     (row, key) => useModel(ctx, `${providerName}/${row.label}`, key === "d"),
@@ -622,7 +622,7 @@ function setKey(ctx: TuiContext, arg: string): void {
   try {
     ctx.deps.settings.setKey(providerName, key);
     ctx.note(
-      c.jin(`◇ key for ${providerName} saved to the credentials file`) +
+      c.soft(`· key for ${providerName} saved to the credentials file`) +
         c.faint("  /model to switch to that provider"),
     );
   } catch (err) {
@@ -637,7 +637,7 @@ function setDefaultModel(ctx: TuiContext): void {
   }
   const name = `${ctx.model.info.providerName}/${ctx.model.info.model}`;
   ctx.deps.settings.setDefault(name);
-  ctx.note(c.jin(`◇ default model set to ${name}`));
+  ctx.note(c.soft(`· default model set to ${name}`));
 }
 
 async function manualCompact(ctx: TuiContext, instructions: string): Promise<void> {

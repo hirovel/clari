@@ -171,7 +171,7 @@ describe("请求检视器", () => {
     expect(doc).toContain("thinking");
     expect(doc).toContain("用户想读内容");
     expect(doc).toContain("先看看");
-    expect(doc).toContain("⚙ echo");
+    expect(doc).toContain("» echo");
     expect(doc).toContain('"text": "hi"');
     expect(doc).toContain("raw stream");
     expect(doc).toContain("data: [DONE]");

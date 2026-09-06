@@ -134,7 +134,7 @@ describe("会话恢复", () => {
     let doc = app2.lines(100).map(stripAnsi).join("\n");
     expect(doc).toContain("› 第一轮");
     expect(doc).toContain("第一轮回复");
-    expect(doc).toContain(`◇ resumed: ${before} events, appending to`);
+    expect(doc).toContain(`· resumed: ${before} events, appending to`);
     expect(doc).toContain("Request #1"); // 历史请求的发送卡也在
     expect(log.events.filter((e) => e.type === "session/start")).toHaveLength(1);
     expect(log.events.filter((e) => e.type === "session/model")).toHaveLength(0);

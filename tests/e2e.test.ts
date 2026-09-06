@@ -183,10 +183,10 @@ describe("端到端(假服务器)", () => {
     expect(doc).toContain("· retry 1: 429");
     expect(doc).toContain("✓ big");
     expect(doc).toContain(
-      "◇ compacted (llmSummarize(structuredFull, replay)): summary covers events",
+      "≈ compacted (llmSummarize(structuredFull, replay)): summary covers events",
     );
     expect(doc).toContain("完成:文件已看过");
-    expect(doc).toMatch(/usage\s+in 900 \(estimated ≈\S+ · cache 600 · 67%/);
+    expect(doc).toMatch(/Response #\d+ .*in 900 \(estimated ≈\S+ · cache 600 · 67%/);
     expect(doc).toContain("○ idle");
 
     // 检视器视角:四条记录,压缩请求有自己的一行,接收分区有原始流

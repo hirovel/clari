@@ -93,7 +93,7 @@ export function editCommand(ctx: TuiContext, arg: string): string {
   }
   log.append({ type: "context/edit", at: now(), target, field, value });
   return [
-    c.jin(`◇ edited event #${target}.${field} (${value.length} chars)`),
+    c.soft(`· edited event #${target}.${field} (${value.length} chars)`),
     ...consequenceLines(ctx, target),
     c.faint(
       "  · the original stays in the event; Ctrl+E shows the projection, the events view shows context/edit",
@@ -120,9 +120,10 @@ export function dropCommand(ctx: TuiContext, arg: string): string {
     e.type === "assistant/message" && e.toolCalls.length > 0
       ? ` with its ${e.toolCalls.length} tool results`
       : "";
-  return [c.jin(`◇ dropped event #${target}${withResults}`), ...consequenceLines(ctx, target)].join(
-    "\n",
-  );
+  return [
+    c.soft(`· dropped event #${target}${withResults}`),
+    ...consequenceLines(ctx, target),
+  ].join("\n");
 }
 
 /** 某事件在投影里可改的主字段与它的原值。 */
@@ -164,8 +165,8 @@ export function compareCommand(ctx: TuiContext, arg: string): string {
   for (const [field, value] of fields) {
     const before = originalValue(ctx, target, field);
     out.push(
-      c.jin(
-        `◇ #${target}.${field}  original ${before.length} chars → current ${value.length} chars`,
+      c.soft(
+        `· #${target}.${field}  original ${before.length} chars → current ${value.length} chars`,
       ),
     );
     out.push(
@@ -198,8 +199,8 @@ export function restoreCommand(ctx: TuiContext, arg: string): string {
     });
   }
   return [
-    c.jin(
-      `◇ restored event #${target} (${fields.join(", ")}) · recorded as another edit, nothing deleted`,
+    c.soft(
+      `· restored event #${target} (${fields.join(", ")}) · recorded as another edit, nothing deleted`,
     ),
     ...consequenceLines(ctx, target),
   ].join("\n");
@@ -225,8 +226,8 @@ export function rewindCommand(ctx: TuiContext, arg: string): string {
   for (const { i } of victims)
     log.append({ type: "context/drop", at: now(), target: i, note: `rewind to #${target}` });
   return [
-    c.jin(
-      `◇ rewound to event #${target}: dropped ${victims.length} message${victims.length === 1 ? "" : "s"} after it (tool results go with their calls)`,
+    c.soft(
+      `· rewound to event #${target}: dropped ${victims.length} message${victims.length === 1 ? "" : "s"} after it (tool results go with their calls)`,
     ),
     c.faint(
       "  · nothing is deleted; the next request starts from here · /retry asks again, or type a new message",
@@ -246,7 +247,7 @@ export async function retryStep(ctx: TuiContext): Promise<void> {
     const pending = agent.retry();
     ctx.updateStatus();
     const outcome = await pending;
-    if (typeof outcome === "object") ctx.note(c.jin(`◇ loop stopped: ${outcome.stopped}`));
+    if (typeof outcome === "object") ctx.note(c.soft(`· loop stopped: ${outcome.stopped}`));
   } catch (err) {
     ctx.note(c.zhu(`✗ ${(err as Error).message}`));
   } finally {
@@ -263,8 +264,8 @@ export function editsList(ctx: TuiContext): string {
   return rows
     .map(({ e, i }) =>
       e.type === "context/edit"
-        ? `  ${c.jin(`#${i}`)} ${c.ink(`edit #${e.target}.${e.field}`)} ${c.faint(`${e.value.length} chars ${e.at.slice(11, 19)}`)}`
-        : `  ${c.jin(`#${i}`)} ${c.ink(`drop #${(e as { target: number }).target}`)} ${c.faint(e.at.slice(11, 19))}`,
+        ? `  ${c.ink(`#${i}`)} ${c.ink(`edit #${e.target}.${e.field}`)} ${c.faint(`${e.value.length} chars ${e.at.slice(11, 19)}`)}`
+        : `  ${c.ink(`#${i}`)} ${c.ink(`drop #${(e as { target: number }).target}`)} ${c.faint(e.at.slice(11, 19))}`,
     )
     .join("\n");
 }
@@ -283,7 +284,7 @@ export function forkCommand(ctx: TuiContext, arg: string): string {
     if (upTo < 1) return c.faint("nothing to fork yet");
   }
   const r = forkSession(log.events, upTo, ctx.deps.sessionsDir ?? SESSIONS_DIR);
-  return `${c.jin(`◇ forked: first ${r.events} events → ${r.file}`)}\n${c.faint(`  pnpm tui -- --resume ${r.file}   continues from there; this session is untouched`)}`;
+  return `${c.soft(`· forked: first ${r.events} events → ${r.file}`)}\n${c.faint(`  pnpm tui -- --resume ${r.file}   continues from there; this session is untouched`)}`;
 }
 
 /** 上下文面板(Ctrl+E)里选中一条消息后的动作:全部落到已有命令上,面板只是入口。 */

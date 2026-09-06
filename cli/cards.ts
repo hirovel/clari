@@ -11,7 +11,7 @@ import type { AgentEvent } from "../src/events.js";
 import type { Message } from "../src/messages.js";
 import type { ToolDef } from "../src/provider.js";
 import { fmtMs, fmtTok } from "./inspector.js";
-import { c } from "./theme.js";
+import { c, G } from "./theme.js";
 
 type RequestEvent = Extract<AgentEvent, { type: "request" }>;
 type AssistantEvent = Extract<AgentEvent, { type: "assistant/message" }>;
@@ -128,7 +128,7 @@ export function previewOf(m: Message): string {
 
 function previewOfFresh(m: Message): string {
   return m.role === "assistant" && !m.content && m.toolCalls.length > 0
-    ? `⚙ ${m.toolCalls.map((t) => t.name).join(" ")}`
+    ? `» ${m.toolCalls.map((t) => t.name).join(" ")}`
     : firstLine(m.content);
 }
 
@@ -379,7 +379,7 @@ export function sendCardLines(input: SendCardInput): string[] {
         "limit",
         room > 0
           ? c.faint(`${fmtTok(room)} tok until the compaction threshold (${fmtTok(r.threshold)})`)
-          : c.jin(`over the auto-compaction threshold by ${fmtTok(-room)} tok`),
+          : c.zhu(`over the auto-compaction threshold by ${fmtTok(-room)} tok`),
       ),
     );
   } else lines.push(g("limit", c.faint("no compaction configured")));
@@ -399,8 +399,9 @@ export type ReceiveHeadInput = {
   predictedCache?: number;
 };
 
-function usageLine(input: ReceiveHeadInput, u: AssistantEvent["usage"]): string {
-  if (!u) return g("usage", c.faint("no usage reported by the provider"));
+/** usage 段:实测用量、缓存命中率与预计的对照;接在 Response 头行后面,不再单独一行。 */
+function usageText(input: ReceiveHeadInput, u: AssistantEvent["usage"]): string {
+  if (!u) return "no usage reported by the provider";
   // 预计与实测并排:实测明显低于预计,说明有别的东西在破坏前缀。
   const inner = [`estimated ≈${fmtTok(input.estimated)}`];
   if (u.cacheReadTokens !== undefined && u.inputTokens > 0) {
@@ -416,10 +417,10 @@ function usageLine(input: ReceiveHeadInput, u: AssistantEvent["usage"]): string 
     ...(u.reasoningTokens !== undefined ? [`reasoning ${fmtTok(u.reasoningTokens)}`] : []),
     ...(u.cacheWriteTokens !== undefined ? [`cache write ${fmtTok(u.cacheWriteTokens)}`] : []),
   ];
-  return g("usage", c.faint(parts.join(" · ")));
+  return parts.join(" · ");
 }
 
-/** 接收卡的头:一眼看到停止原因、耗时、费用;第二行是实测用量、缓存命中率与预计的对照。 */
+/** 接收卡的头,一行:停止原因、耗时、费用,接实测用量、缓存命中率与预计的对照。宽度不够时按悬挂缩进折行。 */
 export function receiveHead(input: ReceiveHeadInput): string {
   const { n } = input;
   const title = (tail: string) => `${c.soft(`Response #${n}`)}   ${c.faint(tail)}`;
@@ -428,18 +429,21 @@ export function receiveHead(input: ReceiveHeadInput): string {
   if (input.response) {
     const e = input.response;
     const cost = input.price && e.usage ? [fmtCost(costOf(e.usage, input.price))] : [];
-    return [
-      title([e.stopReason, fmtMs(e.latencyMs), ...cost].join(" · ")),
-      usageLine(input, e.usage),
-    ].join("\n");
+    return title(
+      [e.stopReason, fmtMs(e.latencyMs), ...cost, usageText(input, e.usage)].join(" · "),
+    );
   }
   if (input.compaction) {
     const k = input.compaction;
     const cost = input.price && k.usage ? [fmtCost(costOf(k.usage, input.price))] : [];
-    return [
-      title([`summary ${k.summary?.length ?? 0} chars`, fmtMs(k.latencyMs), ...cost].join(" · ")),
-      usageLine(input, k.usage),
-    ].join("\n");
+    return title(
+      [
+        `summary ${k.summary?.length ?? 0} chars`,
+        fmtMs(k.latencyMs),
+        ...cost,
+        usageText(input, k.usage),
+      ].join(" · "),
+    );
   }
   return `${c.soft(`Response #${n}`)}   ${c.faint("waiting…")}`;
 }
@@ -512,9 +516,9 @@ export function thinkingLines(
   ];
 }
 
-/** 调用行:⚙ 朱色(工具是朱的),名字加粗,参数次要色。 */
+/** 调用行:» 朱色(工具是朱的),名字加粗,参数次要色。 */
 export function callLine(name: string, args: string): string {
-  return g("call", `${c.zhu("⚙")} ${c.bold(c.ink(name))}  ${c.soft(args)}`);
+  return g("call", `${c.zhu(G.call)} ${c.bold(c.ink(name))}  ${c.soft(args)}`);
 }
 
 /**
@@ -525,7 +529,8 @@ export function resultLines(
   r: { name: string; content: string; isError: boolean; durationMs?: number },
   opts: { folded: boolean; head: number },
 ): string[] {
-  const mark = r.isError ? c.zhu("✗") : c.green("✓");
+  // 静成功、响失败:✓ 是墨色,只有 ✗ 用朱。
+  const mark = r.isError ? c.zhu(G.err) : c.soft(G.ok);
   const trimmed = r.content.trim();
   const all = trimmed ? trimmed.split("\n") : [];
   const meta = [
@@ -607,7 +612,7 @@ export function firstRunLines(): string[] {
 
 /** ? 键:全部快捷键,一屏说完。 */
 export function shortcutLines(): string[] {
-  const k = (key: string, what: string) => `  ${c.jin(key.padEnd(12))} ${c.soft(what)}`;
+  const k = (key: string, what: string) => `  ${c.ink(key.padEnd(12))} ${c.soft(what)}`;
   return [
     c.soft("Shortcuts"),
     k("Enter", "send · Alt+Enter queue for after the current step"),

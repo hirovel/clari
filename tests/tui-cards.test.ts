@@ -137,7 +137,7 @@ describe("屏幕:完整 turn、卡片、折叠、diff、错误、打断", () => 
     expect(doc).toContain("clari");
     expect(doc).toContain("fake-model");
     expect(doc).toContain("› 读一下");
-    expect(doc).toContain("⚙ echo");
+    expect(doc).toContain("» echo");
     expect(doc).toContain("✓ echo");
     expect(doc).toContain("echo:hi");
     expect(doc).toContain("完成");
@@ -363,7 +363,7 @@ describe("少见事件与流式思考的渲染", () => {
     await app.submit("go");
     let d = doc(app);
     expect(d).toContain("thinking");
-    expect(d).toContain("⚙ task");
+    expect(d).toContain("» task");
     term.feed("\x14");
     d = doc(app);
     expect(d).toContain("thinking hard about it");

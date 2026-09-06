@@ -81,7 +81,7 @@ function eventBodyLines(events: readonly AgentEvent[], i: number): string[] {
   const e = events[i];
   if (!e) return [];
   const head = (label: string) =>
-    `${c.jin(`#${i}`)} ${c.ink(label)}  ${c.soft(`${eventTokens(e)} tok`)}`;
+    `${c.ink(`#${i}`)} ${c.ink(label)}  ${c.soft(`${eventTokens(e)} tok`)}`;
   switch (e.type) {
     case "user/message":
       return [head("user"), ...indent(e.text).map((l) => c.ink(l)), ""];
@@ -90,7 +90,7 @@ function eventBodyLines(events: readonly AgentEvent[], i: number): string[] {
       if (e.reasoning) lines.push(...indent(e.reasoning).map((l) => c.faint(c.italic(l))));
       if (e.text) lines.push(...indent(e.text).map((l) => c.ink(l)));
       for (const tc of e.toolCalls) {
-        lines.push(c.soft(`    ⚙ ${tc.name} ${JSON.stringify(tc.args)}`));
+        lines.push(c.soft(`    » ${tc.name} ${JSON.stringify(tc.args)}`));
       }
       lines.push("");
       return lines;
@@ -151,10 +151,10 @@ export function compactionLines(
         const max = Math.max(rec.coveredTokens, rec.summaryTokens, 1);
         const bar = (n: number) => "█".repeat(Math.max(1, Math.round((n / max) * 30))).padEnd(30);
         lines.push(
-          `${c.soft("original")} ${c.jin(bar(rec.coveredTokens))} ${c.faint(`${rec.coveredTokens} tok`)}`,
+          `${c.soft("original")} ${c.faint(bar(rec.coveredTokens))} ${c.faint(`${rec.coveredTokens} tok`)}`,
         );
         lines.push(
-          `${c.soft("summary ")} ${c.jin(bar(rec.summaryTokens))} ${c.faint(`${rec.summaryTokens} tok`)}`,
+          `${c.soft("summary ")} ${c.faint(bar(rec.summaryTokens))} ${c.faint(`${rec.summaryTokens} tok`)}`,
         );
         lines.push("");
       }

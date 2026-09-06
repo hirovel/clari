@@ -96,7 +96,7 @@ describe("子 agent 视图", () => {
     expect(app.children()).toHaveLength(1);
 
     // 调用行、引导线、完成态进度、尾窗提示
-    expect(doc).toContain("⚙ task  统计 echo 两次");
+    expect(doc).toContain("» task  统计 echo 两次");
     expect(doc).toContain("┆ ✓ sub-1 · done · step 2 · 1 tool calls");
     expect(doc).toContain("420 tok");
     expect(doc).toContain("┆ sub-session"); // 完成后收起为一行
@@ -107,7 +107,7 @@ describe("子 agent 视图", () => {
     // Ctrl+O 循环到"全部":子的每一行都带引导线
     app.toggleFold();
     const all = app.lines(110).map(stripAnsi).join("\n");
-    expect(all).toContain('┆ ⚙ echo  {"text":"one"}');
+    expect(all).toContain('┆ » echo  {"text":"one"}');
     expect(all).toContain("┆ ✓ echo");
     expect(all).toContain("┆ 子先回显");
 
@@ -143,7 +143,7 @@ describe("子 agent 视图", () => {
       toolCalls: [{ id: "x", name: "bash", args: { command: "ls" } }],
       stopReason: "tool",
     }).map(stripAnsi);
-    expect(lines).toEqual(["想一下", "第一行", "第二行", "⚙ bash  ls"]);
+    expect(lines).toEqual(["想一下", "第一行", "第二行", "» bash  ls"]);
     const result = childEventLines({
       type: "tool/result",
       at: "t",

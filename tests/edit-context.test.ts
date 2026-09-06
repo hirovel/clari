@@ -140,7 +140,7 @@ describe("界面命令", () => {
       value: "换个思路,先读文件",
     });
     let doc = text(a);
-    expect(doc).toContain("◇ edited event #2.reasoning");
+    expect(doc).toContain("· edited event #2.reasoning");
     expect(doc).toContain("thinking blocks after this point are no longer");
 
     await a.command("/edit 4 reasoning 试图改摘要");
@@ -156,7 +156,7 @@ describe("界面命令", () => {
 
     await a.command("/drop 2 走错方向");
     expect(log.events.at(-1)).toMatchObject({ type: "context/drop", target: 2, note: "走错方向" });
-    expect(text(a)).toContain("◇ dropped event #2 with its 1 tool results");
+    expect(text(a)).toContain("· dropped event #2 with its 1 tool results");
 
     await a.command("/edits");
     doc = text(a);

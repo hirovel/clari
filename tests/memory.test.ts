@@ -299,10 +299,10 @@ describe("TUI /memory 与 /prompt", () => {
     expect(doc).toContain("[correction] 2026-09-03 一");
     expect(doc).toContain("[preference] 2026-09-03 二");
     await on.command("/memory forget 2");
-    expect(text(on)).toContain("◇ removed: [preference] 2026-09-03 二");
+    expect(text(on)).toContain("· removed: [preference] 2026-09-03 二");
     expect(memoryEntries(readFileSync(user, "utf8"))).toHaveLength(0);
     await on.command("/memory clear");
-    expect(text(on)).toContain("◇ cleared 1 memories");
+    expect(text(on)).toContain("· cleared 1 memories");
     expect(memoryEntries(readFileSync(project, "utf8"))).toHaveLength(0);
     on.stop();
   });

@@ -78,7 +78,7 @@ export class ApprovalPrompt implements Component {
     const options = OPTIONS(this.call.name);
     const width = Math.max(...options.map((o) => o.label.length));
     const rows = options.map((o, i) => {
-      const cursor = i === this.index ? c.jin("▸") : " ";
+      const cursor = i === this.index ? c.ink("▸") : " ";
       const label = o.label.padEnd(width);
       const text = i === this.index ? c.bold(c.ink(label)) : c.ink(label);
       const key = o.kind === "n" ? `${o.key} · Esc` : o.key;
@@ -231,17 +231,17 @@ export function recordSlot(ctx: TuiContext, slot: string, value: string): void {
 /** /slots:当前每个槽的实现。全部是可切换的;切换记事件。 */
 export function slotsList(ctx: TuiContext): string {
   const rows = Object.entries(ctx.slots.state).map(
-    ([k, val]) => `  ${c.jin(k.padEnd(13))} ${c.ink(val)}`,
+    ([k, val]) => `  ${c.ink(k.padEnd(13))} ${c.ink(val)}`,
   );
   return [
     `${c.soft("Slots")}  ${c.faint("switch with /compaction /preservation /execution /steering /approve /toolprompts; each switch is a session/slot event")}`,
     ...rows,
-    `  ${c.jin("termination".padEnd(13))} ${c.ink(ctx.deps.slots?.termination ? "custom" : "untilIdle")}  ${c.faint("(--max-steps N at startup)")}`,
+    `  ${c.ink("termination".padEnd(13))} ${c.ink(ctx.deps.slots?.termination ? "custom" : "untilIdle")}  ${c.faint("(--max-steps N at startup)")}`,
   ].join("\n");
 }
 
 const done = (slot: string, value: string, when = "takes effect from the next turn") =>
-  `${c.jin(`◇ ${slot} → ${value}`)}  ${c.faint(when)}`;
+  `${c.soft(`· ${slot} → ${value}`)}  ${c.faint(when)}`;
 
 async function compactionSlot(ctx: TuiContext, v: string): Promise<string> {
   const { compaction } = ctx;
@@ -370,7 +370,7 @@ function toolPromptsSlot(ctx: TuiContext, v: string): string {
   if (!sub) {
     const rows = TOOL_PROMPT_STYLES.map((st) => {
       const tok = styleTokens(tools, { ...cfg, style: st });
-      const mark = st === cfg.style ? c.jin("●") : c.faint("○");
+      const mark = st === cfg.style ? c.ink("●") : c.faint("○");
       return `  ${mark} ${c.ink(st.padEnd(8))} ${c.soft(String(tok).padStart(5))} ${c.faint("tok")}  ${c.faint(STYLE_NOTES[st])}`;
     });
     const edited = Object.keys(cfg.descriptions ?? {});

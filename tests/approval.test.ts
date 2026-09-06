@@ -184,13 +184,13 @@ describe("日志半行恢复", () => {
 
 describe("统一入口", () => {
   it("clari once --help 走一次性入口,exit 0", () => {
-    const r = spawnSync("npx", ["tsx", "cli/main.ts", "once", "--help"], {
-      cwd: process.cwd(),
-      encoding: "utf8",
-      shell: true,
-      timeout: 60000,
-    });
+    // 直接用本机 node 跑 tsx 的入口:npx 的解析本身要 4 秒多,会撞上测试的 5 秒上限。
+    const r = spawnSync(
+      process.execPath,
+      ["node_modules/tsx/dist/cli.mjs", "cli/main.ts", "once", "--help"],
+      { cwd: process.cwd(), encoding: "utf8", timeout: 60000 },
+    );
     expect(r.status).toBe(0);
     expect(r.stdout.length).toBeGreaterThan(0);
-  });
+  }, 30000);
 });

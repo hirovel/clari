@@ -37,7 +37,7 @@ import { fmtTok, RequestInspector, type SessionSource } from "./inspector.js";
 import type { McpServerStatus } from "./mcp/bridge.js";
 import type { Skill } from "./prompt.js";
 import type { PromptTemplate } from "./templates.js";
-import { c, editorTheme } from "./theme.js";
+import { c, editorTheme, G } from "./theme.js";
 import type { MemoryFiles } from "./tools/memory.js";
 import { Block, SplitLine } from "./tui-block.js";
 import { COMMANDS, command, openLogin, submit } from "./tui-commands.js";
@@ -355,8 +355,8 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       const { info } = ctx.model;
       header.setText(
         info.providerName === "none"
-          ? `${c.bold(c.jin("clari"))}  ${c.zhu("no model")}  ${c.faint(`/login to add an API key · ${info.sessionFile}`)}`
-          : `${c.bold(c.jin("clari"))}  ${c.ink(info.model)}  ${c.faint(`${info.providerName} · ${info.sessionFile}`)}`,
+          ? `${c.zhu(G.seal)} ${c.bold(c.jin("clari"))}  ${c.zhu("no model")}  ${c.faint(`/login to add an API key · ${info.sessionFile}`)}`
+          : `${c.zhu(G.seal)} ${c.bold(c.jin("clari"))}  ${c.ink(info.model)}  ${c.faint(`${info.providerName} · ${info.sessionFile}`)}`,
       );
     },
     updateStatus,
@@ -421,17 +421,17 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
 
   /** 状态行:左边是状态与上下文占用,右边是会话累计与快捷键入口;放不下时右边先让。 */
   function updateStatus(): void {
-    const state = agent.running ? c.zhu("● running") : c.green("○ idle");
+    const state = agent.running ? c.zhu(`${G.running} running`) : c.soft(`${G.idle} idle`);
     const t = ctx.threshold();
     let tokens = c.faint("no requests yet");
     const usage = ctx.view.lastUsage;
     if (usage) {
-      // 上下文占用条:以自动压缩阈值为满格;过七成转朱色提醒。
+      // 上下文占用条:以自动压缩阈值为满格;细线淡色是背景信息,过七成才转朱色提醒。
       // 口径与请求卡的 limit 行一致:实测优先、压缩后按估算,手动 /compact 之后状态栏立刻回落。
       const used = Math.min(1, contextTokens(log.events) / t);
       const cells = used > 0 ? Math.max(1, Math.round(used * 10)) : 0;
-      const bar = "▰".repeat(cells) + "▱".repeat(10 - cells);
-      const tone = used >= 0.7 ? c.zhu : c.jin;
+      const bar = "━".repeat(cells) + "┄".repeat(10 - cells);
+      const tone = used >= 0.7 ? c.zhu : c.faint;
       const trigger = compaction.trigger ?? "threshold";
       const room = `${pct(Math.max(0, 1 - used))} ${trigger === "threshold" ? "until auto-compaction" : "until the compaction threshold"}`;
       const over =
@@ -463,7 +463,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     log.subscribe(draw);
     if (log.events.length > 1) {
       ctx.note(
-        c.jin(`◇ resumed: ${log.events.length} events, appending to ${deps.info.sessionFile}`),
+        c.soft(`· resumed: ${log.events.length} events, appending to ${deps.info.sessionFile}`),
       );
     }
   } else {

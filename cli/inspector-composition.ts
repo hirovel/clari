@@ -41,7 +41,7 @@ export function compositionRow(r: CompositionRow, selected: boolean): string {
   const tok = messageTokens(m);
   const brief =
     m.role === "assistant" && !m.content && m.toolCalls.length > 0
-      ? `⚙ ${m.toolCalls.map((t) => t.name).join(" ")}`
+      ? `» ${m.toolCalls.map((t) => t.name).join(" ")}`
       : firstLine(m.content);
   const wire = r.wire === undefined ? "  ?" : r.wire < 0 ? "top" : String(r.wire).padStart(3);
   const stages = r.stages.length > 0 ? r.stages.join(" ") : "";
@@ -64,17 +64,17 @@ export function compositionLines(events: readonly AgentEvent[], r: CompositionRo
     "",
   ];
   if (m.role === "assistant" && m.reasoning) {
-    lines.push(c.jin(`reasoning (${m.reasoningKind ?? "?"})`));
+    lines.push(c.bold(c.soft(`reasoning (${m.reasoningKind ?? "?"})`)));
     lines.push(...indent(m.reasoning).map((l) => c.faint(c.italic(l))));
     lines.push("");
   }
-  lines.push(c.jin("content"));
+  lines.push(c.bold(c.soft("content")));
   lines.push(...(m.content ? indent(m.content).map((l) => c.ink(l)) : [c.faint("    (empty)")]));
   if (m.role === "assistant" && m.toolCalls.length > 0) {
     lines.push("");
-    lines.push(c.jin(`tool calls ${m.toolCalls.length}`));
+    lines.push(c.bold(c.soft(`tool calls ${m.toolCalls.length}`)));
     for (const tc of m.toolCalls)
-      lines.push(c.soft(`    ⚙ ${tc.name} ${JSON.stringify(tc.args)}  ${c.faint(tc.id)}`));
+      lines.push(c.soft(`    » ${tc.name} ${JSON.stringify(tc.args)}  ${c.faint(tc.id)}`));
   }
   if (m.role === "assistant" && m.opaque !== undefined) {
     lines.push("");

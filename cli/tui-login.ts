@@ -27,16 +27,10 @@ export function renderRows(rows: PickRow[], index: number): string[] {
   const width = Math.max(0, ...rows.map((r) => r.label.length));
   const numWidth = String(rows.length).length;
   return rows.map((r, i) => {
-    const mark = i === index ? c.jin("▸") : " ";
+    const mark = i === index ? c.ink("▸") : " ";
     const num = i < 9 ? `${i + 1}.`.padStart(numWidth + 1) : " ".repeat(numWidth + 1);
     const label = r.label.padEnd(width);
-    const text = r.disabled
-      ? c.faint(label)
-      : r.current
-        ? c.jin(label)
-        : i === index
-          ? c.bold(c.ink(label))
-          : c.ink(label);
+    const text = r.disabled ? c.faint(label) : i === index ? c.bold(c.ink(label)) : c.ink(label);
     return `  ${mark} ${r.disabled ? c.faint(num) : c.faint(num)} ${text}${r.note ? `  ${c.faint(r.note)}` : ""}`;
   });
 }
@@ -173,14 +167,14 @@ export class LoginDialog implements Component {
     if (s.kind === "providers") {
       const rows = this.providerRows();
       return [
-        `${c.bold(c.jin("Set up a provider"))}  ${c.faint(this.intro ?? "pick a provider, paste its key, choose a model")}`,
+        `${c.bold(c.ink("Set up a provider"))}  ${c.faint(this.intro ?? "pick a provider, paste its key, choose a model")}`,
         ...renderRows(rows, s.index),
         c.faint("  ↑↓ choose · Enter continue · Esc close (/login opens this again)"),
       ];
     }
     if (s.kind === "key") {
       return [
-        `${c.bold(c.jin(s.provider.name))}  ${c.faint("paste the API key; input is masked and never shown or logged")}`,
+        `${c.bold(c.ink(s.provider.name))}  ${c.faint("paste the API key; input is masked and never shown or logged")}`,
         `  ${c.soft("key:")} ${c.ink(masked(s.buffer))}${c.faint("▏")}`,
         ...(s.error ? [`  ${c.zhu(`✗ ${s.error}`)}`] : []),
         c.faint("  Enter check and save · Esc back"),
@@ -188,11 +182,11 @@ export class LoginDialog implements Component {
     }
     if (s.kind === "checking") {
       return [
-        `${c.bold(c.jin(s.provider.name))}  ${c.faint("checking the key with GET /models …")}`,
+        `${c.bold(c.ink(s.provider.name))}  ${c.faint("checking the key with GET /models …")}`,
       ];
     }
     return [
-      `${c.bold(c.jin(s.provider.name))}  ${c.green("✓")} ${c.soft(`key saved · ${s.remote} models on the server`)}`,
+      `${c.bold(c.ink(s.provider.name))}  ${c.soft("✓")} ${c.soft(`key saved · ${s.remote} models on the server`)}`,
       ...renderRows(s.rows, s.index),
       c.faint("  ↑↓ choose · Enter use this model · d use it and make it the default · Esc done"),
     ];
