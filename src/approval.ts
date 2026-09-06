@@ -3,6 +3,7 @@
 // 内核不认识"危险命令":它只按规则匹配。哪些命令危险是用户的知识,写进 deny 规则。
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { ToolCall } from "./events.js";
+import type { ApproveOrigin } from "./loop.js";
 
 export type ApprovalConfig = {
   /** 没有规则命中时:ask(缺省)= 问人;allow = 放行。 */
@@ -137,10 +138,12 @@ export function describeApproval(cfg: ApprovalConfig): string {
  */
 export function policyApprove(
   cfg: ApprovalConfig,
-  asker: ((call: ToolCall, why: string) => Promise<ApproveDecision>) | undefined,
+  asker:
+    | ((call: ToolCall, why: string, origin?: ApproveOrigin) => Promise<ApproveDecision>)
+    | undefined,
   cwd = process.cwd(),
-): (call: ToolCall) => Promise<ApproveDecision> {
-  return async (call) => {
+): (call: ToolCall, origin?: ApproveOrigin) => Promise<ApproveDecision> {
+  return async (call, origin) => {
     const v = decide(call, cfg, cwd);
     if (v.verdict === "allow") return true;
     if (v.verdict === "deny") return { allowed: false, reason: `approval policy: ${v.reason}` };
@@ -150,6 +153,6 @@ export function policyApprove(
         reason: `approval policy: ${v.reason}; no one to ask in one-shot mode, add an allow rule or run with --approve all`,
       };
     }
-    return asker(call, v.reason);
+    return asker(call, v.reason, origin);
   };
 }

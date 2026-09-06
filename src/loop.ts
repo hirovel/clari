@@ -39,8 +39,14 @@ export const steer: SteeringPolicy = () => true;
 /** Codex 谱系:只在 turn 结束时投递。 */
 export const queueToTurnEnd: SteeringPolicy = (boundary) => boundary === "turn";
 
+/** 谁在问:子 agent 的调用带上自己的名字,审批提示据此标明来源。主会话不带。 */
+export type ApproveOrigin = { agent: string };
+
 /** 审批策略:执行每个工具调用前询问。false 或 {allowed:false} = 拒绝,以错误结果回喂,理由原样带上。 */
-export type ApprovePolicy = (call: ToolCall) => ApproveDecision | Promise<ApproveDecision>;
+export type ApprovePolicy = (
+  call: ToolCall,
+  origin?: ApproveOrigin,
+) => ApproveDecision | Promise<ApproveDecision>;
 
 /** pi 立场:不弹确认,要隔离就跑容器(默认)。 */
 export const allowAll: ApprovePolicy = () => true;
@@ -82,6 +88,8 @@ export type TurnDeps = {
   effort?: EffortLevel | (() => EffortLevel | undefined);
   /** 压缩配置:给了就启用自动触发与溢出恢复。 */
   compaction?: CompactionConfig;
+  /** 运行这个 turn 的 agent 名(子 agent 用);审批提示据此标明是谁在问。主会话不填。 */
+  agent?: string;
 };
 
 export type CompactionTrigger = "threshold" | "manual" | "remind";
@@ -276,6 +284,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
         approve,
         execution,
         ...(signal && { signal }),
+        ...(deps.agent && { origin: { agent: deps.agent } }),
       });
       if (signal?.aborted) return "aborted";
     }
@@ -401,6 +410,7 @@ async function executeCalls(
     approve: ApprovePolicy;
     execution: ExecutionPolicy;
     signal?: AbortSignal;
+    origin?: ApproveOrigin;
   },
 ): Promise<void> {
   const signal = ctx.signal ?? new AbortController().signal;
@@ -409,7 +419,7 @@ async function executeCalls(
   const prepare = async (call: ToolCall): Promise<Prepared> => {
     const tool = ctx.tools.find((t) => t.name === call.name);
     if (!tool) return { call, immediate: `Unknown tool "${call.name}".` };
-    const decision = await ctx.approve(call);
+    const decision = await ctx.approve(call, ctx.origin);
     const allowed = typeof decision === "boolean" ? decision : decision.allowed;
     if (!allowed) {
       const reason = typeof decision === "object" ? decision.reason : undefined;

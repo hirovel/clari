@@ -16,6 +16,8 @@ export type AgentOptions = {
   onRaw?: (line: string) => void;
   /** 强度级别,缺省不传;setEffort 会话中切换,下一请求生效。 */
   effort?: EffortLevel;
+  /** 这个 agent 的名字(子 agent 用);审批提示据此标明是谁在问。 */
+  agent?: string;
 };
 
 /** 留言的投递方式:steer = 下一个步边界就注入(缺省);followUp = 等模型把手头的事做完再给。 */
@@ -140,6 +142,7 @@ export class Agent {
       ...(this.opts.onReasoning && { onReasoning: this.opts.onReasoning }),
       ...(this.opts.onRaw && { onRaw: this.opts.onRaw }),
       effort: () => this.opts.effort,
+      ...(this.opts.agent && { agent: this.opts.agent }),
     });
     try {
       return await this.active;

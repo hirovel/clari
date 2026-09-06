@@ -11,6 +11,8 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 - Internal refactor: TUI, inspector and bootstrap split into single-purpose modules; session replay is near-linear (9000 events 48 s to 3.7 s); one token estimate; coverage 83% to 90%.
 - Architecture document rewritten around reading the code; decision numbers removed from code comments.
 - Fixed text the model reads is English throughout: unknown tool, truncated response, interrupted call, cleared tool result placeholder and compaction summary header.
+- Sub-agents: child tool calls go through the parent's approval (`subagents.approval`: `inherit` by default, `allow`, or `{ deny }` to tighten); approval prompts name the asking sub-agent. Optional step limit (`subagents.maxSteps`, per type), resume with `task(resume: "sub-N")`, type registry (`subagents.types`: description, system, tools, model, scope, maxSteps), nesting depth (`subagents.depth`). Child view header shows id, type, resumed and a four-state status. Task descriptions, scope notes, result labels and errors are English.
+- Tool descriptions are one source per tool in three parts (core, guidance, rules) composed by level: `brief`, `explain` (default), `rules`. Replaces the `guided` / `terse` / `strict` tables; the old names are rejected at startup.
 
 ## [0.1.0] - 2026-09-04
 

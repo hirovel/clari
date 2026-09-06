@@ -129,6 +129,11 @@ const baseTools = buildTools(
   args.skillsLoad === "tool" ? skills : undefined,
   boot.config.fetch,
   toolPromptsCfg,
+  {
+    ...(boot.config.subagents && { config: boot.config.subagents }),
+    slots: () => app?.slots(),
+    providerFor: (model) => boot.choose(model).provider,
+  },
 );
 // 扩展模块的工具重名时覆盖内置的。
 const tools = [

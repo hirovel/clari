@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
-import { defineTool } from "../../src/tools.js";
+import { defineTool, described } from "../../src/tools.js";
 import { keepTail, type TruncationPolicy } from "./truncate.js";
 
 /** 缺省超时(秒)与输出缓冲上限(字节)。超过就杀进程树,已收到的部分照常返回并说明。 */
@@ -20,11 +20,17 @@ export function createBashTool(
   const maxBytes = opts.maxOutputBytes ?? MAX_OUTPUT_BYTES;
   return defineTool({
     name: "bash",
-    description:
-      "Run a bash command in the current working directory; returns stdout and stderr combined. " +
-      `Default timeout ${defaultTimeout} s; raise the timeout parameter for long tasks. ` +
-      "Output past the limit is truncated and the full output is saved to a temp file whose path is appended. " +
-      "For reading and searching files prefer read, grep and glob; use bash for builds, tests, git and other commands.",
+    ...described({
+      core:
+        "Run a bash command in the current working directory; returns stdout and stderr combined. " +
+        `Default timeout ${defaultTimeout} s; raise the timeout parameter for long tasks. ` +
+        "Output past the limit is truncated and the full output is saved to a temp file whose path is appended.",
+      guidance:
+        "For reading and searching files prefer read, grep and glob; use bash for builds, tests, git and other commands. " +
+        "Quote paths that contain spaces.",
+      rules:
+        "NEVER use bash to read or search files (cat, head, grep, find, ls); use read, grep and glob.",
+    }),
     parameters: Type.Object({
       command: Type.String({ description: "bash command to run" }),
       timeout: Type.Optional(

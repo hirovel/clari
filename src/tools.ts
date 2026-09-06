@@ -12,9 +12,41 @@ export type ToolContext = {
   callId?: string;
 };
 
+/**
+ * 描述的分段:core 说做什么、参数含义与硬限制;guidance 说什么时候该换别的工具、失败原因、省 token 的用法;
+ * rules 是 ALWAYS / NEVER 的工具选择禁令;suffix 任何档都附在末尾(如 task 的类型与范围列表)。
+ * 一份来源,风格槽只决定拼到第几段;内核只发 description 字符串。
+ */
+export type DescriptionParts = { core: string; guidance?: string; rules?: string; suffix?: string };
+
+/** 拼接层级:brief 只有 core;explain 加 guidance;rules 三段都要。 */
+export type DescriptionLevel = "brief" | "explain" | "rules";
+export const DESCRIPTION_LEVELS: DescriptionLevel[] = ["brief", "explain", "rules"];
+
+export function composeDescription(parts: DescriptionParts, level: DescriptionLevel): string {
+  const body = [
+    parts.core,
+    level !== "brief" ? parts.guidance : undefined,
+    level === "rules" ? parts.rules : undefined,
+  ]
+    .filter((p): p is string => Boolean(p))
+    .join(" ");
+  return parts.suffix ? `${body}\n\n${parts.suffix}` : body;
+}
+
+/** 工具文件里用:给出分段,同时得到缺省档(explain)的 description。 */
+export function described(parts: DescriptionParts): {
+  describe: DescriptionParts;
+  description: string;
+} {
+  return { describe: parts, description: composeDescription(parts, "explain") };
+}
+
 export type Tool<S extends TSchema = TSchema> = {
   name: string;
   description: string;
+  /** 分段的描述;给了它,风格槽按层拼接,description 只是缺省档(explain)的拼接结果。 */
+  describe?: DescriptionParts;
   /** TypeBox schema,本身就是 JSON Schema 对象,原样进 wire 请求。 */
   parameters: S;
   execute(args: Static<S>, ctx: ToolContext): Promise<string>;

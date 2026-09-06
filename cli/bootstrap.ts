@@ -12,13 +12,15 @@ import {
   modelNames,
   resolveApiKey,
   resolveModel,
+  type SubagentsConfig,
   setApiKey,
   setDefaultModel,
   type ToolPromptsConfig,
 } from "../src/config.js";
 import { now } from "../src/events.js";
 import type { EventLog } from "../src/log.js";
-import type { CompactionConfig } from "../src/loop.js";
+import type { CompactionConfig, TurnDeps } from "../src/loop.js";
+import type { Provider } from "../src/provider.js";
 import { type ChildInfo, createTaskTool } from "../src/subagent.js";
 import type { Tool } from "../src/tools.js";
 import { applyPreset, type CommonArgs, PROMPT_SECTION_NAMES } from "./args.js";
@@ -128,6 +130,12 @@ export function buildTools(
   fetchConfig?: FetchConfig,
   /** 工具描述风格;不给就是工具文件里写的 guided。 */
   toolPrompts?: ToolPromptsConfig,
+  /** 子 agent 的设置与接线:配置块、取父当前槽的函数、按模型名取 provider。 */
+  subagents?: {
+    config?: SubagentsConfig;
+    slots?: () => TurnDeps["slots"] | undefined;
+    providerFor?: (model: string) => Provider;
+  },
 ): Tool[] {
   // 每次组装复制一份工具对象:描述风格槽原地改描述,不能碰模块级单例。
   const base: Tool[] = [
@@ -143,16 +151,23 @@ export function buildTools(
   if (memory) base.push(createRememberTool(memory));
   if (skills?.some((s) => !s.disableModelInvocation)) base.push(createSkillTool(skills));
   if (!subagent) return base;
-  return [
-    ...base,
-    createTaskTool({
-      parent: log,
-      provider: choice.provider,
-      tools: base,
-      compaction,
-      ...(onChild && { onChild }),
-    }),
-  ];
+  const cfg = subagents?.config;
+  const task = createTaskTool({
+    parent: log,
+    provider: choice.provider,
+    tools: base,
+    compaction,
+    ...(onChild && { onChild }),
+    ...(subagents?.slots && { slots: subagents.slots }),
+    ...(subagents?.providerFor && { providerFor: subagents.providerFor }),
+    ...(cfg?.approval !== undefined && { approval: cfg.approval }),
+    ...(cfg?.maxSteps !== undefined && { maxSteps: cfg.maxSteps }),
+    ...(cfg?.depth !== undefined && { depth: cfg.depth }),
+    ...(cfg?.defaultType !== undefined && { defaultType: cfg.defaultType }),
+    ...(cfg?.types && { types: cfg.types }),
+  });
+  applyToolPrompts([task], toolPrompts);
+  return [...base, task];
 }
 
 /** 系统提示词:--system-prompt 整段替换,--append-system-prompt 追加;否则 角色 → 环境 → 项目指令。 */

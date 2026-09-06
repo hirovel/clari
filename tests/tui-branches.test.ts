@@ -407,19 +407,19 @@ describe("槽命令的分支", () => {
         return "";
       },
     });
-    const { app, log } = boot(scripted([]), { tools: [read], toolPrompts: { style: "terse" } });
+    const { app, log } = boot(scripted([]), { tools: [read], toolPrompts: { style: "brief" } });
     process.env.CLARI_EDITOR = `node "${append}"`;
     await app.command("/toolprompts edit read");
     expect(read.description.endsWith("EDITED")).toBe(true);
     expect(doc(app)).toContain("toolPrompts → edit read");
-    expect(log.events.at(-1)).toMatchObject({ slot: "toolPrompts", value: "terse, edited: read" });
+    expect(log.events.at(-1)).toMatchObject({ slot: "toolPrompts", value: "brief, edited: read" });
     await app.command("/toolprompts");
     expect(doc(app)).toContain("edited by you: read");
     await app.command("/toolprompts save");
     const saved = JSON.parse(readFileSync(DEFAULT_CONFIG_PATH, "utf8")) as {
       toolPrompts?: { style: string; descriptions?: Record<string, string> };
     };
-    expect(saved.toolPrompts?.style).toBe("terse");
+    expect(saved.toolPrompts?.style).toBe("brief");
     expect(saved.toolPrompts?.descriptions?.read?.endsWith("EDITED")).toBe(true);
     await app.command("/toolprompts reset read");
     expect(read.description).not.toContain("EDITED");

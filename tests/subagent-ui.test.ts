@@ -97,7 +97,7 @@ describe("子 agent 视图", () => {
 
     // 调用行、引导线、完成态进度、尾窗提示
     expect(doc).toContain("⚙ task  统计 echo 两次");
-    expect(doc).toContain("┆ ✓ done · step 2 · 1 tool calls");
+    expect(doc).toContain("┆ ✓ sub-1 · done · step 2 · 1 tool calls");
     expect(doc).toContain("420 tok");
     expect(doc).toContain("┆ sub-session"); // 完成后收起为一行
     expect(doc).toContain("✓ task"); // 父的工具结果

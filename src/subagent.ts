@@ -1,12 +1,26 @@
 // subagent:可选装能力。内核任何模块都不引用本文件;组装者按需 import 并挂成一个工具。
 // 子 agent = 同一内核的递归实例化:独立事件日志、独立会话文件,replay 与构成投影零改动可用。
+import { existsSync } from "node:fs";
 import { type TSchema, Type } from "@sinclair/typebox";
 import { Agent } from "./agent.js";
+import { outsideCwd, ruleMatches } from "./approval.js";
 import { type AgentEvent, now } from "./events.js";
 import { EventLog } from "./log.js";
-import type { CompactionConfig, TurnDeps } from "./loop.js";
+import {
+  type ApprovePolicy,
+  allowAll,
+  type CompactionConfig,
+  maxSteps,
+  type TurnDeps,
+} from "./loop.js";
 import type { Provider } from "./provider.js";
-import { defineTool, type Tool, validateArgs } from "./tools.js";
+import {
+  composeDescription,
+  type DescriptionParts,
+  defineTool,
+  type Tool,
+  validateArgs,
+} from "./tools.js";
 
 // ---------- 上下文范围槽:子启动时看到父的什么,由父模型在调用时选 ----------
 
@@ -62,50 +76,125 @@ export function userMessagesOnly(): ContextScope {
 export const DEFAULT_SCOPES: ScopeRegistry = {
   taskOnly: {
     scope: taskOnly(),
-    description: "全新上下文,只有系统提示词与你的任务简报。适合边界清楚、可独立完成的子任务。",
+    description:
+      "a fresh context with only the system prompt and your brief. For self-contained subtasks with a clear boundary.",
   },
   fork: {
     scope: fork(),
     description:
-      "继承本会话到当前为止的完整对话。适合没有大量背景就无法理解的子任务;成本与本会话同量级。",
+      "inherits this whole conversation so far. For subtasks that cannot be understood without the background; costs about as much as this session.",
   },
   userMessagesOnly: {
     scope: userMessagesOnly(),
     description:
-      "只继承用户说过的话,不带工具结果与助手过程。适合需要用户原始意图、不需要过程细节的子任务。",
+      "inherits only what the user said, without tool results or assistant steps. For subtasks that need the user's original intent but not the process.",
   },
 };
+
+// ---------- 类型注册表:子是哪一种专门的 agent,由父模型在调用时选 ----------
+
+/**
+ * 子类型:自己的系统提示词、工具子集、模型、缺省范围与步数上限。
+ * 每一项都可省略,省略即沿用父的;内置的 default 类型什么都不改。
+ */
+export type SubagentType = {
+  /** 给父模型看的说明:什么任务该派给这一类。 */
+  description: string;
+  /** 替换系统提示词;不给就沿用范围槽给出的(通常是父的)。 */
+  system?: string;
+  /** 工具子集(按名);不给就是父的全部工具。 */
+  tools?: string[];
+  /** 模型名;不给就用父的。需要组装者提供 providerFor。 */
+  model?: string;
+  /** 缺省范围;父模型调用时传 scope 可覆盖。 */
+  scope?: string;
+  /** 步数上限;不给就用全局的 maxSteps,再不给就不设上限。 */
+  maxSteps?: number;
+};
+export type SubagentTypeRegistry = Record<string, SubagentType>;
+
+export const DEFAULT_TYPES: SubagentTypeRegistry = {
+  default: {
+    description:
+      "the same system prompt, tools and model as this session. Use when no specialised type fits.",
+  },
+};
+
+// ---------- 审批:子的工具调用怎么过审 ----------
+
+/**
+ * inherit(缺省)= 沿用父此刻的审批实现,弹窗标明是哪个子在问;
+ * allow = 子不问;规则对象 = 在父的基础上再收紧:命中 deny 直接拒,其余交给父的审批。
+ */
+export type SubagentApproval = "inherit" | "allow" | { deny: string[]; outsideCwd?: "deny" };
+
+export function childApprove(
+  policy: SubagentApproval | undefined,
+  parent: ApprovePolicy | undefined,
+  cwd: string,
+): ApprovePolicy {
+  if (policy === "allow") return allowAll;
+  const base = parent ?? allowAll;
+  if (policy === undefined || policy === "inherit") return base;
+  return async (call, origin) => {
+    for (const r of policy.deny) {
+      if (ruleMatches(r, call, cwd)) {
+        return { allowed: false, reason: `sub-agent policy: deny rule ${r}` };
+      }
+    }
+    if (policy.outsideCwd === "deny" && outsideCwd(call, cwd)) {
+      return { allowed: false, reason: "sub-agent policy: path outside the working directory" };
+    }
+    return base(call, origin);
+  };
+}
 
 // ---------- 运行方式槽:子怎么跑 ----------
 
 export type SubagentRequest = {
   task: string;
-  startEvents: AgentEvent[];
+  /** 已备好的子日志(新建的已含起始事件;续聊的是原日志)。不给就按下面两项新建。 */
+  log?: EventLog;
+  startEvents?: AgentEvent[];
+  sessionPath?: string;
   provider: Provider;
   tools: Tool[];
   signal: AbortSignal;
-  sessionPath?: string;
   slots?: TurnDeps["slots"];
   compaction?: CompactionConfig;
+  /** 子的名字(审批提示与日志显示用)。 */
+  agent?: string;
   /** 子日志一创建就交出去(界面据此实时订阅)。runner 实现应在开跑前调用。 */
   onLog?: (log: EventLog) => void;
 };
 
+/** 子的生命周期状态:running → completed / partial(被打断)/ stopped(终止策略叫停,可续聊)。 */
+export type ChildStatus = "running" | "completed" | "partial" | "stopped";
+
 /** 交给界面的子 agent 信息:子只是另一个数组,界面拿到日志即可订阅。 */
 export type ChildInfo = {
   log: EventLog;
+  /** 子的 id(sub-N),续聊与会话文件名都用它。 */
+  id: string;
   task: string;
   scope: string;
+  type: string;
+  /** 这次是续聊(同一子日志上再跑一次)。 */
+  resumed: boolean;
   /** 父会话里 task 工具调用的 id,用来把子块挂到那一行下面。 */
   callId?: string;
   /** 从 1 起的序号。 */
   index: number;
+  /** 运行状态,由 task 工具在结束时更新;界面按它画头部。 */
+  state: { status: ChildStatus; reason?: string };
 };
 
 /** 返回契约:最终文本 + 完成状态 + 深挖句柄。所有 runner 实现必须产出同一形态。 */
 export type SubagentResult = {
   text: string;
-  status: "completed" | "partial";
+  status: "completed" | "partial" | "stopped";
+  /** stopped 时终止策略给的理由。 */
+  reason?: string;
   sessionPath?: string;
 };
 
@@ -113,8 +202,8 @@ export type SubagentRunner = (req: SubagentRequest) => Promise<SubagentResult>;
 
 /** 进程内递归实例化:子就是另一个 Agent。 */
 export const inProcessRunner: SubagentRunner = async (req) => {
-  const log = new EventLog(req.sessionPath);
-  for (const e of req.startEvents) log.append(e);
+  const log = req.log ?? new EventLog(req.sessionPath);
+  if (!req.log) for (const e of req.startEvents ?? []) log.append(e);
   req.onLog?.(log);
   if (req.signal.aborted)
     return { text: "", status: "partial", ...(log.path && { sessionPath: log.path }) };
@@ -125,16 +214,17 @@ export const inProcessRunner: SubagentRunner = async (req) => {
     tools: req.tools,
     ...(req.slots && { slots: req.slots }),
     ...(req.compaction && { compaction: req.compaction }),
+    ...(req.agent && { agent: req.agent }),
   });
   const onAbort = () => agent.interrupt();
   req.signal.addEventListener("abort", onAbort, { once: true });
   try {
     const outcome = await agent.prompt(req.task);
-    return {
-      text: lastAssistantText(log.events),
-      status: outcome === "idle" ? "completed" : "partial",
-      ...(log.path && { sessionPath: log.path }),
-    };
+    const text = lastAssistantText(log.events);
+    const path = log.path ? { sessionPath: log.path } : {};
+    if (outcome === "idle") return { text, status: "completed", ...path };
+    if (outcome === "aborted") return { text, status: "partial", ...path };
+    return { text, status: "stopped", reason: outcome.stopped, ...path };
   } finally {
     req.signal.removeEventListener("abort", onAbort);
   }
@@ -148,119 +238,266 @@ function lastAssistantText(events: readonly AgentEvent[]): string {
   return "";
 }
 
-// ---------- task 工具:把上面两个槽组装成一个模型可调用的能力 ----------
+// ---------- task 工具:把上面的槽组装成一个模型可调用的能力 ----------
 
 export type TaskToolOptions = {
   parent: EventLog;
   provider: Provider;
-  /** 子的工具集。task 工具本身默认被剔除(一层封顶),allowNested 可放开。 */
+  /** 子的候选工具集。task 工具本身按 depth 决定给不给。 */
   tools: Tool[];
   runner?: SubagentRunner;
   scopes?: ScopeRegistry;
   defaultScope?: string;
+  /** 类型注册表,叠在内置的 default 之上。 */
+  types?: SubagentTypeRegistry;
+  defaultType?: string;
+  /** 类型指定了 model 时据此取 provider;不给则该类型报错回喂。 */
+  providerFor?: (model: string) => Provider;
   /** 给了就要求子以符合此 schema 的 JSON 收尾,并校验后随结果返回。 */
   outputSchema?: TSchema;
-  allowNested?: boolean;
-  slots?: TurnDeps["slots"];
+  /** 嵌套深度:1(缺省)= 子没有 task 工具;2 = 子有,孙没有。 */
+  depth?: number;
+  /** 本工具所在层级,根会话的 task 工具是 1;嵌套时由上一层填。 */
+  level?: number;
+  /**
+   * 父的策略槽。给函数则每次派活时取,会话中切换审批或执行策略对之后派出的子同样生效。
+   * 子沿用父的执行、插话、终止(除非类型或 maxSteps 另给)与组装槽;审批按 approval 决定。
+   */
+  slots?: TurnDeps["slots"] | (() => TurnDeps["slots"] | undefined);
+  approval?: SubagentApproval;
+  /** 收紧规则里的路径按此目录解析;缺省进程工作目录。 */
+  cwd?: string;
+  /** 子的步数上限的全局缺省;类型可覆盖;都不给就不设上限。 */
+  maxSteps?: number;
   compaction?: CompactionConfig;
   /** 子 agent 一开跑就通知:界面订阅子日志,实时显示。 */
   onChild?: (child: ChildInfo) => void;
 };
 
-export function createTaskTool(opts: TaskToolOptions) {
+/** task 工具对象:描述分段,suffix 是注册表生成的类型与范围列表,任何风格都附在末尾。 */
+export type TaskTool = Tool & { describe: DescriptionParts };
+
+const DESCRIPTION: Omit<DescriptionParts, "suffix"> = {
+  core:
+    "Delegate a bounded subtask to a sub-agent that runs in its own context and returns only its final reply; its intermediate steps stay out of this conversation. " +
+    "The reply ends with the sub-agent id and its session log path; call task again with resume set to that id to give the same sub-agent a follow-up. " +
+    "A sub-agent stopped by a step limit returns its work so far and can be resumed the same way.",
+  guidance:
+    "Good for research, search and verification that reads a lot; not for edits that depend on decisions being made here. " +
+    "The brief must state the goal, the expected output format, which tools and sources to use, and the boundary of the task; ask for large results to be written to a file and the path returned. " +
+    "Read the session log when you need details. The user does not see the sub-agent's reply: summarise what matters.",
+  rules:
+    "NEVER delegate a lookup you can do with one read or grep call. NEVER redo work you delegated; use the result. " +
+    "ALWAYS state in the brief whether the sub-agent should change files or only investigate.",
+};
+
+export function createTaskTool(opts: TaskToolOptions): TaskTool {
   const scopes = opts.scopes ?? DEFAULT_SCOPES;
   const scopeNames = Object.keys(scopes);
   const defaultScope = opts.defaultScope ?? scopeNames[0] ?? "taskOnly";
-  if (!scopes[defaultScope]) throw new Error(`默认 scope "${defaultScope}" 不在注册表中`);
+  if (!scopes[defaultScope]) throw new Error(`default scope "${defaultScope}" is not registered`);
+  const types: SubagentTypeRegistry = { ...DEFAULT_TYPES, ...opts.types };
+  const typeNames = Object.keys(types);
+  const defaultType = opts.defaultType ?? "default";
+  if (!types[defaultType]) throw new Error(`default type "${defaultType}" is not registered`);
   const runner = opts.runner ?? inProcessRunner;
-  const childTools = opts.allowNested ? opts.tools : opts.tools.filter((t) => t.name !== "task");
+  const depth = opts.depth ?? 1;
+  const level = opts.level ?? 1;
+  const cwd = opts.cwd ?? process.cwd();
   let counter = 0;
+  /** 已派出的子,按 id;结束后日志留在这里供续聊,进程结束才释放。 */
+  const children = new Map<string, { log: EventLog; info: ChildInfo; running: boolean }>();
 
-  const scopeLines = scopeNames
-    .map((n) => `- ${n}${n === defaultScope ? "(默认)" : ""}:${scopes[n]?.description ?? ""}`)
-    .join("\n");
+  const list = (names: string[], reg: Record<string, { description: string }>, def: string) =>
+    names
+      .map((n) => `- ${n}${n === def ? " (default)" : ""}: ${reg[n]?.description ?? ""}`)
+      .join("\n");
+  const registryText =
+    `Sub-agent types (type parameter):\n${list(typeNames, types, defaultType)}\n\n` +
+    `Context scopes (scope parameter; a type may set its own default):\n${list(scopeNames, scopes, defaultScope)}`;
 
-  return defineTool({
+  const parentSlots = () => (typeof opts.slots === "function" ? opts.slots() : opts.slots);
+
+  const describe: DescriptionParts = { ...DESCRIPTION, suffix: registryText };
+  const tool = defineTool({
     name: "task",
-    description:
-      "派生一个子 agent 在独立上下文中完成子任务,返回它的最终回复;子的中间过程不进入本会话。\n" +
-      "适合:调研、检索、验证等读密集且边界清楚的任务。不适合:需要与当前工作共享决策上下文的并行修改代码。\n" +
-      "任务简报必须包含四项:目标、期望的输出格式、可用工具与来源的指引、任务边界。大产物让子写入文件并回传路径。\n" +
-      `scope 决定子能看到本会话的多少内容:\n${scopeLines}\n` +
-      "返回文本末尾附子会话日志路径,需要细节时可 read 该文件。",
+    description: composeDescription(describe, "explain"),
     parameters: Type.Object({
-      task: Type.String({ description: "任务简报:目标、输出格式、工具与来源指引、任务边界" }),
+      task: Type.String({
+        description:
+          "The brief: goal, output format, tools and sources to use, boundary of the task",
+      }),
+      type: Type.Optional(
+        Type.Union(
+          typeNames.map((n) => Type.Literal(n)),
+          { description: `Which kind of sub-agent; default ${defaultType}` },
+        ),
+      ),
       scope: Type.Optional(
         Type.Union(
           scopeNames.map((n) => Type.Literal(n)),
-          { description: `子的上下文范围,缺省 ${defaultScope}` },
+          {
+            description: `How much of this conversation the sub-agent sees; default ${defaultScope}`,
+          },
         ),
+      ),
+      resume: Type.Optional(
+        Type.String({
+          description:
+            "Id of a finished sub-agent (sub-N) to continue with this brief as a follow-up, keeping its history",
+        }),
       ),
     }),
     async execute(args, ctx) {
-      const entry = scopes[args.scope ?? defaultScope];
-      if (!entry) throw new Error(`未知 scope "${args.scope}",可选:${scopeNames.join(", ")}`);
+      const typeName = args.type ?? defaultType;
+      const type = types[typeName];
+      if (!type)
+        throw new Error(`Unknown sub-agent type "${typeName}"; one of: ${typeNames.join(", ")}`);
+      const scopeName = args.scope ?? type.scope ?? defaultScope;
+      const entry = scopes[scopeName];
+      if (!entry) throw new Error(`Unknown scope "${scopeName}"; one of: ${scopeNames.join(", ")}`);
 
-      const head = opts.parent.events[0];
-      const parentSnapshot: ParentSnapshot = {
-        events: opts.parent.events,
-        system: head?.type === "session/start" ? head.system : "",
-        model: head?.type === "session/start" ? head.model : opts.provider.model,
-      };
-      const startEvents = entry.scope(parentSnapshot);
-
-      counter += 1;
       const parentPath = opts.parent.path;
-      const sessionPath = parentPath
-        ? `${parentPath.replace(/\.jsonl$/, "")}-sub-${counter}.jsonl`
-        : undefined;
+      const pathFor = (id: string) =>
+        parentPath ? `${parentPath.replace(/\.jsonl$/, "")}-${id}.jsonl` : undefined;
+
+      // 新建或续聊:续聊沿用原日志(内存里的,或从父会话路径重新打开)。
+      let id: string;
+      let log: EventLog;
+      let resumed = false;
+      if (args.resume) {
+        id = args.resume;
+        const known = children.get(id);
+        if (known?.running)
+          throw new Error(`Sub-agent ${id} is still running; wait for its result.`);
+        if (known) log = known.log;
+        else {
+          const path = pathFor(id);
+          if (!/^sub-\d+$/.test(id) || !path || !existsSync(path)) {
+            throw new Error(
+              `Unknown sub-agent id "${id}". Ids come from earlier task results in this session.`,
+            );
+          }
+          log = EventLog.load(path, { attach: true });
+        }
+        resumed = true;
+      } else {
+        counter += 1;
+        id = `sub-${counter}`;
+        const head = opts.parent.events[0];
+        const parentSnapshot: ParentSnapshot = {
+          events: opts.parent.events,
+          system: head?.type === "session/start" ? head.system : "",
+          model: head?.type === "session/start" ? head.model : opts.provider.model,
+        };
+        const start = entry
+          .scope(parentSnapshot)
+          .map((e) =>
+            type.system !== undefined && e.type === "session/start"
+              ? { ...e, system: type.system }
+              : e,
+          );
+        log = new EventLog(pathFor(id));
+        for (const e of start) log.append(e);
+      }
+
+      // 工具集:类型子集,去掉 task 本身,深度允许时再挂一个下一层的 task。
+      let childTools = opts.tools.filter((t) => t.name !== "task");
+      if (type.tools) {
+        const want = new Set(type.tools);
+        childTools = childTools.filter((t) => want.has(t.name));
+      }
+      if (level < depth) {
+        // 下一层的 task 工具:父是这个子的日志;界面只订阅直接子,孙的过程留在孙的日志里。
+        const { onChild: _drop, ...rest } = opts;
+        childTools = [...childTools, createTaskTool({ ...rest, parent: log, level: level + 1 })];
+      }
+
+      let provider = opts.provider;
+      if (type.model && type.model !== opts.provider.model) {
+        if (!opts.providerFor) {
+          throw new Error(
+            `Sub-agent type "${typeName}" asks for model ${type.model}, but no provider lookup is configured.`,
+          );
+        }
+        provider = opts.providerFor(type.model);
+      }
+
+      const inherited = parentSlots() ?? {};
+      const limit = type.maxSteps ?? opts.maxSteps;
+      const slots: NonNullable<TurnDeps["slots"]> = {
+        ...inherited,
+        approve: childApprove(opts.approval, inherited.approve, cwd),
+        ...(limit !== undefined && { termination: maxSteps(limit) }),
+      };
 
       const task = opts.outputSchema
-        ? `${args.task}\n\n完成后,最后以一个 \`\`\`json 代码块给出符合以下 JSON Schema 的结果:\n${JSON.stringify(opts.outputSchema)}`
+        ? `${args.task}\n\nWhen done, end with a \`\`\`json code block holding a result that matches this JSON Schema:\n${JSON.stringify(opts.outputSchema)}`
         : args.task;
 
-      const index = counter;
-      const scopeName = args.scope ?? defaultScope;
-      const res = await runner({
-        task,
-        startEvents,
-        provider: opts.provider,
-        tools: childTools,
-        signal: ctx.signal,
-        ...(opts.onChild && {
-          onLog: (log: EventLog) =>
-            opts.onChild?.({
-              log,
-              task: args.task,
-              scope: scopeName,
-              index,
-              ...(ctx.callId && { callId: ctx.callId }),
-            }),
-        }),
-        ...(sessionPath && { sessionPath }),
-        ...(opts.slots && { slots: opts.slots }),
-        ...(opts.compaction && { compaction: opts.compaction }),
-      });
+      const info: ChildInfo = {
+        log,
+        id,
+        task: args.task,
+        scope: scopeName,
+        type: typeName,
+        resumed,
+        index: counter,
+        state: { status: "running" },
+        ...(ctx.callId && { callId: ctx.callId }),
+      };
+      const record = { log, info, running: true };
+      children.set(id, record);
+      let res: SubagentResult;
+      try {
+        res = await runner({
+          task,
+          log,
+          provider,
+          tools: childTools,
+          signal: ctx.signal,
+          agent: id,
+          slots,
+          ...(opts.onChild && { onLog: () => opts.onChild?.(info) }),
+          ...(opts.compaction && { compaction: opts.compaction }),
+        });
+      } catch (err) {
+        record.running = false;
+        info.state = { status: "partial", reason: (err as Error).message };
+        throw err;
+      }
+      record.running = false;
+      info.state = { status: res.status, ...(res.reason && { reason: res.reason }) };
 
       let out = res.text;
       let structuredError: string | undefined;
       if (opts.outputSchema) {
         const parsed = extractJson(res.text);
         const checked = parsed === undefined ? null : validateArgs(opts.outputSchema, parsed);
-        if (checked?.ok) out += `\n\n结构化结果:\n${JSON.stringify(checked.value)}`;
-        else structuredError = checked ? checked.error : "子的回复末尾没有 JSON 代码块";
+        if (checked?.ok) out += `\n\nStructured result:\n${JSON.stringify(checked.value)}`;
+        else
+          structuredError = checked
+            ? checked.error
+            : "the reply does not end with a JSON code block";
       }
-      if (res.sessionPath) out += `\n\n子会话日志: ${res.sessionPath}`;
-
+      const where = res.sessionPath ? `; session log: ${res.sessionPath}` : "";
       if (res.status === "partial") {
-        throw new Error(`子任务未完成(被打断或叫停),以下为已有输出,不可全信:\n${out}`);
+        throw new Error(
+          `Sub-agent ${id} was interrupted before finishing (resume: "${id}" continues it${where}). Output so far, not to be fully trusted:\n${out}`,
+        );
+      }
+      if (res.status === "stopped") {
+        out += `\n\nSub-agent ${id} stopped early: ${res.reason ?? "termination policy"}. The work may be unfinished; call task with resume: "${id}" to continue it${where}.`;
+      } else {
+        out += `\n\nSub-agent ${id} finished${where}. Call task with resume: "${id}" for a follow-up in the same context.`;
       }
       if (structuredError) {
-        throw new Error(`${out}\n\n结构化结果校验失败:\n${structuredError}`);
+        throw new Error(`${out}\n\nStructured result failed validation:\n${structuredError}`);
       }
       return out;
     },
   });
+  return Object.assign(tool, { describe });
 }
 
 /** 取回复中最后一个 ```json 代码块,或末尾的裸 JSON 对象。 */

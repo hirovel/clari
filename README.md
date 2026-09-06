@@ -12,7 +12,8 @@ A hand-written coding-agent kernel and terminal UI in TypeScript. The kernel kee
 ## What it does today
 
 - Tools: read (files and directories), write, edit with exact match and `replaceAll`, bash, grep, glob, fetch (HTML to markdown, private networks refused, size and time limits, cross-host redirects handed back to the model), sub-agents via task.
-- Tool descriptions in three styles (`guided`, `terse`, `strict`), switched with `--tool-prompts` or `/toolprompts`, edited per tool in your editor and saved to config. The model only ever sees the description text.
+- Tool descriptions in three levels (`brief`, `explain`, `rules`) composed from one source per tool (core, guidance, rules), switched with `--tool-prompts` or `/toolprompts`, edited per tool in your editor and saved to config. The model only ever sees the description text.
+- Sub-agents (`--subagent`): the `task` tool runs a child on its own event log and session file. The child follows the parent's approval rules (`subagents.approval`: `inherit`, `allow`, or extra `deny` rules), can be capped (`subagents.maxSteps`), resumed (`task` with `resume: "sub-N"`), typed (`subagents.types`: system prompt, tools, model, scope) and nested to `subagents.depth`.
 - MCP client, zero dependencies: stdio and Streamable HTTP, the 2026-07-28 stateless protocol and the legacy handshake. Configure `mcp.servers` or a project `.mcp.json`; tools are named `mcp__server__tool`, approval rules `mcp:server:tool`, every JSON-RPC exchange is an `ext/event`, `/mcp` shows status. The kernel has no MCP-specific code; delete `cli/mcp/` if you do not want it.
 - Three protocols (OpenAI chat completions, OpenAI Responses, Anthropic Messages), per-model capability data in config, `extraBody` pass-through, `/models` to detect retired models, `/fields` to list what the current protocol sends and reads, provider metadata kept verbatim in `extras`.
 - One Request card per request: a `changed` line first (which messages are new, edited or summarised and what it costs: messages recomputed, cache ceiling, thinking blocks dropped), then parameters, system sections, tools, every message with event number, role, tokens and first line, and the distance to auto-compaction. One Response card: stop reason, timing, cost, measured versus predicted cache hit, then reply, thinking, call, result, opaque, extras and raw rows. Thinking folds to one line; Ctrl+T expands.
@@ -57,7 +58,7 @@ Every command-line option has a counterpart in `~/.clari/config.json`. The templ
   "approve": "all",
   "execution": "sequential",
   "steering": "step",
-  "toolPrompts": "guided",
+  "toolPrompts": "explain",
   "subagent": false,
   "trace": true,
   "fold": false,
@@ -65,7 +66,7 @@ Every command-line option has a counterpart in `~/.clari/config.json`. The templ
 }
 ```
 
-`presets.<name>` holds the same keys as a named set for `--preset name`. Resolution order: command line, then preset, then `defaults`, then built-in. Dedicated blocks hold the richer structures: `approval` (rules), `toolPrompts` (style plus per-tool descriptions), `fetch`, `mcp`, `sessionsDir`.
+`presets.<name>` holds the same keys as a named set for `--preset name`. Resolution order: command line, then preset, then `defaults`, then built-in. Dedicated blocks hold the richer structures: `approval` (rules), `toolPrompts` (level plus per-tool descriptions), `subagents` (approval, maxSteps, depth, types), `fetch`, `mcp`, `sessionsDir`.
 
 ### Try it without a key
 

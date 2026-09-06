@@ -158,8 +158,11 @@ export function askApproval(
 export function approveImpl(ctx: TuiContext): ApprovePolicy {
   const a = ctx.approval;
   if (a.mode === "all") return allowAll;
-  if (a.mode === "ask") return (call) => askApproval(ctx, call);
-  return policyApprove(a.cfg, (call, why) => askApproval(ctx, call, why));
+  const label = (why: string, origin?: { agent: string }) =>
+    origin ? `${origin.agent} · ${why}` : why;
+  if (a.mode === "ask")
+    return (call, origin) => askApproval(ctx, call, label("asked for every call", origin));
+  return policyApprove(a.cfg, (call, why, origin) => askApproval(ctx, call, label(why, origin)));
 }
 
 export function approveValue(a: ApprovalState): string {
@@ -336,7 +339,7 @@ function toolPromptsSlot(ctx: TuiContext, v: string): string {
     });
     const edited = Object.keys(cfg.descriptions ?? {});
     return [
-      `${c.soft("Tool prompts")}  ${c.faint("the same tools, three description styles; the model sees only the descriptions, never the style name")}`,
+      `${c.soft("Tool prompts")}  ${c.faint("one description per tool in three layers (core, guidance, rules); the level picks how many the model sees")}`,
       ...rows,
       c.faint(
         edited.length > 0
@@ -385,13 +388,13 @@ function toolPromptsSlot(ctx: TuiContext, v: string): string {
     const { config } = loadConfig();
     const descriptions = cfg.descriptions ?? {};
     config.toolPrompts = {
-      style: cfg.style ?? "guided",
+      style: cfg.style ?? "explain",
       ...(Object.keys(descriptions).length > 0 && { descriptions }),
     };
     saveConfig(config);
     return done("toolPrompts", "saved", `toolPrompts written to ${DEFAULT_CONFIG_PATH}`);
   }
-  return c.zhu("Usage: /toolprompts guided|terse|strict | edit <tool> | reset <tool> | save");
+  return c.zhu("Usage: /toolprompts brief|explain|rules | edit <tool> | reset <tool> | save");
 }
 
 /** 一个槽命令:返回要打到屏幕上的文本。运行中拒绝切换。 */

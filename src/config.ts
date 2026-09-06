@@ -10,6 +10,8 @@ import type { EffortLevel, OpenAIDialect, Provider } from "./provider.js";
 import { openaiCompat } from "./provider.js";
 import { anthropic, type ThinkingMode } from "./providers/anthropic.js";
 import { openaiResponses } from "./providers/openai-responses.js";
+import type { SubagentApproval, SubagentType } from "./subagent.js";
+import type { DescriptionLevel } from "./tools.js";
 
 /** 每百万 token 的价格(美元)。缺哪项就不计哪项;整个缺省 = 不显示费用。 */
 export type ModelPrice = {
@@ -65,8 +67,8 @@ export type ProviderConfig = {
   retry?: { maxRetries?: number; baseDelayMs?: number; maxDelayMs?: number };
 };
 
-/** 工具描述风格:guided 缺省;terse 一两句;strict 带 ALWAYS / NEVER 规则。descriptions 逐工具覆盖。 */
-export type ToolPromptStyle = "guided" | "terse" | "strict";
+/** 工具描述风格 = 拼接层级:brief 只有核心;explain(缺省)加指导;rules 再加 ALWAYS / NEVER 规则。descriptions 逐工具覆盖。 */
+export type ToolPromptStyle = DescriptionLevel;
 export type ToolPromptsConfig = {
   style?: ToolPromptStyle;
   descriptions?: Record<string, string>;
@@ -148,6 +150,8 @@ export type KernelConfig = {
   approval?: ApprovalConfig;
   /** 工具描述风格与逐工具覆盖。 */
   toolPrompts?: ToolPromptsConfig;
+  /** 子 agent(task 工具)的设置;开关本身在 defaults.subagent / --subagent。 */
+  subagents?: SubagentsConfig;
   /** MCP 桥接的配置。内核不解释它;形状归 cli/mcp/config.ts。 */
   mcp?: Record<string, unknown>;
   /** fetch 工具的安全边界:私网放行、超时、字节上限、重定向次数。 */
@@ -162,6 +166,19 @@ export type KernelConfig = {
     /** 每主机每分钟最多几次真实请求,缺省 10;0 不限。 */
     perHostPerMinute?: number;
   };
+};
+
+export type SubagentsConfig = {
+  /** 子的工具调用怎么过审:inherit(缺省)沿用父的;allow 不问;{ deny: [...] } 在父的基础上再收紧。 */
+  approval?: SubagentApproval;
+  /** 子的步数上限;不给就不设上限,靠续聊与人的打断。 */
+  maxSteps?: number;
+  /** 嵌套深度,缺省 1:子没有 task 工具。 */
+  depth?: number;
+  /** 缺省类型,缺省 default。 */
+  defaultType?: string;
+  /** 类型注册表:名 → 说明、系统提示词、工具子集、模型、缺省范围、步数上限;叠在内置 default 之上。 */
+  types?: Record<string, SubagentType>;
 };
 
 /** 用户目录:环境变量 CLARI_HOME 指定,否则 ~/.clari。 */
@@ -184,7 +201,7 @@ export const CONFIG_TEMPLATE: KernelConfig = {
     approve: "all",
     execution: "sequential",
     steering: "step",
-    toolPrompts: "guided",
+    toolPrompts: "explain",
     subagent: false,
     trace: true,
     fold: false,
@@ -194,6 +211,12 @@ export const CONFIG_TEMPLATE: KernelConfig = {
       memory: false,
       skills: { list: "system", load: "read" },
     },
+  },
+  subagents: {
+    approval: "inherit",
+    depth: 1,
+    defaultType: "default",
+    types: {},
   },
   providers: {
     deepseek: {

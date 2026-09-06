@@ -104,7 +104,7 @@ export const COMMANDS = [
   {
     name: "toolprompts",
     description:
-      "Tool description style: /toolprompts guided|terse|strict; edit <tool> opens your editor; reset <tool>; save writes to config",
+      "Tool description level: /toolprompts brief|explain|rules; edit <tool> opens your editor; reset <tool>; save writes to config",
   },
   {
     name: "skills",

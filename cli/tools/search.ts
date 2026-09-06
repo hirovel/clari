@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { Type } from "@sinclair/typebox";
-import { defineTool } from "../../src/tools.js";
+import { defineTool, described } from "../../src/tools.js";
 import { capLineLength } from "./truncate.js";
 
 /** 遍历时跳过的目录:与各家一致,不进版本库或不属于源码的东西。 */
@@ -103,10 +103,15 @@ export function createGrepTool(opts: { useRipgrep?: boolean; maxResults?: number
   const maxResults = opts.maxResults ?? 200;
   return defineTool({
     name: "grep",
-    description:
-      "Search file contents by regular expression; returns path:line:content, at most 200 results, lines cut to 500 characters. " +
-      "Skips .git, node_modules and build output. Use it to locate, then read for context. " +
-      "Prefer it over grep in bash; for match counts or context lines, run rg in bash.",
+    ...described({
+      core:
+        "Search file contents by regular expression; returns path:line:content, at most 200 results, lines cut to 500 characters. " +
+        "Skips .git, node_modules and build output.",
+      guidance:
+        "Use it to locate, then read for context. Prefer it over grep in bash; for match counts or context lines, run rg in bash. " +
+        "Run independent searches in the same turn.",
+      rules: "ALWAYS use this instead of grep or rg in bash to find matches.",
+    }),
     parameters: Type.Object({
       pattern: Type.String({ description: "regular expression (JS syntax)" }),
       path: Type.Optional(
@@ -189,9 +194,11 @@ export const grepTool = createGrepTool();
 
 export const globTool = defineTool({
   name: "glob",
-  description:
-    "List files matching a glob pattern, e.g. src/**/*.ts; returns relative paths, at most 500, skipping .git, node_modules and build output. " +
-    "Use it to find files by name; use grep to find files by content.",
+  ...described({
+    core: "List files matching a glob pattern, e.g. src/**/*.ts; returns relative paths, at most 500, skipping .git, node_modules and build output.",
+    guidance: "Use it to find files by name; use grep to find files by content.",
+    rules: "ALWAYS use this instead of find or ls in bash to locate files by name.",
+  }),
   parameters: Type.Object({
     pattern: Type.String({
       description: "glob pattern: ** any depth, * one segment, ? one character",

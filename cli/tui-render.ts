@@ -125,7 +125,6 @@ export class ChildView {
   private tokens = 0;
   private readonly startedAt = Date.now();
   private finishedAt: number | undefined;
-  private ok = true;
   private timer: ReturnType<typeof setInterval> | undefined;
 
   constructor(
@@ -156,8 +155,7 @@ export class ChildView {
     this.lines.push(...childEventLines(e).map((l) => GUIDE + l));
   }
 
-  finish(ok: boolean): void {
-    this.ok = ok;
+  finish(): void {
     this.finishedAt = Date.now();
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
@@ -173,11 +171,15 @@ export class ChildView {
     const mode = this.ctx.view.childMode;
     const elapsed = fmtMs((this.finishedAt ?? Date.now()) - this.startedAt);
     const stats = `step ${this.steps} · ${this.toolsUsed} tool calls · ${elapsed}${this.tokens ? ` · ${fmtTok(this.tokens)} tok` : ""}`;
+    const who = `${this.info.id}${this.info.type !== "default" ? ` ${this.info.type}` : ""}${this.info.resumed ? " resumed" : ""}`;
+    const status = this.info.state.status;
     const head = this.running
-      ? `${c.zhu("●")} ${c.soft(`running · ${stats}`)}`
-      : this.ok
-        ? `${c.green("✓")} ${c.soft(`done · ${stats}`)}`
-        : `${c.zhu("✗")} ${c.soft(`partial · ${stats}`)}`;
+      ? `${c.zhu("●")} ${c.soft(`${who} · running · ${stats}`)}`
+      : status === "completed"
+        ? `${c.green("✓")} ${c.soft(`${who} · done · ${stats}`)}`
+        : status === "stopped"
+          ? `${c.jin("◇")} ${c.soft(`${who} · stopped (${this.info.state.reason ?? "termination policy"}) · resumable · ${stats}`)}`
+          : `${c.zhu("✗")} ${c.soft(`${who} · partial · ${stats}`)}`;
     this.progress.setText(GUIDE + head);
     let body: string;
     if (mode === "progress" || (!this.running && mode !== "all")) {
@@ -356,7 +358,7 @@ function renderToolResult(ctx: TuiContext, e: Extract<AgentEvent, { type: "tool/
   ctx.view.resultNodes.push({ node, ...rec });
   ctx.transcript.addChild(node);
   const child = ctx.children.views.find((v) => v.info.callId === e.callId && v.running);
-  if (child) child.finish(!e.isError);
+  if (child) child.finish();
 }
 
 /**

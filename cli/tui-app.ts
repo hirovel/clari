@@ -149,6 +149,8 @@ export type TuiApp = {
   /** 子 agent 开跑时由 task 工具通知:挂到对应调用行下面并实时订阅。 */
   attachChild(child: ChildInfo): void;
   children(): ChildInfo[];
+  /** 当前策略槽实现;task 工具派活时取,子沿用父此刻的审批与执行策略。 */
+  slots(): TurnDeps["slots"];
   /** 正在等待回答的审批提示的渲染行;没有时为空。离线验证用(覆盖层不在 lines() 里)。 */
   approvalLines(): string[];
   /** 把按键送给正在等待的审批提示(离线验证用)。 */
@@ -289,7 +291,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     slots: {
       state: initialSlotState(deps, approval),
       toolPrompts: {
-        style: deps.toolPrompts?.style ?? "guided",
+        style: deps.toolPrompts?.style ?? "explain",
         descriptions: { ...deps.toolPrompts?.descriptions },
       },
     },
@@ -531,6 +533,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     },
     attachChild: (child) => attachChild(ctx, child),
     children: () => ctx.children.views.map((v) => v.info),
+    slots: () => ctx.agent.slots,
     approvalLines: () => approval.prompt?.render() ?? [],
     approvalInput: (data) => approval.prompt?.handleInput(data),
     toggleFold: () => toggleFold(ctx),

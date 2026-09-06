@@ -87,6 +87,11 @@ const baseTools = buildTools(
   args.skillsLoad === "tool" ? discoverSkills(process.cwd()) : undefined,
   boot.config.fetch,
   toolPromptsCfg,
+  {
+    ...(boot.config.subagents && { config: boot.config.subagents }),
+    slots: () => agent.slots,
+    providerFor: (model) => boot.choose(model).provider,
+  },
 );
 const tools = [
   ...baseTools.filter((t) => !ext.tools?.some((x) => x.name === t.name)),

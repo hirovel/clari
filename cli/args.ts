@@ -104,7 +104,7 @@ export function resolveApproval(
 /** 工具描述风格的启动形态:风格按优先级取,逐工具覆盖只来自配置。 */
 export function resolveToolPrompts(args: CommonArgs, config: KernelConfig): ToolPromptsConfig {
   return {
-    style: args.toolPrompts ?? config.toolPrompts?.style ?? "guided",
+    style: args.toolPrompts ?? config.toolPrompts?.style ?? "explain",
     ...(config.toolPrompts?.descriptions && { descriptions: config.toolPrompts.descriptions }),
   };
 }
@@ -223,7 +223,7 @@ export function parseCommonArgs(argv: string[]): CommonArgs {
       case "--tool-prompts": {
         const v = takeValue(i++, a);
         if (!isToolPromptStyle(v))
-          throw new Error(`--tool-prompts accepts guided, terse or strict, got "${v}"`);
+          throw new Error(`--tool-prompts accepts brief, explain or rules, got "${v}"`);
         out.toolPrompts = v;
         break;
       }
@@ -300,7 +300,7 @@ Options
   --resume <session file> | --continue   resume a session and keep appending to the same file
   --system-prompt <file> | --append-system-prompt <file>
   --approve all|policy|ask       all (default, pi stance) = never ask; policy = allow/deny rules from config, ask when no rule matches; ask = every call
-  --tool-prompts guided|terse|strict   tool description style (default guided); edit single descriptions with /toolprompts edit <tool>
+  --tool-prompts brief|explain|rules   tool description level (default explain); edit single descriptions with /toolprompts edit <tool>
   --preset name                  apply the parameter set presets.name from config; explicit flags still win
   --memory | --no-memory         cross-session memory (memory section in AGENTS.md + remember tool); default off
   --prompt-sections role,env,instructions,memory,skills,append   which system prompt sections, in which order

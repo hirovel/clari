@@ -223,9 +223,11 @@ describe("createTaskTool", () => {
     const ctx = { signal: new AbortController().signal };
 
     const ok = await mk('分析完毕。\n```json\n{"answer": 42}\n```').execute({ task: "算" }, ctx);
-    expect(ok).toContain('结构化结果:\n{"answer":42}');
+    expect(ok).toContain('Structured result:\n{"answer":42}');
 
-    await expect(mk("我不知道").execute({ task: "算" }, ctx)).rejects.toThrow("结构化结果校验失败");
+    await expect(mk("我不知道").execute({ task: "算" }, ctx)).rejects.toThrow(
+      "Structured result failed validation",
+    );
   });
 
   it("子被打断 → partial → 以错误结果回喂且附已有输出", async () => {

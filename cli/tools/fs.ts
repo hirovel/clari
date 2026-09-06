@@ -14,7 +14,7 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { Type } from "@sinclair/typebox";
-import { defineTool } from "../../src/tools.js";
+import { defineTool, described } from "../../src/tools.js";
 import { capLineLength, keepHead, type TruncationPolicy } from "./truncate.js";
 
 /** 单次整读的文件大小上限:再大就要求分段,不把整个文件拉进内存。 */
@@ -38,11 +38,17 @@ export function createReadTool(opts: { truncate?: TruncationPolicy; maxLineChars
   const capLine = capLineLength(opts.maxLineChars ?? 2000);
   return defineTool({
     name: "read",
-    description:
-      "Read a text file as numbered lines, or list a directory (one entry per line; directories end with /, files show their size). " +
-      "Output past the limit is truncated and the note gives the offset to continue from; overlong lines are cut. " +
-      "Use offset and limit to read only the part you need, and read several files in one turn when you know which ones. " +
-      "Text only: binary files and images are refused.",
+    ...described({
+      core:
+        "Read a text file as numbered lines, or list a directory (one entry per line; directories end with /, files show their size). " +
+        "Output past the limit is truncated and the note gives the offset to continue from; overlong lines are cut. " +
+        "Text only: binary files and images are refused.",
+      guidance:
+        "Use offset and limit to read only the part you need, and read several files in one turn when you know which ones. " +
+        "No need to read a file again right after editing it; the edit result already confirms the change.",
+      rules:
+        "ALWAYS read only the part you need with offset and limit. NEVER re-read a file right after editing it.",
+    }),
     parameters: Type.Object({
       path: Type.String({ description: "file or directory path, relative or absolute" }),
       offset: Type.Optional(Type.Number({ description: "starting line number, 1-based" })),
@@ -92,9 +98,13 @@ export const readTool = createReadTool();
 
 export const writeTool = defineTool({
   name: "write",
-  description:
-    "Write a text file, replacing its contents; creates missing directories. " +
-    "For a change inside an existing file use edit; write is for new files and full rewrites.",
+  ...described({
+    core: "Write a text file, replacing its contents; creates missing directories.",
+    guidance:
+      "For a change inside an existing file use edit; write is for new files and full rewrites. Read an existing file before overwriting it.",
+    rules:
+      "ALWAYS read an existing file before overwriting it. NEVER use write for a partial change to an existing file; use edit. NEVER create documentation files unless asked.",
+  }),
   parameters: Type.Object({
     path: Type.String({ description: "file path" }),
     content: Type.String({ description: "complete file content" }),
@@ -158,11 +168,17 @@ export function fuzzyReplace(
 
 export const editTool = defineTool({
   name: "edit",
-  description:
-    "Replace text in a file. oldText must match the file exactly, indentation included, and occur exactly once; " +
-    "keep it as short as it can be while still unique. Set replaceAll to change every occurrence, e.g. for a rename. " +
-    "When the exact match fails, one retry ignores trailing whitespace and quote style and the result says so. " +
-    "No match or several matches fail with the reason.",
+  ...described({
+    core:
+      "Replace text in a file. oldText must match the file exactly, indentation included, and occur exactly once unless replaceAll is set. " +
+      "When the exact match fails, one retry ignores trailing whitespace and quote style and the result says so. " +
+      "No match or several matches fail with the reason.",
+    guidance:
+      "Keep oldText as short as it can be while still unique. Set replaceAll to change every occurrence, e.g. for a rename. " +
+      "Read the file in this session before editing it.",
+    rules:
+      "You MUST read the file in this session before editing it. oldText MUST match exactly and MUST occur exactly once unless replaceAll is set.",
+  }),
   parameters: Type.Object({
     path: Type.String({ description: "file path" }),
     oldText: Type.String({ description: "text to replace; must be unique unless replaceAll" }),

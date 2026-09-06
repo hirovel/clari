@@ -1,4 +1,4 @@
-// 工具描述风格槽:三套风格可切、逐工具可改、切回原文;/toolprompts 记 session/slot;--tool-prompts 解析;
+// 工具描述风格槽:一份分段描述按层拼接、逐工具可改;/toolprompts 记 session/slot;--tool-prompts 解析;
 // MCP 事件泛化后审批规则按命名空间仍然对上。
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
@@ -22,7 +22,8 @@ const plain = (s: string) => s.replace(ansi, "");
 function fakeRead() {
   return defineTool({
     name: "read",
-    description: "guided read text",
+    describe: { core: "Read core.", guidance: "Guide.", rules: "NEVER x." },
+    description: "Read core. Guide.",
     parameters: Type.Object({ path: Type.String() }),
     async execute() {
       return "";
@@ -31,7 +32,7 @@ function fakeRead() {
 }
 
 describe("applyToolPrompts", () => {
-  it("terse / strict 换描述,guided 切回原文;表里没有的工具不动;用户覆盖最优先", () => {
+  it("brief / rules 按层拼接,explain 切回缺省;没有分段的工具不动;用户覆盖最优先", () => {
     const read = fakeRead();
     const other = defineTool({
       name: "other",
@@ -42,41 +43,41 @@ describe("applyToolPrompts", () => {
       },
     });
     const tools = [read, other];
-    expect(applyToolPrompts(tools, { style: "terse" })).toEqual(["read"]);
-    expect(read.description).toMatch(/^Read a text file as numbered lines, or list a directory\./);
+    expect(applyToolPrompts(tools, { style: "brief" })).toEqual(["read"]);
+    expect(read.description).toBe("Read core.");
     expect(other.description).toBe("mine");
-    applyToolPrompts(tools, { style: "strict" });
-    expect(read.description).toContain("ALWAYS read only the part you need");
-    applyToolPrompts(tools, { style: "guided" });
-    expect(read.description).toBe("guided read text");
-    applyToolPrompts(tools, { style: "terse", descriptions: { read: "my own words" } });
+    applyToolPrompts(tools, { style: "rules" });
+    expect(read.description).toBe("Read core. Guide. NEVER x.");
+    applyToolPrompts(tools, { style: "explain" });
+    expect(read.description).toBe("Read core. Guide.");
+    applyToolPrompts(tools, { style: "brief", descriptions: { read: "my own words" } });
     expect(read.description).toBe("my own words");
-    expect(styledDescription(other, { style: "strict" })).toBe("mine");
-    expect(describeToolPrompts({ style: "terse", descriptions: { read: "x" } })).toBe(
-      "terse, edited: read",
+    expect(styledDescription(other, { style: "rules" })).toBe("mine");
+    expect(describeToolPrompts({ style: "brief", descriptions: { read: "x" } })).toBe(
+      "brief, edited: read",
     );
-    expect(describeToolPrompts(undefined)).toBe("guided");
-    expect(styleTokens(tools, { style: "terse" })).toBeLessThan(
-      styleTokens(tools, { style: "strict" }),
+    expect(describeToolPrompts(undefined)).toBe("explain");
+    expect(styleTokens(tools, { style: "brief" })).toBeLessThan(
+      styleTokens(tools, { style: "rules" }),
     );
   });
 
-  it("--tool-prompts 解析与优先级:命令行 > 配置 > guided;非法值报错", () => {
-    const args = parseCommonArgs(["--tool-prompts", "strict"]);
-    expect(args.toolPrompts).toBe("strict");
+  it("--tool-prompts 解析与优先级:命令行 > 配置 > explain;非法值报错", () => {
+    const args = parseCommonArgs(["--tool-prompts", "rules"]);
+    expect(args.toolPrompts).toBe("rules");
     expect(() => parseCommonArgs(["--tool-prompts", "loud"])).toThrow("--tool-prompts accepts");
     const config = {
       default: "p/m",
       providers: {},
-      toolPrompts: { style: "terse" as const, descriptions: { read: "r" } },
+      toolPrompts: { style: "brief" as const, descriptions: { read: "r" } },
     };
     expect(resolveToolPrompts(args, config)).toEqual({
-      style: "strict",
+      style: "rules",
       descriptions: { read: "r" },
     });
-    expect(resolveToolPrompts(parseCommonArgs([]), config).style).toBe("terse");
+    expect(resolveToolPrompts(parseCommonArgs([]), config).style).toBe("brief");
     expect(resolveToolPrompts(parseCommonArgs([]), { default: "p/m", providers: {} })).toEqual({
-      style: "guided",
+      style: "explain",
     });
   });
 });
@@ -100,33 +101,33 @@ describe("/toolprompts", () => {
       reserveTokens: 1000,
       info: { model: "m", providerName: "p", sessionFile: "s" },
       systemPrompt: "s",
-      toolPrompts: { style: "guided" },
+      toolPrompts: { style: "explain" },
       onExit: () => {},
     });
     const text = () => app.lines(120).map(plain).join("\n");
     await app.command("/toolprompts");
     let doc = text();
-    expect(doc).toContain("● guided");
-    expect(doc).toContain("○ terse");
-    expect(doc).toContain("○ strict");
-    await app.command("/toolprompts terse");
-    expect(read.description).toMatch(/^Read a text file as numbered lines/);
+    expect(doc).toContain("● explain");
+    expect(doc).toContain("○ brief");
+    expect(doc).toContain("○ rules");
+    await app.command("/toolprompts brief");
+    expect(read.description).toBe("Read core.");
     expect(log.events.at(-1)).toMatchObject({
       type: "session/slot",
       slot: "toolPrompts",
-      value: "terse",
+      value: "brief",
     });
     await app.command("/slots");
-    expect(text()).toContain("toolPrompts   terse");
+    expect(text()).toContain("toolPrompts   brief");
     await app.command("/toolprompts reset read");
     expect(text()).toContain("read is not edited");
     await app.command("/toolprompts reset nope");
     expect(text()).toContain("no tool named nope");
     await app.command("/toolprompts loud");
     doc = text();
-    expect(doc).toContain("Usage: /toolprompts guided|terse|strict");
+    expect(doc).toContain("Usage: /toolprompts brief|explain|rules");
     await app.command("/tools");
-    expect(text()).toContain("style terse");
+    expect(text()).toContain("style brief");
     app.stop();
   });
 });
