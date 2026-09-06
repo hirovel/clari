@@ -42,7 +42,7 @@ export type ProviderConfig = {
   /** openai-responses:推理摘要档位,缺省 auto;none 不要摘要。 */
   reasoningSummary?: "auto" | "concise" | "detailed" | "none";
   baseUrl: string;
-  /** 直接写在配置里的 key(可选;推荐用 apiKeyEnv)。 */
+  /** 直接写在配置里的 key:演示与脚本用;正常用法是 /login 写进凭据文件,或 apiKeyEnv。 */
   apiKey?: string;
   /** 存放 key 的环境变量名。 */
   apiKeyEnv?: string;
@@ -295,25 +295,76 @@ export function saveConfig(config: KernelConfig, path = DEFAULT_CONFIG_PATH): vo
   writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`, "utf8");
 }
 
-/** 把 key 写进配置文件对应供应商的 apiKey 字段(TUI 内设置用)。返回更新后的配置。 */
+/** 凭据文件:~/.clari/credentials.json,环境变量 CLARI_CREDENTIALS 可改。key 只进这里,配置文件里不出现。 */
+export function credentialsPath(env = process.env): string {
+  return env.CLARI_CREDENTIALS?.trim() || join(clariHome(env), "credentials.json");
+}
+
+export type Credentials = Record<string, { apiKey: string }>;
+
+export function loadCredentials(path = credentialsPath()): Credentials {
+  if (!existsSync(path)) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8"));
+  } catch (err) {
+    throw new Error(`failed to parse credentials ${path}: ${(err as Error).message}`);
+  }
+  if (!parsed || typeof parsed !== "object")
+    throw new Error(`credentials is not an object: ${path}`);
+  const out: Credentials = {};
+  for (const [name, v] of Object.entries(parsed as Record<string, unknown>)) {
+    const key = (v as { apiKey?: unknown } | null)?.apiKey;
+    if (typeof key === "string" && key.trim()) out[name] = { apiKey: key.trim() };
+  }
+  return out;
+}
+
+/** 写入一家的 key(合并已有),文件权限 0600。 */
+export function saveCredential(
+  providerName: string,
+  apiKey: string,
+  path = credentialsPath(),
+): void {
+  const next = { ...loadCredentials(path), [providerName]: { apiKey: apiKey.trim() } };
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `${JSON.stringify(next, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+}
+
+export type KeySource = "env" | "credentials" | "config";
+
+/** key 从哪来:环境变量 > 凭据文件 > 配置里的 apiKey(演示与脚本用)。没有返回 undefined。 */
+export function findApiKey(
+  name: string,
+  p: ProviderConfig,
+  env = process.env,
+  credentials?: Credentials,
+): { key: string; source: KeySource } | undefined {
+  if (p.apiKeyEnv) {
+    const v = env[p.apiKeyEnv];
+    if (v?.trim()) return { key: v.trim(), source: "env" };
+  }
+  const creds = credentials ?? loadCredentials(credentialsPath(env));
+  const stored = creds[name]?.apiKey;
+  if (stored) return { key: stored, source: "credentials" };
+  if (p.apiKey?.trim()) return { key: p.apiKey.trim(), source: "config" };
+  return undefined;
+}
+
+/** 写入某供应商的 key(TUI 的 /login 与 /key 用):进凭据文件,不碰配置。返回配置原样。 */
 export function setApiKey(
   config: KernelConfig,
   providerName: string,
   apiKey: string,
-  path = DEFAULT_CONFIG_PATH,
+  path = credentialsPath(),
 ): KernelConfig {
-  const p = config.providers[providerName];
-  if (!p) {
+  if (!config.providers[providerName]) {
     throw new Error(
       `unknown provider "${providerName}"; options: ${Object.keys(config.providers).join(", ")}`,
     );
   }
-  const next: KernelConfig = {
-    ...config,
-    providers: { ...config.providers, [providerName]: { ...p, apiKey: apiKey.trim() } },
-  };
-  saveConfig(next, path);
-  return next;
+  saveCredential(providerName, apiKey, path);
+  return config;
 }
 
 /** 修改缺省模型并落盘。 */
@@ -417,15 +468,12 @@ export function resolveModel(config: KernelConfig, requested?: string): Resolved
 
 /** 取 key:配置字段优先,其次环境变量。缺失时的报错要告诉用户该去哪里填。 */
 export function resolveApiKey(name: string, p: ProviderConfig, env = process.env): string {
-  if (p.apiKey?.trim()) return p.apiKey.trim();
-  if (p.apiKeyEnv) {
-    const v = env[p.apiKeyEnv];
-    if (v?.trim()) return v.trim();
-  }
-  const where = p.apiKeyEnv
-    ? `env var ${p.apiKeyEnv}, or providers.${name}.apiKey in the config file`
-    : `providers.${name}.apiKey or apiKeyEnv in the config file`;
-  throw new Error(`no API key for provider ${name}. Set ${where} (${DEFAULT_CONFIG_PATH})`);
+  const found = findApiKey(name, p, env);
+  if (found) return found.key;
+  const where = p.apiKeyEnv ? `set env var ${p.apiKeyEnv}, ` : "";
+  throw new Error(
+    `no API key for provider ${name}. Run /login in the TUI, ${where}or add it to ${credentialsPath(env)}`,
+  );
 }
 
 export function createProvider(r: Resolved, apiKey: string): Provider {

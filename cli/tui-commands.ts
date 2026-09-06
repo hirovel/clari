@@ -27,6 +27,7 @@ import {
   rewindCommand,
 } from "./tui-edit.js";
 import { pct } from "./tui-format.js";
+import { ListPicker, LoginDialog, type PickRow } from "./tui-login.js";
 import { slotCommand, slotsList } from "./tui-slots.js";
 
 export const COMMANDS = [
@@ -128,11 +129,16 @@ export const COMMANDS = [
   },
   {
     name: "model",
-    description: "Switch model: /model provider/model; without arguments lists the options",
+    description: "Switch model: /model opens a picker; /model provider/model switches directly",
   },
   {
     name: "models",
-    description: "Ask the provider which models exist; flags configured ones that are gone",
+    description:
+      "Ask the provider which models exist and pick one; flags configured ones that are gone",
+  },
+  {
+    name: "login",
+    description: "Add a provider key: pick the provider, paste the key, it is checked and saved",
   },
   {
     name: "fields",
@@ -145,7 +151,7 @@ export const COMMANDS = [
   },
   {
     name: "key",
-    description: "Set a provider key: /key deepseek sk-… (written to the config file)",
+    description: "Set a provider key without the dialog: /key deepseek sk-… (credentials file)",
   },
   { name: "default", description: "Make the current model the default" },
   { name: "stop", description: "Interrupt the running turn" },
@@ -161,6 +167,11 @@ export async function submit(
   opts: { deliverAs?: DeliverAs } = {},
 ): Promise<void> {
   const { agent, log } = ctx;
+  if (ctx.model.info.providerName === "none") {
+    ctx.note(c.zhu("no provider yet: add an API key first"));
+    openLogin(ctx, {});
+    return;
+  }
   // @路径 展开成消息里的 <file> 块:附上的就是发出的,落盘上屏都完整。
   const expanded = expandFileRefs(raw);
   for (const a of expanded.attachments) {
@@ -405,28 +416,19 @@ export function renderContext(ctx: TuiContext): string {
 
 // ---------- 模型、强度、key ----------
 
-function switchModel(ctx: TuiContext, arg: string): void {
+/** 切到 供应商/模型;setDefault 为真时同时写为缺省。返回是否成功。 */
+function useModel(ctx: TuiContext, name: string, setDefault: boolean): boolean {
   const { deps, agent, model } = ctx;
   if (!deps.settings) {
     ctx.note(c.zhu("settings interface not configured"));
-    return;
-  }
-  const current = `${model.info.providerName}/${model.info.model}`;
-  if (!arg) {
-    const models = deps.settings.listModels();
-    ctx.note(
-      `${c.soft("current")} ${c.ink(current)}\n${models
-        .map((m) => (m === current ? c.jin(`  ▸ ${m}`) : c.faint(`    ${m}`)))
-        .join("\n")}\n${c.faint("Usage: /model provider/model")}`,
-    );
-    return;
+    return false;
   }
   if (agent.running) {
     ctx.note(c.zhu("cannot switch models while running; press Esc first"));
-    return;
+    return false;
   }
   try {
-    const choice = deps.settings.switchModel(arg);
+    const choice = deps.settings.switchModel(name);
     agent.setProvider(choice.provider);
     model.info = { ...model.info, model: choice.model, providerName: choice.providerName };
     model.effortLevels = choice.effortLevels;
@@ -434,9 +436,92 @@ function switchModel(ctx: TuiContext, arg: string): void {
     ctx.compaction.window = choice.contextWindow;
     ctx.updateHeader();
     ctx.updateStatus();
+    if (setDefault) {
+      deps.settings.setDefault(`${choice.providerName}/${choice.model}`);
+      ctx.note(c.jin(`◇ default model set to ${choice.providerName}/${choice.model}`));
+    }
+    return true;
   } catch (err) {
     ctx.note(c.zhu(`✗ ${(err as Error).message}`));
+    return false;
   }
+}
+
+/** /model:无参数弹列表选;有参数直接切。 */
+function switchModel(ctx: TuiContext, arg: string): void {
+  const { deps, model } = ctx;
+  if (!deps.settings) {
+    ctx.note(c.zhu("settings interface not configured"));
+    return;
+  }
+  if (arg) {
+    useModel(ctx, arg, false);
+    return;
+  }
+  const current = `${model.info.providerName}/${model.info.model}`;
+  const rows: PickRow[] = deps.settings.listModels().map((m) => ({
+    label: m,
+    ...(m === current && { current: true, note: "current" }),
+  }));
+  if (rows.length === 0) {
+    ctx.note(c.zhu("no models in the config"));
+    return;
+  }
+  openPicker(
+    ctx,
+    `${c.bold(c.jin("Model"))}  ${c.faint("configured models; /models asks the server")}`,
+    rows,
+    "↑↓ choose · Enter switch · d switch and make it the default · Esc close",
+    (row, key) => useModel(ctx, row.label, key === "d"),
+  );
+}
+
+function openPicker(
+  ctx: TuiContext,
+  title: string,
+  rows: PickRow[],
+  hint: string,
+  onPick: (row: PickRow, key: "enter" | "d") => void,
+): void {
+  const picker = new ListPicker(
+    title,
+    rows,
+    hint,
+    (row, key) => {
+      ctx.dialog.close();
+      onPick(row, key);
+    },
+    () => ctx.dialog.close(),
+    () => ctx.tui.requestRender(),
+  );
+  ctx.dialog.open(picker);
+}
+
+/** /login:登录对话框。供应商、遮罩输入、验证、选模型,全部在界面里点选。 */
+export function openLogin(ctx: TuiContext, opts: { intro?: string; provider?: string }): void {
+  const s = ctx.deps.settings;
+  if (!s?.providers || !s.verifyKey) {
+    ctx.note(c.zhu("settings interface not configured"));
+    return;
+  }
+  const settings = s;
+  const dialog = new LoginDialog(
+    {
+      providers: () => settings.providers?.() ?? [],
+      verifyKey: (p, k) => settings.verifyKey?.(p, k) ?? Promise.resolve([]),
+      setKey: (p, k) => {
+        settings.setKey(p, k);
+        ctx.note(c.jin(`◇ key for ${p} saved to the credentials file`));
+      },
+      useModel: (name, setDefault) => {
+        useModel(ctx, name, setDefault);
+      },
+      onDone: () => ctx.dialog.close(),
+      onChange: () => ctx.tui.requestRender(),
+    },
+    opts,
+  );
+  ctx.dialog.open(dialog);
 }
 
 /** 强度级别:缺省不传;设了就记进每条 request 事件,下一请求生效。 */
@@ -476,43 +561,51 @@ function setEffort(ctx: TuiContext, arg: string): void {
   ctx.updateStatus();
 }
 
-/** 向供应商查当前模型列表:配置里有、服务器没有的标出来,发现下线不靠猜。 */
+/** /models:向供应商查当前模型列表,配置里有、服务器没有的标出来,发现下线不靠猜;然后列表选。 */
 async function listRemoteModels(ctx: TuiContext): Promise<void> {
   const p = ctx.agent.provider;
-  const { providerName } = ctx.model.info;
+  const { providerName, model: currentModel } = ctx.model.info;
+  if (providerName === "none") {
+    openLogin(ctx, {});
+    return;
+  }
   if (!p.listModels) {
     ctx.note(c.zhu("this provider cannot list models"));
     return;
   }
   ctx.showLoader("listing models");
+  let remote: string[];
   try {
-    const remote = await p.listModels();
-    const prefix = `${providerName}/`;
-    const configured = (ctx.deps.settings?.listModels() ?? [])
-      .filter((m) => m.startsWith(prefix))
-      .map((m) => m.slice(prefix.length));
-    const lines = [
-      `${c.soft("provider")} ${c.ink(providerName)}  ${c.faint(`server ${remote.length} models · configured ${configured.length}`)}`,
-    ];
-    for (const m of configured) {
-      lines.push(
-        remote.includes(m)
-          ? `  ${c.green("✓")} ${c.ink(m)}`
-          : `  ${c.zhu("✗")} ${c.ink(m)}  ${c.zhu("not on the server; possibly retired")}`,
-      );
-    }
-    const extra = remote.filter((m) => !configured.includes(m));
-    if (extra.length > 0) {
-      lines.push(c.faint("  on the server, not in config:"));
-      for (const m of extra) lines.push(c.faint(`    · ${m}`));
-    }
-    ctx.note(lines.join("\n"));
+    remote = await p.listModels();
   } catch (err) {
     ctx.note(c.zhu(`✗ listing failed: ${(err as Error).message}`));
+    return;
   } finally {
     ctx.hideLoader();
     ctx.updateStatus();
   }
+  const prefix = `${providerName}/`;
+  const configured = (ctx.deps.settings?.listModels() ?? [])
+    .filter((m) => m.startsWith(prefix))
+    .map((m) => m.slice(prefix.length));
+  const rows: PickRow[] = configured.map((m) => ({
+    label: m,
+    ...(m === currentModel && { current: true }),
+    note: remote.includes(m)
+      ? `${c.green("✓")} on the server${m === currentModel ? " · current" : ""}`
+      : `${c.zhu("✗")} not on the server; possibly retired`,
+  }));
+  for (const m of remote) {
+    if (!configured.includes(m))
+      rows.push({ label: m, note: "on the server, not in config", disabled: true });
+  }
+  openPicker(
+    ctx,
+    `${c.bold(c.jin("Models"))}  ${c.soft(providerName)}  ${c.faint(`server ${remote.length} · configured ${configured.length}`)}`,
+    rows,
+    "↑↓ choose · Enter switch · d switch and make it the default · Esc close",
+    (row, key) => useModel(ctx, `${providerName}/${row.label}`, key === "d"),
+  );
 }
 
 function setKey(ctx: TuiContext, arg: string): void {
@@ -529,7 +622,7 @@ function setKey(ctx: TuiContext, arg: string): void {
   try {
     ctx.deps.settings.setKey(providerName, key);
     ctx.note(
-      c.jin(`◇ key for ${providerName} written to the config file`) +
+      c.jin(`◇ key for ${providerName} saved to the credentials file`) +
         c.faint("  /model to switch to that provider"),
     );
   } catch (err) {
@@ -704,6 +797,9 @@ export async function command(ctx: TuiContext, text: string): Promise<void> {
       break;
     case "key":
       setKey(ctx, arg);
+      break;
+    case "login":
+      openLogin(ctx, arg ? { provider: arg } : {});
       break;
     case "default":
       setDefaultModel(ctx);

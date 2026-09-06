@@ -142,7 +142,10 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
     const { app } = boot(scripted([]), settings);
 
     await app.command("/model");
-    expect(text(app)).toContain("▸ fake/fake-model");
+    // 无参数:弹列表选择器,当前模型带 ▸;Esc 关闭
+    expect(app.dialogLines().map(stripAnsi).join("\n")).toContain("▸ fake/fake-model");
+    app.dialogInput("\x1b");
+    expect(app.dialogLines()).toEqual([]);
 
     await app.command("/model other/big-model");
     expect(calls).toContain("switch:other/big-model");
@@ -152,7 +155,7 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
 
     await app.command("/key deepseek sk-123");
     expect(calls).toContain("key:deepseek:sk-123");
-    expect(text(app)).toContain("key for deepseek written to the config file");
+    expect(text(app)).toContain("key for deepseek saved to the credentials file");
 
     await app.command("/default");
     expect(calls).toContain("default:other/big-model");
@@ -263,13 +266,18 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
     };
     const { app } = boot(provider, settings);
     await app.command("/models");
-    const doc = text(app);
-    expect(doc).toContain("server 2 models · configured 2");
-    expect(doc).toContain("✓ fake-model");
-    expect(doc).toContain("✗ retired-model");
-    expect(doc).toContain("possibly retired");
-    expect(doc).toContain("· fresh-model");
-    expect(doc).not.toContain("big-model");
+    // 结果是一个列表选择器:配置里的标 ✓/✗,服务器上多出来的不可选
+    const dlg = app.dialogLines().map(stripAnsi).join("\n");
+    expect(dlg).toContain("server 2 · configured 2");
+    expect(dlg).toContain("fake-model");
+    expect(dlg).toContain("✓ on the server");
+    expect(dlg).toContain("retired-model");
+    expect(dlg).toContain("possibly retired");
+    expect(dlg).toContain("fresh-model");
+    expect(dlg).toContain("not in config");
+    expect(dlg).not.toContain("big-model");
+    app.dialogInput("\x1b");
+    expect(app.dialogLines()).toEqual([]);
     app.stop();
   });
 

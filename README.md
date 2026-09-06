@@ -79,11 +79,13 @@ The fake model needs no network and no key; the kernel, tools, session files, UI
 
 ### Provide a key
 
-Three ways, highest priority first:
+`pnpm tui` starts without any key. On first start a dialog opens: pick the provider, paste the key (masked), it is checked with the provider's model list and saved, then pick a model. `/login` opens the same dialog any time; `/model` and `/models` are pickers too.
 
-1. The provider's `apiKey` field in the config file (`/key deepseek sk-xxx` in the UI writes it there).
-2. The environment variable named by `apiKeyEnv`; the template uses `DEEPSEEK_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`.
-3. Another config file: `CLARI_CONFIG=path`.
+Where a key can come from, highest priority first:
+
+1. The environment variable named by `apiKeyEnv`; the template uses `DEEPSEEK_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`.
+2. `~/.clari/credentials.json`, written by the dialog or by `/key provider secret` (`CLARI_CREDENTIALS=path` moves it). The config file never holds a key.
+3. The provider's `apiKey` field in the config file, for throwaway setups such as the demo config.
 
 Keys never enter the log, the request body shown in the inspector, or the wire JSON view.
 
@@ -93,7 +95,7 @@ A relay is a provider with the same protocol and a different address. Add one un
 
 - OpenAI-compatible (`/v1/chat/completions`): `protocol: "openai"`, `baseUrl` up to `/v1`, `models` with the relay's model names.
 - Anthropic-compatible (`/v1/messages`): `protocol: "anthropic"`, `baseUrl` as the host; add `"promptCache": false` if the relay rejects cache breakpoints.
-- Keys via `apiKeyEnv` or `/key provider secret` in the UI.
+- Keys via `/login` in the UI (or `apiKeyEnv`).
 - Run `/models` after start: it asks the relay which models exist and marks the ones in your config that do not.
 - Extra parameters or headers the relay wants go through `extraBody` and `extraHeaders` verbatim.
 - If a relay's stream goes quiet for long stretches, raise `stallTimeoutMs` or set it to 0.

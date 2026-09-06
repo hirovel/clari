@@ -7,6 +7,7 @@ import {
   clariHome,
   createProvider,
   DEFAULT_CONFIG_PATH,
+  findApiKey,
   type KernelConfig,
   loadConfig,
   modelNames,
@@ -62,10 +63,29 @@ export type Bootstrap = {
   config: KernelConfig;
   configCreated: boolean;
   choose(name?: string): ModelChoice;
+  /** 同 choose,但缺 key 时返回占位选择(unavailable 带原因)而不是抛错。 */
+  chooseOrNone(name?: string): ModelChoice;
   settings: TuiSettings;
   /** 把预设与配置缺省并进参数:显式参数 > 预设 > 配置 prompt 缺省 > 内置缺省。 */
   resolve(args: CommonArgs): CommonArgs;
 };
+
+export const NO_PROVIDER = "none";
+
+/** 占位 provider:任何请求都失败并指向 /login;/models 也不可用。 */
+export function noProviderChoice(): ModelChoice {
+  return {
+    provider: {
+      model: NO_PROVIDER,
+      async complete() {
+        throw new Error("No provider configured. Run /login to add an API key.");
+      },
+    },
+    model: NO_PROVIDER,
+    providerName: NO_PROVIDER,
+    contextWindow: 128000,
+  };
+}
 
 export function bootstrap(): Bootstrap {
   const loaded = loadConfig();
@@ -82,6 +102,16 @@ export function bootstrap(): Bootstrap {
       ...(r.price && { price: r.price }),
     };
   };
+  /** 没有 key 也要进界面:拿不到 provider 时返回占位,界面据此打开登录对话框。 */
+  const chooseOrNone = (name?: string): ModelChoice => {
+    try {
+      return choose(name);
+    } catch (err) {
+      const message = (err as Error).message;
+      if (!/no API key/.test(message)) throw err;
+      return { ...noProviderChoice(), unavailable: message };
+    }
+  };
   const settings: TuiSettings = {
     priceFor: (model) => {
       try {
@@ -96,6 +126,25 @@ export function bootstrap(): Bootstrap {
     setKey: (providerName, key) => {
       config = setApiKey(config, providerName, key);
     },
+    providers: () =>
+      Object.entries(config.providers).map(([name, p]) => ({
+        name,
+        protocol: p.protocol,
+        ...(p.apiKeyEnv && { env: p.apiKeyEnv }),
+        ...(() => {
+          const found = findApiKey(name, p);
+          return found ? { keySource: found.source } : {};
+        })(),
+        models: modelNames(p),
+      })),
+    verifyKey: async (providerName, key) => {
+      const p = config.providers[providerName];
+      if (!p) throw new Error(`unknown provider "${providerName}"`);
+      const r = resolveModel(config, `${providerName}/${modelNames(p)[0] ?? ""}`);
+      const provider = createProvider(r, key);
+      if (!provider.listModels) return [];
+      return provider.listModels();
+    },
     setDefault: (model) => {
       config = setDefaultModel(config, model);
     },
@@ -106,6 +155,7 @@ export function bootstrap(): Bootstrap {
     },
     configCreated: loaded.created,
     choose,
+    chooseOrNone,
     settings,
     resolve: (args) => applyPreset(args, config),
   };

@@ -2,6 +2,7 @@
 // 状态按关心的事分组:model(当前模型)、view(屏幕显示状态)、req(请求层记录)、approval(审批)、
 // slots(策略槽)、children(子 agent)、inspector(检视器)。函数字段是组装处提供的少数动作。
 import type {
+  Component,
   Container,
   Editor,
   Loader,
@@ -124,6 +125,13 @@ export type TuiContext = {
   approval: ApprovalState;
   slots: SlotState;
   children: { views: ChildView[]; slots: Map<string, Container> };
+  /** 底部对话框(登录、模型选择):同一时间只有一个。 */
+  dialog: {
+    overlay: OverlayHandle | undefined;
+    component: Component | undefined;
+    open(component: Component): void;
+    close(): void;
+  };
   inspector: {
     view: RequestInspector;
     overlay: OverlayHandle | undefined;

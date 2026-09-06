@@ -3,6 +3,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
+import { noProviderChoice } from "../cli/bootstrap.js";
 import { createTuiApp, type TuiApp, type TuiAppDeps } from "../cli/tui-app.js";
 import { llmSummarize } from "../src/compaction.js";
 import { EventLog } from "../src/log.js";
@@ -374,6 +375,56 @@ scene = "6";
   app.inspector.close();
   app.stop();
   save("6-inspector", "6 Inspector views and the context action menu", shots);
+}
+
+scene = "7";
+// ---------- 7 没有 key 的启动:登录对话框 ----------
+{
+  const real = scripted([
+    { text: "Hello from the model you just set up.", toolCalls: [], stopReason: "end", usage: { inputTokens: 300, outputTokens: 8 } },
+  ]);
+  const none = noProviderChoice();
+  const app = createTuiApp({
+    terminal: new VirtualTerminal(W, 30),
+    log: new EventLog(),
+    provider: none.provider,
+    tools: [],
+    compaction: { strategy: async () => null, window: 131072, reserveTokens: 32000 },
+    reserveTokens: 32000,
+    info: { model: none.model, providerName: none.providerName, sessionFile: "sessions/demo.jsonl" },
+    systemPrompt: "sys",
+    settings: {
+      listModels: () => ["deepseek/deepseek-v4-pro", "deepseek/deepseek-v4-flash", "anthropic/claude-sonnet-5"],
+      switchModel: () => ({ provider: real, model: "deepseek-v4-pro", providerName: "deepseek", contextWindow: 128000 }),
+      setKey: () => {},
+      setDefault: () => {},
+      providers: () => [
+        { name: "deepseek", protocol: "openai", env: "DEEPSEEK_API_KEY", models: ["deepseek-v4-pro", "deepseek-v4-flash"] },
+        { name: "anthropic", protocol: "anthropic", env: "ANTHROPIC_API_KEY", keySource: "env", models: ["claude-sonnet-5"] },
+        { name: "openai", protocol: "openai-responses", env: "OPENAI_API_KEY", models: ["gpt-5.5", "gpt-5.6"] },
+      ],
+      verifyKey: async () => ["deepseek-v4-pro", "deepseek-v4-lite"],
+    },
+    unavailable: "no API key for provider deepseek. Run /login in the TUI, set env var DEEPSEEK_API_KEY, or add it to ~/.clari/credentials.json",
+    onExit: () => {},
+  });
+  const shots: string[] = [];
+  const dialog = () => app.dialogLines();
+  shots.push(...divider("start without a key: the header says no model, the dialog opens by itself"), ...app.lines(W), ...divider("dialog · providers"), ...dialog());
+  app.dialogInput("\r");
+  app.dialogInput("sk-0123456789abcdef");
+  shots.push(...divider("dialog · key entry, masked"), ...dialog());
+  app.dialogInput("\r");
+  for (let i = 0; i < 40 && !app.dialogLines().join("").includes("key saved"); i++) await tick();
+  shots.push(...divider("dialog · key checked with GET /models, pick a model (d also makes it the default)"), ...dialog());
+  app.dialogInput("\r");
+  await app.submit("Say hello.");
+  shots.push(...divider("after the dialog: model switched, first message answered"), ...app.lines(W).slice(-16));
+  await app.command("/model");
+  shots.push(...divider("/model: list picker"), ...dialog());
+  app.dialogInput("\x1b");
+  app.stop();
+  save("7-login", "7 Start without a key: login dialog and model picker", shots);
 }
 
 const index = [

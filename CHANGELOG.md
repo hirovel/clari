@@ -7,6 +7,7 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ### Changed
 
+- The TUI starts without any API key. A login dialog opens on first start and via `/login`: pick the provider, paste the key (masked), it is checked against the provider's model list, saved to `~/.clari/credentials.json` (mode 0600), then pick a model (`d` also makes it the default). `/model` without arguments and `/models` are list pickers. Key lookup order: env var, credentials file, config `apiKey`. `clari once` still exits when no key is found.
 - Visual suite (`scripts/visual-suite.ts`) renders six scenarios to HTML; fixes found by it: the step-limit reason is English, a finished sub-agent view no longer counts a resumed run, the status bar usage follows the compaction-aware estimate after a manual `/compact`.
 - Compaction trigger is an option: `threshold` (default), `manual` (only on `/compact`), `remind` (status-bar hint past the threshold); reserve tokens configurable. `defaults.compactionTrigger`, `defaults.compactionReserve`, `--compaction-trigger`, `--compaction-reserve`, `/compaction threshold|manual|remind`.
 - Internal refactor: TUI, inspector and bootstrap split into single-purpose modules; session replay is near-linear (9000 events 48 s to 3.7 s); one token estimate; coverage 83% to 90%.

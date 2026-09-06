@@ -14,10 +14,13 @@ import { DEFAULT_APPROVAL } from "../src/approval.js";
 import {
   CONFIG_TEMPLATE,
   createProvider,
+  findApiKey,
   type KernelConfig,
   loadConfig,
+  loadCredentials,
   resolveApiKey,
   resolveModel,
+  saveCredential,
   setApiKey,
   setDefaultModel,
 } from "../src/config.js";
@@ -69,15 +72,19 @@ describe("配置文件", () => {
     );
   });
 
-  it("setApiKey 写回并去空白,未知供应商报错列出选项;setDefaultModel 写回", () => {
+  it("setApiKey 写进凭据文件并去空白,配置不动,未知供应商报错列出选项;setDefaultModel 写回配置", () => {
     tmp = mkdtempSync(join(tmpdir(), "clari-cfg-"));
     const path = join(tmp, "config.json");
-    expect(() => setApiKey(base, "nope", "k", path)).toThrow(
+    const creds = join(tmp, "credentials.json");
+    expect(() => setApiKey(base, "nope", "k", creds)).toThrow(
       /unknown provider "nope"; options: fake/,
     );
-    const next = setApiKey(base, "fake", "  sk-1  ", path);
-    expect(next.providers.fake?.apiKey).toBe("sk-1");
-    expect(JSON.parse(readFileSync(path, "utf8")).providers.fake.apiKey).toBe("sk-1");
+    const next = setApiKey(base, "fake", "  sk-1  ", creds);
+    expect(next).toBe(base);
+    expect(JSON.parse(readFileSync(creds, "utf8")).fake.apiKey).toBe("sk-1");
+    expect(loadCredentials(creds).fake?.apiKey).toBe("sk-1");
+    saveCredential("other", "sk-2", creds);
+    expect(Object.keys(loadCredentials(creds))).toEqual(["fake", "other"]);
     const withDefault = setDefaultModel(next, "fake/other", path);
     expect(withDefault.default).toBe("fake/other");
     expect(JSON.parse(readFileSync(path, "utf8")).default).toBe("fake/other");
@@ -144,15 +151,25 @@ describe("模型解析与 key", () => {
     expect(resolveModel(cfg, "openai/gpt-9").extraBody).toBeUndefined();
   });
 
-  it("key:配置字段去空白优先;其次环境变量;缺失时的提示分两种写法", () => {
+  it("key:环境变量 > 凭据文件 > 配置字段,都去空白;缺失时的提示指向 /login、环境变量与凭据文件", () => {
     const p = cfg.providers.deepseek as NonNullable<KernelConfig["providers"]["x"]>;
-    expect(resolveApiKey("deepseek", { ...p, apiKey: " k1 " }, {})).toBe("k1");
-    expect(resolveApiKey("deepseek", { ...p, apiKeyEnv: "K" }, { K: " k2 " })).toBe("k2");
-    expect(() => resolveApiKey("deepseek", { ...p, apiKeyEnv: "K" }, {})).toThrow(
-      /env var K, or providers\.deepseek\.apiKey/,
+    tmp = mkdtempSync(join(tmpdir(), "clari-cred-"));
+    const creds = join(tmp, "credentials.json");
+    const env = { CLARI_CREDENTIALS: creds };
+    expect(resolveApiKey("deepseek", { ...p, apiKey: " k1 " }, env)).toBe("k1");
+    saveCredential("deepseek", " k3 ", creds);
+    expect(findApiKey("deepseek", { ...p, apiKey: "k1" }, env)).toEqual({
+      key: "k3",
+      source: "credentials",
+    });
+    expect(resolveApiKey("deepseek", { ...p, apiKeyEnv: "K" }, { ...env, K: " k2 " })).toBe("k2");
+    const none = { CLARI_CREDENTIALS: join(tmp, "none.json") };
+    expect(findApiKey("deepseek", p, none)).toBeUndefined();
+    expect(() => resolveApiKey("deepseek", { ...p, apiKeyEnv: "K" }, none)).toThrow(
+      /Run \/login in the TUI, set env var K, or add it to .*none\.json/,
     );
-    expect(() => resolveApiKey("deepseek", p, {})).toThrow(
-      /providers\.deepseek\.apiKey or apiKeyEnv/,
+    expect(() => resolveApiKey("deepseek", p, none)).toThrow(
+      /Run \/login in the TUI, or add it to/,
     );
   });
 

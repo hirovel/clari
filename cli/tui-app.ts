@@ -39,10 +39,11 @@ import type { Skill } from "./prompt.js";
 import type { PromptTemplate } from "./templates.js";
 import { c, editorTheme } from "./theme.js";
 import type { MemoryFiles } from "./tools/memory.js";
-import { COMMANDS, command, submit } from "./tui-commands.js";
+import { COMMANDS, command, openLogin, submit } from "./tui-commands.js";
 import { RAW_LINE_CAP, type TuiContext } from "./tui-context.js";
 import { contextAction } from "./tui-edit.js";
 import { brief, pct } from "./tui-format.js";
+import type { ProviderSummary } from "./tui-login.js";
 import {
   attachChild,
   render,
@@ -65,6 +66,8 @@ export type ModelChoice = {
   effortLevels?: EffortLevel[];
   /** 价格数据(配置里给了才有),只用于显示费用。 */
   price?: Price;
+  /** 拿不到 provider 的原因(缺 key);界面据此打开登录对话框,发消息时提示。 */
+  unavailable?: string;
 };
 
 export type TuiSettings = {
@@ -78,6 +81,10 @@ export type TuiSettings = {
   setKey(providerName: string, key: string): void;
   /** 把某模型设为缺省并落盘。 */
   setDefault(model: string): void;
+  /** 供应商清单(名、协议、key 来源、环境变量名、配置里的模型),登录对话框用。 */
+  providers?(): ProviderSummary[];
+  /** 用一把 key 向供应商查模型清单;抛错即无效。登录对话框验证用。 */
+  verifyKey?(providerName: string, key: string): Promise<string[]>;
 };
 
 export type TuiAppDeps = {
@@ -126,6 +133,8 @@ export type TuiAppDeps = {
   toolPrompts?: ToolPromptsConfig;
   /** 启动时的保留策略显示名(--preservation / 配置);缺省内置。 */
   preservationName?: string;
+  /** 启动时没有可用的 provider(缺 key)的原因:界面先弹登录对话框。 */
+  unavailable?: string;
 };
 
 export type TuiApp = {
@@ -156,6 +165,11 @@ export type TuiApp = {
   approvalLines(): string[];
   /** 把按键送给正在等待的审批提示(离线验证用)。 */
   approvalInput(data: string): void;
+  /** 当前对话框(登录、模型选择)的渲染行;没有时为空。 */
+  dialogLines(): string[];
+  dialogInput(data: string): void;
+  /** 打开登录对话框(/login)。 */
+  openLogin(provider?: string): void;
   toggleFold(): void;
   toggleReasoning(): void;
   stop(): void;
@@ -297,6 +311,24 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       },
     },
     children: { views: [], slots: new Map() },
+    dialog: {
+      overlay: undefined,
+      component: undefined,
+      open(component) {
+        ctx.dialog.close();
+        ctx.dialog.component = component;
+        ctx.dialog.overlay = tui.showOverlay(component, { width: "100%", anchor: "bottom-left" });
+        tui.requestRender();
+      },
+      close() {
+        if (!ctx.dialog.overlay) return;
+        ctx.dialog.overlay.hide();
+        ctx.dialog.overlay = undefined;
+        ctx.dialog.component = undefined;
+        tui.setFocus(editor);
+        tui.requestRender();
+      },
+    },
     inspector: {
       view: inspector,
       overlay: undefined,
@@ -326,7 +358,9 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     updateHeader() {
       const { info } = ctx.model;
       header.setText(
-        `${c.bold(c.jin("clari"))}  ${c.ink(info.model)}  ${c.faint(`${info.providerName} · ${info.sessionFile}`)}`,
+        info.providerName === "none"
+          ? `${c.bold(c.jin("clari"))}  ${c.zhu("no model")}  ${c.faint(`/login to add an API key · ${info.sessionFile}`)}`
+          : `${c.bold(c.jin("clari"))}  ${c.ink(info.model)}  ${c.faint(`${info.providerName} · ${info.sessionFile}`)}`,
       );
     },
     updateStatus,
@@ -474,7 +508,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       tui.requestRender();
       return { consume: true };
     }
-    if (ctx.inspector.overlay || approval.overlay) return undefined; // 检视器或审批提示打开时,其余按键归它们
+    if (ctx.inspector.overlay || approval.overlay || ctx.dialog.overlay) return undefined; // 检视器、审批提示或对话框打开时,其余按键归它们
     if (data === "?" && editor.getText() === "") {
       ctx.note(shortcutLines().join("\n"));
       return { consume: true };
@@ -506,6 +540,10 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
 
   tui.setFocus(editor);
   tui.start();
+  if (deps.unavailable) {
+    ctx.note(c.zhu(`✗ ${deps.unavailable}`));
+    openLogin(ctx, { intro: "no API key yet: pick a provider, paste its key, choose a model" });
+  }
 
   return {
     tui,
@@ -538,6 +576,9 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     slots: () => ctx.agent.slots,
     approvalLines: () => approval.prompt?.render() ?? [],
     approvalInput: (data) => approval.prompt?.handleInput(data),
+    dialogLines: () => ctx.dialog.component?.render(deps.terminal.columns) ?? [],
+    dialogInput: (data) => ctx.dialog.component?.handleInput?.(data),
+    openLogin: (provider) => openLogin(ctx, provider ? { provider } : {}),
     toggleFold: () => toggleFold(ctx),
     toggleReasoning: () => toggleReasoning(ctx),
     stop: () => ctx.stop(),

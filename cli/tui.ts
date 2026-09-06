@@ -52,21 +52,14 @@ try {
   console.error((err as Error).message);
   process.exit(2);
 }
-if (boot.configCreated) {
-  console.log(`config template created: ${DEFAULT_CONFIG_PATH}`);
-  console.log(
-    "Fill in each provider's API key (env vars recommended), or run /key provider secret after startup to write it into the config.\n",
-  );
-}
+if (boot.configCreated) console.log(`config template created: ${DEFAULT_CONFIG_PATH}`);
 
+// 没有 key 也进界面:占位 provider 加登录对话框,key 在界面里贴。
 let first: ModelChoice;
 try {
-  first = boot.choose(args.model);
+  first = boot.chooseOrNone(args.model);
 } catch (err) {
   console.error((err as Error).message);
-  console.error(
-    "\nhint: one provider key is enough to start; set the others inside the TUI with /key.",
-  );
   process.exit(1);
 }
 
@@ -190,6 +183,7 @@ app = createTuiApp({
   ...(args.effort && { effort: args.effort }),
   ...(first.effortLevels && { effortLevels: first.effortLevels }),
   ...(first.price && { price: first.price }),
+  ...(first.unavailable && { unavailable: first.unavailable }),
   ...(args.trace && {
     onRaw: (requestIndex: number, line: string) =>
       appendFileSync(traceFile, `${JSON.stringify({ request: requestIndex, line })}\n`),
