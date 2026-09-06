@@ -1,4 +1,5 @@
 // 屏幕文本的小工具:工具参数的人读形态、edit/write 的改动详情、任务简报、百分比。渲染、审批提示、编辑命令共用。
+import { fileUrl, osc8 } from "./terminal-extras.js";
 import { c } from "./theme.js";
 import { diffLines, hunks } from "./tools/diff.js";
 
@@ -8,7 +9,7 @@ export function brief(task: string): string {
   return first.length > 24 ? `${first.slice(0, 24)}…` : first;
 }
 
-/** 工具参数的人读形态:命令与路径直接展示,其余压成紧凑 JSON。 */
+/** 工具参数的人读形态:命令与路径直接展示,其余压成紧凑 JSON。路径是 OSC 8 链接,支持的终端里可点击打开。 */
 export function formatArgs(args: unknown): string {
   const a = (args ?? {}) as Record<string, unknown>;
   let s: string;
@@ -18,7 +19,8 @@ export function formatArgs(args: unknown): string {
       typeof a.offset === "number" || typeof a.limit === "number"
         ? `  from line ${a.offset ?? 1}${typeof a.limit === "number" ? `, ${a.limit} lines` : ""}`
         : "";
-    s = `${a.path}${range}`;
+    const shown = a.path.length > 120 ? `${a.path.slice(0, 120)}…` : a.path;
+    return `${osc8(shown, fileUrl(a.path))}${range}`;
   } else if (typeof a.task === "string") {
     s = `${a.scope ? `scope=${a.scope}  ` : ""}${brief(a.task)}`;
   } else s = JSON.stringify(args) ?? "";

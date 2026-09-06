@@ -11,18 +11,19 @@ import type { AgentEvent } from "../src/events.js";
 import type { Message } from "../src/messages.js";
 import type { ToolDef } from "../src/provider.js";
 import { fmtMs, fmtTok } from "./inspector.js";
+import { gutter, shortLabel } from "./layout.js";
 import { c, G } from "./theme.js";
 
 type RequestEvent = Extract<AgentEvent, { type: "request" }>;
 type AssistantEvent = Extract<AgentEvent, { type: "assistant/message" }>;
 
 /** 标签沟宽度:标签占 9 列,再空两格,内容从第 12 列起。 */
-export const GUTTER = 9;
-/** 一行:标签 + 内容。 */
+export { GUTTER } from "./layout.js";
+/** 一行:标签 + 内容。窄屏下标签沟缩窄、标签用短形。 */
 export const g = (label: string, body: string): string =>
-  `${c.faint(label.padEnd(GUTTER))}  ${body}`;
+  `${c.faint(shortLabel(label).padEnd(gutter()))}  ${body}`;
 /** 续行:缩进到内容列。 */
-export const cont = (body: string): string => `${" ".repeat(GUTTER)}  ${body}`;
+export const cont = (body: string): string => `${" ".repeat(gutter())}  ${body}`;
 
 export function firstLine(s: string, max = 60): string {
   const l =
@@ -615,8 +616,11 @@ export function shortcutLines(): string[] {
   const k = (key: string, what: string) => `  ${c.ink(key.padEnd(12))} ${c.soft(what)}`;
   return [
     c.soft("Shortcuts"),
-    k("Enter", "send · Alt+Enter queue for after the current step"),
+    k("Enter", "send · Alt+Enter queue for after the current step · Shift+Enter new line"),
     k("Esc", "interrupt the running turn"),
+    k("Ctrl+K", "command palette: commands, models, skills, templates, login"),
+    k("Ctrl+G", "write the message in $EDITOR"),
+    k("Ctrl+↑ ↓", "jump one step up or down · PgUp PgDn scroll · Ctrl+Shift+F search"),
     k("Ctrl+R", "inspector: requests · Tab cycles events · compactions · context"),
     k("Ctrl+E", "context panel: every message the model sees next; Enter on a row for actions"),
     k("Ctrl+O", "fold or unfold tool results (and cycle sub-agent views)"),

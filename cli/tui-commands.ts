@@ -13,6 +13,7 @@ import { describeStatus } from "./mcp/bridge.js";
 import { expandSkill } from "./prompt.js";
 import { listSessions, sessionRows } from "./sessions.js";
 import { expandTemplate } from "./templates.js";
+import { copySequence } from "./terminal-extras.js";
 import { c } from "./theme.js";
 import { clearMemory, forgetMemory, memoryEntries } from "./tools/memory.js";
 import type { TuiContext } from "./tui-context.js";
@@ -59,6 +60,10 @@ export const COMMANDS = [
   {
     name: "compact",
     description: "Compact now, optionally with instructions: /compact keep the errors",
+  },
+  {
+    name: "copy",
+    description: "Copy the last reply to the clipboard; /copy N copies its Nth code block",
   },
   {
     name: "fork",
@@ -640,6 +645,34 @@ function setDefaultModel(ctx: TuiContext): void {
   ctx.note(c.soft(`· default model set to ${name}`));
 }
 
+/** 上一条回复里的围栏代码块正文(不含围栏行)。 */
+export function codeBlocks(text: string): string[] {
+  const out: string[] = [];
+  const re = /^```[^\n]*\n([\s\S]*?)^```/gm;
+  for (const m of text.matchAll(re)) out.push((m[1] ?? "").replace(/\n$/, ""));
+  return out;
+}
+
+/** /copy [N]:把上一条回复(或它的第 N 个代码块)写进系统剪贴板(OSC 52)。 */
+function copyCommand(ctx: TuiContext, arg: string): string {
+  const last = [...ctx.log.events].reverse().find((e) => e.type === "assistant/message" && e.text);
+  if (!last || last.type !== "assistant/message") return c.zhu("nothing to copy yet");
+  let text = last.text;
+  let what = "the last reply";
+  if (arg.trim()) {
+    const n = Number(arg.trim());
+    const blocks = codeBlocks(last.text);
+    if (!Number.isInteger(n) || n < 1 || n > blocks.length)
+      return c.zhu(
+        `the last reply has ${blocks.length} code block${blocks.length === 1 ? "" : "s"}; /copy N with N in that range`,
+      );
+    text = blocks[n - 1] as string;
+    what = `code block ${n}`;
+  }
+  ctx.deps.terminal.write(copySequence(text));
+  return c.faint(`· copied ${what} (${text.length} chars) to the clipboard`);
+}
+
 async function manualCompact(ctx: TuiContext, instructions: string): Promise<void> {
   const { log, agent, compaction } = ctx;
   ctx.showLoader("compacting");
@@ -742,6 +775,9 @@ export async function command(ctx: TuiContext, text: string): Promise<void> {
       break;
     case "compact":
       await manualCompact(ctx, arg);
+      break;
+    case "copy":
+      note(copyCommand(ctx, arg));
       break;
     case "fork":
       note(forkCommand(ctx, arg));

@@ -61,7 +61,11 @@ export class VirtualTerminal implements PiTerminal {
   clearScreen(): void {
     this.write("\x1b[2J\x1b[H");
   }
-  setTitle(): void {}
+  /** 终端标题的历史(OSC 2 的等价物),验证标题跟状态用。 */
+  readonly titles: string[] = [];
+  setTitle(title: string): void {
+    this.titles.push(title);
+  }
   setProgress(): void {}
 
   /** 模拟按键输入。 */

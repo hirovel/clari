@@ -31,6 +31,10 @@ export type CommonArgs = {
   fold: boolean;
   /** 折叠时保留的结果行数(配置 foldLines)。 */
   foldLines?: number;
+  /** 屏幕模式(--screen / 配置 screen)。 */
+  screen?: "alt" | "main";
+  /** 桌面通知(--notify / 配置 notify)。 */
+  notify?: "unfocused" | "always" | "off";
   /** 恢复指定会话文件。 */
   resume?: string;
   /** 恢复最近一次会话。 */
@@ -184,6 +188,19 @@ export function parseCommonArgs(argv: string[]): CommonArgs {
         out.fold = true;
         out.foldExplicit = true;
         break;
+      case "--screen": {
+        const v = argv[++i];
+        if (v !== "alt" && v !== "main") throw new Error("--screen takes alt or main");
+        out.screen = v;
+        break;
+      }
+      case "--notify": {
+        const v = argv[++i];
+        if (v !== "unfocused" && v !== "always" && v !== "off")
+          throw new Error("--notify takes unfocused, always or off");
+        out.notify = v;
+        break;
+      }
       case "--steering": {
         const v = takeValue(i++, a);
         if (v !== "step" && v !== "turn")
@@ -317,6 +334,8 @@ Options
   --subagent                     add the task tool (sub-agents)
   --no-trace                     do not record the raw stream (default: every received line is written to <session>.trace.jsonl; view with /raw N)
   --fold                         tool results start folded (the default; config fold: false starts unfolded; Ctrl+O toggles)
+  --screen alt|main              alt (default): fixed header and status, own scrolling, mouse, search; main keeps the terminal scrollback
+  --notify unfocused|always|off  desktop notification when a turn ends or approval is needed (default: only while the terminal is unfocused)
   --json                         one-shot mode: print a structured result
   --events                       one-shot mode: write every event to stdout as a JSON line
   -h, --help
@@ -370,6 +389,8 @@ export function applyPreset(args: CommonArgs, config: KernelConfig): CommonArgs 
     }
     if (out.foldLines === undefined && layer.foldLines !== undefined)
       out.foldLines = layer.foldLines;
+    if (out.screen === undefined && layer.screen !== undefined) out.screen = layer.screen;
+    if (out.notify === undefined && layer.notify !== undefined) out.notify = layer.notify;
     if (out.toolPrompts === undefined && layer.toolPrompts) out.toolPrompts = layer.toolPrompts;
     if (out.approval === undefined && layer.approval) out.approval = layer.approval;
     if (out.systemPromptFile === undefined && layer.systemPromptFile)

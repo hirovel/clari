@@ -10,7 +10,6 @@ import {
   callLine,
   cont,
   errorCardLines,
-  GUTTER,
   paramsLine,
   predictedCache,
   rawRow,
@@ -22,6 +21,8 @@ import {
 } from "./cards.js";
 import { renderExtEvent } from "./ext-events.js";
 import { fmtMs, fmtTok, messagesFor } from "./inspector.js";
+import { gutter, setCompact, shortLabel } from "./layout.js";
+import { PROMPT_MARK } from "./terminal-extras.js";
 import { c, G, markdownTheme } from "./theme.js";
 import { Block } from "./tui-block.js";
 import {
@@ -61,10 +62,11 @@ export class LabeledMarkdown implements Component {
   }
 
   render(width: number): string[] {
-    const inner = Math.max(10, width - GUTTER - 4);
+    const g = gutter();
+    const inner = Math.max(10, width - g - 4);
     const lines = this.md.render(inner);
-    const first = ` ${c.faint(this.label.padEnd(GUTTER))}  `;
-    const rest = ` ${" ".repeat(GUTTER)}  `;
+    const first = ` ${c.faint(shortLabel(this.label).padEnd(g))}  `;
+    const rest = ` ${" ".repeat(g)}  `;
     return lines.map((l, i) => (i === 0 ? first : rest) + l);
   }
 }
@@ -96,16 +98,30 @@ export function toggleReasoning(ctx: TuiContext): void {
   );
 }
 
-/** 流式回复正文:一行 reply 标签,正文缩进到标签沟的内容列,Markdown 照常渲染。 */
+/** 流式增量的合帧间隔(毫秒):约 30 帧,Markdown 不再每个 delta 重解析一次。 */
+const STREAM_FRAME_MS = 33;
+
+/** 把攒着的增量落到屏幕上。 */
+function flushStream(ctx: TuiContext): void {
+  const v = ctx.view;
+  if (v.streamTimer) clearTimeout(v.streamTimer);
+  v.streamTimer = undefined;
+  if (v.streaming) v.streaming.setText(v.streamBuffer);
+  ctx.tui.requestRender();
+}
+
+/** 流式回复正文:一行 reply 标签,正文缩进到标签沟的内容列,Markdown 照常渲染。增量按帧合并。 */
 export function streamDelta(ctx: TuiContext, d: string): void {
   const v = ctx.view;
   if (!v.streaming) {
     v.streaming = new LabeledMarkdown("reply");
     ctx.transcript.addChild(v.streaming);
+    v.streamBuffer = d;
+    flushStream(ctx);
+    return;
   }
   v.streamBuffer += d;
-  v.streaming.setText(v.streamBuffer);
-  ctx.tui.requestRender();
+  if (!v.streamTimer) v.streamTimer = setTimeout(() => flushStream(ctx), STREAM_FRAME_MS);
 }
 
 /** 推理内容不隐藏:thinking 模型的思考过程以淡字实时呈现。 */
@@ -339,6 +355,8 @@ function renderAssistant(
     transcript.addChild(node);
   }
   if (v.streaming) {
+    if (v.streamTimer) clearTimeout(v.streamTimer);
+    v.streamTimer = undefined;
     if (e.text) v.streaming.setText(e.text);
     else transcript.removeChild(v.streaming);
     v.streaming = undefined;
@@ -422,6 +440,7 @@ function renderRequest(ctx: TuiContext, e: Extract<AgentEvent, { type: "request"
     provenance = comp.provenance;
   }
   const activeDefs = ctx.defs().filter((d) => e.tools.includes(d.name));
+  setCompact(ctx.deps.terminal.columns);
   const level = e.effort ? parseEffort(e.effort) : undefined;
   const wire = agent.provider.wire?.(messages, activeDefs, level ? { effort: level } : {});
   const start = log.events.find((x) => x.type === "session/start");
@@ -445,6 +464,8 @@ function renderRequest(ctx: TuiContext, e: Extract<AgentEvent, { type: "request"
   });
   // 旧的 Request 卡折成两行(头 + changed,):当步的信息在新卡上,全文永远在检视器。
   if (req.lastCard) req.lastCard.node.setText(req.lastCard.lines.slice(0, 2).join("\n"));
+  // 每张请求卡的头行带提示标记:备用屏里 Ctrl+↑ / Ctrl+↓ 一步一跳。
+  cardLines[0] = PROMPT_MARK + cardLines[0];
   const cardNode = new Block(cardLines.join("\n"));
   req.lastCard = { node: cardNode, lines: cardLines };
   transcript.addChild(cardNode);

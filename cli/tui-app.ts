@@ -12,14 +12,18 @@ import {
   CombinedAutocompleteProvider,
   Container,
   Editor,
+  isViewportTUI,
   Key,
   Loader,
   matchesKey,
+  ScrollView,
   Spacer,
   type Terminal,
   Text,
   type TUI,
+  TuiAltScreen,
   TuiMainScreen,
+  VStack,
 } from "@earendil-works/pi-tui";
 import { Agent, type DeliverAs } from "../src/agent.js";
 import type { ApprovalConfig } from "../src/approval.js";
@@ -33,10 +37,19 @@ import type { EffortLevel, Provider, ToolDef } from "../src/provider.js";
 import type { ChildInfo } from "../src/subagent.js";
 import type { Tool } from "../src/tools.js";
 import { firstRunLines, GUTTER, shortcutLines, thinkingLines } from "./cards.js";
+import { editInExternalEditor } from "./editor.js";
 import { fmtTok, RequestInspector, type SessionSource } from "./inspector.js";
+import { setCompact } from "./layout.js";
 import type { McpServerStatus } from "./mcp/bridge.js";
 import type { Skill } from "./prompt.js";
 import type { PromptTemplate } from "./templates.js";
+import {
+  FOCUS_OFF,
+  FOCUS_ON,
+  notifySequence,
+  openUrl,
+  withFocusTracking,
+} from "./terminal-extras.js";
 import { c, editorTheme, G } from "./theme.js";
 import type { MemoryFiles } from "./tools/memory.js";
 import { Block, SplitLine } from "./tui-block.js";
@@ -104,6 +117,10 @@ export type TuiAppDeps = {
   fold?: boolean;
   /** 折叠时保留的结果行数;缺省 5。 */
   foldLines?: number;
+  /** 屏幕模式:alt(缺省)备用屏,main 主屏。 */
+  screen?: "alt" | "main";
+  /** 桌面通知:unfocused(缺省)| always | off。 */
+  notify?: "unfocused" | "always" | "off";
   /** 记录每次请求收到的原始流,供检视器"接收"分区逐行展示。 */
   trace?: boolean;
   /** 原始流旁路输出(如写 trace 文件)。requestIndex 是 request 事件在日志中的下标。 */
@@ -182,12 +199,28 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
   const { log, tools, compaction } = deps;
 
   // ---------- 组件树 ----------
-  const tui = new TuiMainScreen(deps.terminal);
+  // 备用屏(缺省):头部与状态行固定,正文自己滚,鼠标滚轮、拖选即复制、Ctrl+Shift+F 搜索、Ctrl+↑↓ 按步跳;
+  // 主屏:一切进终端回滚。两者的组件树相同,只是挂法不同。
+  const screen = deps.screen ?? "alt";
+  // 焦点在终端层记:引擎(备用屏)自己也吃焦点序列,不能靠输入监听。
+  const terminal = withFocusTracking(deps.terminal, (focused) => {
+    ctx.view.focused = focused;
+  });
+  const tui: TUI =
+    screen === "alt"
+      ? new TuiAltScreen(terminal, true, undefined, {
+          mouse: true,
+          openUrl,
+          searchMatchStyle: (t) => c.band(t),
+          searchCurrentMatchStyle: (t) => c.inverse(t),
+        })
+      : new TuiMainScreen(terminal);
   const header = new Text("", 1, 0);
   const transcript = new Container();
   const live = new Container();
   const status = new SplitLine();
   const editor = new Editor(tui, editorTheme, { paddingX: 1 });
+  setCompact(deps.terminal.columns);
   const templates = deps.templates ?? [];
   editor.setAutocompleteProvider(
     new CombinedAutocompleteProvider(
@@ -198,13 +231,40 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       process.cwd(),
     ),
   );
-  tui.addChild(header);
-  tui.addChild(new Spacer(1));
-  tui.addChild(transcript);
-  tui.addChild(live);
-  tui.addChild(new Spacer(1));
-  tui.addChild(status);
-  tui.addChild(editor);
+  if (isViewportTUI(tui)) {
+    const body = new Container();
+    body.addChild(transcript);
+    body.addChild(live);
+    const top = new Container();
+    top.addChild(header);
+    top.addChild(new Spacer(1));
+    const bottom = new Container();
+    bottom.addChild(new Spacer(1));
+    bottom.addChild(status);
+    bottom.addChild(editor);
+    tui.setLayoutRoot(
+      new VStack([
+        { component: top, basis: "auto" },
+        {
+          component: new ScrollView(body, { follow: "end", primary: true, overscroll: "chain" }),
+          basis: 0,
+          grow: 1,
+          minSize: 1,
+        },
+        { component: bottom, basis: "auto", shrink: 1, minSize: 1 },
+      ]),
+    );
+  } else {
+    tui.addChild(header);
+    tui.addChild(new Spacer(1));
+    tui.addChild(transcript);
+    tui.addChild(live);
+    tui.addChild(new Spacer(1));
+    tui.addChild(status);
+    tui.addChild(editor);
+  }
+  // 焦点事件:通知只在终端失焦时发。
+  deps.terminal.write(FOCUS_ON);
 
   // ---------- Agent:界面是它的事件订阅者;流式增量走两个回调 ----------
   const approval = initialApproval(deps.approve);
@@ -273,6 +333,9 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       firstRun: undefined,
       streaming: undefined,
       streamBuffer: "",
+      streamTimer: undefined,
+      focused: true,
+      turnStartedAt: undefined,
       reasoningView: undefined,
       reasoningBuffer: "",
       loader: undefined,
@@ -351,6 +414,12 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       transcript.addChild(new Block(text));
       tui.requestRender();
     },
+    notify(text) {
+      const mode = deps.notify ?? "unfocused";
+      if (mode === "off") return;
+      if (mode === "unfocused" && ctx.view.focused) return;
+      deps.terminal.write(notifySequence("clari", text));
+    },
     updateHeader() {
       const { info } = ctx.model;
       header.setText(
@@ -364,11 +433,15 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     showLoader(message) {
       ctx.hideLoader();
       const startedAt = Date.now();
+      ctx.view.turnStartedAt = startedAt;
       const text = () =>
         `${message} · ${Math.round((Date.now() - startedAt) / 1000)}s · Esc to interrupt`;
       const loader = new Loader(tui, c.zhu, c.faint, text());
       ctx.view.loader = loader;
-      ctx.view.loaderTimer = setInterval(() => loader.setMessage(text()), 1000);
+      ctx.view.loaderTimer = setInterval(() => {
+        loader.setMessage(text());
+        updateTitle();
+      }, 1000);
       live.addChild(loader);
       loader.start();
     },
@@ -413,14 +486,29 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     stop() {
       ctx.hideLoader();
       for (const v of ctx.children.views) v.dispose();
+      deps.terminal.write(FOCUS_OFF);
       tui.stop();
     },
   };
   // 审批实现闭包引用 ctx,只能在 ctx 建好后装上;all 模式不装,内核缺省就是放行。
   if (approval.mode !== "all") agent.setSlot("approve", approveImpl(ctx));
 
+  /** 终端标题跟状态:运行中带用时,空闲带模型名。 */
+  function updateTitle(): void {
+    const started = ctx.view.turnStartedAt;
+    const title = agent.running
+      ? `clari · running ${started ? `${Math.round((Date.now() - started) / 1000)}s` : ""}`.trim()
+      : `clari · ${ctx.model.info.model}`;
+    deps.terminal.setTitle(title);
+  }
+
+  let wasRunning = false;
   /** 状态行:左边是状态与上下文占用,右边是会话累计与快捷键入口;放不下时右边先让。 */
   function updateStatus(): void {
+    // 回合结束(运行 → 空闲)时通知一次;审批提示在 askApproval 里自己通知。
+    if (wasRunning && !agent.running) ctx.notify("turn finished");
+    wasRunning = agent.running;
+    updateTitle();
     const state = agent.running ? c.zhu(`${G.running} running`) : c.soft(`${G.idle} idle`);
     const t = ctx.threshold();
     let tokens = c.faint("no requests yet");
@@ -498,6 +586,17 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       ctx.exit();
       return { consume: true };
     }
+    if (matchesKey(data, Key.ctrl("g"))) {
+      // 长提示交给用户自己的编辑器:先让出终端,编辑器退出后再接管。
+      if (ctx.inspector.overlay || approval.overlay || ctx.dialog.overlay) return undefined;
+      tui.stop();
+      const next = editInExternalEditor(editor.getText());
+      tui.start();
+      deps.terminal.write(FOCUS_ON);
+      if (next !== undefined) editor.setText(next.replace(/\s+$/, ""));
+      tui.requestRender();
+      return { consume: true };
+    }
     if (matchesKey(data, Key.ctrl("r"))) {
       if (ctx.inspector.overlay) ctx.inspector.close();
       else ctx.inspector.open();
@@ -552,7 +651,19 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     agent,
     submit: (text, opts) => submit(ctx, text, opts),
     command: (text) => command(ctx, text),
-    lines: (width = deps.terminal.columns) => tui.render(width),
+    // 离线验证与预览用的整份文档:两种屏幕模式都按同一顺序拼,备用屏的滚动区不经布局不出行。
+    lines: (width = deps.terminal.columns) =>
+      isViewportTUI(tui)
+        ? [
+            ...header.render(width),
+            "",
+            ...transcript.render(width),
+            ...live.render(width),
+            "",
+            ...status.render(width),
+            ...editor.render(width),
+          ]
+        : tui.render(width),
     inspector: {
       open: () => ctx.inspector.open(),
       openEvents: () => {

@@ -455,8 +455,11 @@ describe("Request 卡:changed 行与消息表", () => {
 describe("文本小工具", () => {
   it("formatArgs 的四种形态与截断;brief;toolCallDetail 的 write 长文与超长 diff", () => {
     expect(formatArgs({ command: "ls -la" })).toBe("ls -la");
-    expect(formatArgs({ path: "a.ts", offset: 5, limit: 3 })).toBe("a.ts  from line 5, 3 lines");
-    expect(formatArgs({ path: "a.ts", limit: 3 })).toBe("a.ts  from line 1, 3 lines");
+    // 路径带 OSC 8 链接;剥掉序列后是人读的形态
+    expect(stripAnsi(formatArgs({ path: "a.ts", offset: 5, limit: 3 }))).toBe(
+      "a.ts  from line 5, 3 lines",
+    );
+    expect(stripAnsi(formatArgs({ path: "a.ts", limit: 3 }))).toBe("a.ts  from line 1, 3 lines");
     expect(formatArgs({ task: `${"x".repeat(30)}\nmore`, scope: "fork" })).toBe(
       `scope=fork  ${"x".repeat(24)}…`,
     );

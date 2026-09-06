@@ -187,6 +187,7 @@ export function askApproval(
     a.prompt = prompt;
     a.overlay = ctx.tui.showOverlay(prompt, { width: "100%", anchor: "bottom-left" });
     ctx.tui.requestRender();
+    ctx.notify(`approval needed: ${call.name}`);
   });
 }
 

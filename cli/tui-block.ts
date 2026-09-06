@@ -9,7 +9,8 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import { GUTTER } from "./cards.js";
+import { gutter } from "./layout.js";
+import { PROMPT_MARK } from "./terminal-extras.js";
 import { c } from "./theme.js";
 
 const GUIDE_PLAIN = "  ┆ ";
@@ -22,9 +23,9 @@ export function hangingIndent(plain: string): number {
   const leading = plain.length - plain.trimStart().length;
   if (leading > 0) return leading;
   if (MARK.test(plain)) return 2;
-  // 标签行:前 9 列是标签,紧接两个空格,正文从第 12 列起。
-  if (plain.length > GUTTER + 2 && plain.slice(GUTTER, GUTTER + 2) === "  " && plain[0] !== " ")
-    return GUTTER + 2;
+  // 标签行:前 9 列(窄屏 7 列)是标签,紧接两个空格,正文从其后起。
+  const g = gutter();
+  if (plain.length > g + 2 && plain.slice(g, g + 2) === "  " && plain[0] !== " ") return g + 2;
   return 0;
 }
 
@@ -71,11 +72,15 @@ export class Block implements Component {
     const out: string[] = [];
     if (this.text.trim()) {
       for (const raw of this.text.replace(/\t/g, "   ").split("\n")) {
-        for (const l of hangLine(raw, inner)) {
+        // 提示标记(OSC 133;A)要在整行最前面,备用屏按它跳步;剥下来,折行后再贴回首行。
+        const marked = raw.startsWith(PROMPT_MARK);
+        const body = marked ? raw.slice(PROMPT_MARK.length) : raw;
+        hangLine(body, inner).forEach((l, i) => {
           const line = margin + l;
           const pad = " ".repeat(Math.max(0, width - visibleWidth(line)));
-          out.push(this.opts.bg ? this.opts.bg(line + pad) : line + pad);
-        }
+          const full = this.opts.bg ? this.opts.bg(line + pad) : line + pad;
+          out.push(marked && i === 0 ? PROMPT_MARK + full : full);
+        });
       }
     }
     this.cachedWidth = width;

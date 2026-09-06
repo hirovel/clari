@@ -8,7 +8,7 @@ import type {
   Loader,
   OverlayHandle,
   Text,
-  TuiMainScreen,
+  TUI,
 } from "@earendil-works/pi-tui";
 import type { Agent } from "../src/agent.js";
 import type { ApprovalConfig } from "../src/approval.js";
@@ -56,6 +56,12 @@ export type ViewState = {
   firstRun: Text | undefined;
   streaming: LabeledMarkdown | undefined;
   streamBuffer: string;
+  /** 流式合帧:增量先攒着,每 33ms 落一次屏。 */
+  streamTimer: ReturnType<typeof setTimeout> | undefined;
+  /** 终端是否有焦点(CSI ?1004 焦点事件);通知只在失焦时发。 */
+  focused: boolean;
+  /** 当前回合开始的时刻;标题栏的用时从它算。 */
+  turnStartedAt: number | undefined;
   reasoningView: Block | undefined;
   reasoningBuffer: string;
   loader: Loader | undefined;
@@ -113,7 +119,7 @@ export type TuiContext = {
   tools: Tool[];
   compaction: CompactionConfig;
   agent: Agent;
-  tui: TuiMainScreen;
+  tui: TUI;
   header: Text;
   transcript: Container;
   live: Container;
@@ -144,6 +150,8 @@ export type TuiContext = {
   };
   /** 往对话流追加一行说明。 */
   note(text: string): void;
+  /** 桌面通知(回合结束、等审批);按 notify 设置与焦点状态决定发不发。 */
+  notify(text: string): void;
   updateHeader(): void;
   updateStatus(): void;
   showLoader(message: string): void;

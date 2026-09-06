@@ -163,6 +163,8 @@ app = createTuiApp({
   settings: boot.settings,
   fold: args.fold,
   ...(args.foldLines !== undefined && { foldLines: args.foldLines }),
+  ...(args.screen && { screen: args.screen }),
+  ...(args.notify && { notify: args.notify }),
   trace: args.trace,
   approve: resolveApproval(args, boot.config),
   compactionName: args.compaction,

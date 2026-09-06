@@ -120,6 +120,10 @@ export type Preset = {
   fold?: boolean;
   /** 折叠时保留的结果行数;缺省 5。 */
   foldLines?: number;
+  /** 屏幕模式:alt(缺省,备用屏,头尾固定、自己滚、鼠标、搜索)| main(主屏,保留终端回滚)。 */
+  screen?: "alt" | "main";
+  /** 桌面通知:unfocused(缺省,只在终端失焦时)| always | off。回合结束与等审批时发。 */
+  notify?: "unfocused" | "always" | "off";
   /** 扩展模块路径列表。 */
   extensions?: string[];
   systemPromptFile?: string;
@@ -208,6 +212,8 @@ export const CONFIG_TEMPLATE: KernelConfig = {
     trace: true,
     fold: true,
     foldLines: 5,
+    screen: "alt",
+    notify: "unfocused",
     prompt: {
       sections: ["role", "env", "instructions", "memory", "skills", "append"],
       instructionsAs: "system",
