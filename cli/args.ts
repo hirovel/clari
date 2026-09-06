@@ -31,6 +31,8 @@ export type CommonArgs = {
   fold: boolean;
   /** 折叠时保留的结果行数(配置 foldLines)。 */
   foldLines?: number;
+  /** 账簿保持展开的最新步数(配置 foldSteps)。 */
+  foldSteps?: number;
   /** 屏幕模式(--screen / 配置 screen)。 */
   screen?: "alt" | "main";
   /** 桌面通知(--notify / 配置 notify)。 */
@@ -389,6 +391,8 @@ export function applyPreset(args: CommonArgs, config: KernelConfig): CommonArgs 
     }
     if (out.foldLines === undefined && layer.foldLines !== undefined)
       out.foldLines = layer.foldLines;
+    if (out.foldSteps === undefined && layer.foldSteps !== undefined)
+      out.foldSteps = layer.foldSteps;
     if (out.screen === undefined && layer.screen !== undefined) out.screen = layer.screen;
     if (out.notify === undefined && layer.notify !== undefined) out.notify = layer.notify;
     if (out.toolPrompts === undefined && layer.toolPrompts) out.toolPrompts = layer.toolPrompts;

@@ -63,6 +63,9 @@ Every command-line option has a counterpart in `~/.clari/config.json`. The templ
   "trace": true,
   "fold": true,
   "foldLines": 5,
+  "foldSteps": 3,
+  "screen": "alt",
+  "notify": "unfocused",
   "prompt": { "sections": ["role", "env", "instructions", "memory", "skills", "append"], "instructionsAs": "system", "memory": false, "skills": { "list": "system", "load": "read" } }
 }
 ```
@@ -113,6 +116,8 @@ clari replay sessions/<file>.jsonl --request 3
 clari replay sessions/<file>.jsonl --compaction 1 --json
 clari sessions prune --older-than 30d --yes
 ```
+
+The UI runs on the alternate screen: the header and status line stay put, the transcript scrolls (mouse wheel, PgUp/PgDn move between steps, Ctrl+Up/Down jump between requests, Ctrl+Shift+F searches, drag to select copies). Every request is a step; the newest three stay open and older ones fold to one ledger line (`foldSteps`). `Ctrl+K` opens a command palette. `screen: main` in the config keeps the terminal scrollback instead.
 
 In the UI: `Esc` interrupts, `Ctrl+R` inspector (Tab cycles requests, events, compactions, context; `s` switches session), `Ctrl+E` context panel, `Ctrl+O` unfolds tool results (they start folded to `foldLines`, 5 by default), `Ctrl+T` thinking, `?` shortcuts, `/help`. Approval prompts and pickers are numbered lists: `↑↓` or `1`–`9` to choose, `Enter` to confirm, `Esc` to back out (in an approval prompt `Esc` denies); the letters `y a r n` still work.
 

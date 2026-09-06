@@ -73,7 +73,8 @@ export class Palette implements Component {
       row?.run();
       return;
     }
-    if (data === "\x1b[A") this.index = rows.length ? (this.index + rows.length - 1) % rows.length : 0;
+    if (data === "\x1b[A")
+      this.index = rows.length ? (this.index + rows.length - 1) % rows.length : 0;
     else if (data === "\x1b[B") this.index = rows.length ? (this.index + 1) % rows.length : 0;
     else if (data === "\x7f" || data === "\b") {
       this.query = this.query.slice(0, -1);

@@ -8,7 +8,7 @@ import { UsageAccumulator, usageTotals } from "../src/cost.js";
 import { EventLog } from "../src/log.js";
 import { composeContext } from "../src/messages.js";
 import type { Provider } from "../src/provider.js";
-import { VirtualTerminal } from "./helpers/virtual-terminal.js";
+import { stripAnsi, VirtualTerminal } from "./helpers/virtual-terminal.js";
 
 function bigSession(turns: number): EventLog {
   const log = new EventLog();
@@ -126,7 +126,9 @@ describe("界面回放", () => {
     const lines = (app as ReturnType<typeof createTuiApp>).lines(120).join("\n");
     expect(lines).toContain("Request #700");
     expect(lines).toContain("resumed: 2102 events");
-    expect(lines.match(/Request #/g)?.length).toBe(700);
+    // 账簿:最新三步展开,其余 697 步各折成一行账目
+    expect(lines.match(/Request #/g)?.length).toBe(3);
+    expect(stripAnsi(lines).match(/≡ #/g)?.length).toBe(697);
     (app as ReturnType<typeof createTuiApp>).stop();
   });
 });

@@ -7,6 +7,7 @@ import type {
   Editor,
   Loader,
   OverlayHandle,
+  ScrollView,
   Text,
   TUI,
 } from "@earendil-works/pi-tui";
@@ -30,6 +31,8 @@ import type { ApprovalPrompt } from "./tui-slots.js";
 
 /** 折叠时保留的工具结果行数的缺省;配置 foldLines 可改。 */
 export const FOLD_HEAD = 5;
+/** 上下文脉搏保留的步数。 */
+export const PULSE_STEPS = 10;
 /** 子 agent 尾窗保留的行数。 */
 export const CHILD_TAIL = 3;
 /** 引导线:子 agent 的每一行都带它,一眼分清层级;不是框线。 */
@@ -42,6 +45,19 @@ export type ChildMode = "tail" | "all" | "progress";
 
 export type ResultRecord = { name: string; content: string; isError: boolean; durationMs?: number };
 
+/** 账簿里的一步:一次请求的所有屏幕节点装在一个容器里,折起时换成一行账目。 */
+export type StepView = {
+  n: number;
+  requestIndex: number;
+  block: Container;
+  /** 折起时保存的原节点;展开就放回去。 */
+  nodes: Component[];
+  summary: Block;
+  folded: boolean;
+  /** 用户手动展开过:之后不再自动折。 */
+  pinned: boolean;
+};
+
 export type TuiInfo = TuiAppDeps["info"];
 
 /** 显示状态:折叠/隐藏只改屏幕,不改日志;切换键重绘已有节点。 */
@@ -49,6 +65,14 @@ export type ViewState = {
   foldResults: boolean;
   /** 折叠时保留的结果行数。 */
   foldLines: number;
+  /** 保持展开的最新步数;0 = 从不自动折。 */
+  foldSteps: number;
+  /** 账簿光标:选中的步(steps 的下标);没有就是 undefined。 */
+  selectedStep: number | undefined;
+  /** 上下文脉搏:最近几次请求的估算占用 / 阈值。 */
+  pulse: number[];
+  /** 朱印呼吸的相位(运行中每半秒进一格)。 */
+  sealFrame: number;
   /** 思考缺省折成一行(首行 + 种类 + 行数),Ctrl+T 展开全文。 */
   showReasoning: boolean;
   childMode: ChildMode;
@@ -121,7 +145,13 @@ export type TuiContext = {
   agent: Agent;
   tui: TUI;
   header: Text;
+  /** 对话流的根容器:步容器与用户消息都挂在它上面。 */
+  root: Container;
+  /** 新节点现在该进哪个容器:当前步的容器,或(用户消息、回合之外)根。 */
   transcript: Container;
+  /** 备用屏的滚动视图;主屏没有。 */
+  scroll: ScrollView | undefined;
+  steps: StepView[];
   live: Container;
   status: SplitLine;
   editor: Editor;

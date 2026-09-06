@@ -29,10 +29,12 @@ import {
   CHILD_TAIL,
   type ChildMode,
   GUIDE,
+  PULSE_STEPS,
   type ResultRecord,
   type TuiContext,
 } from "./tui-context.js";
 import { formatArgs, toolCallDetail } from "./tui-format.js";
+import { autoFold, beginStep } from "./tui-steps.js";
 
 /** 工具结果的屏幕文本。折叠只是显示状态,内容原封不动留在节点里。 */
 export function resultText(ctx: TuiContext, r: ResultRecord): string {
@@ -318,8 +320,10 @@ export function childEventLines(e: AgentEvent): string[] {
 // ---------- 主屏:一条事件一段屏幕 ----------
 
 function renderUser(ctx: TuiContext, text: string): void {
+  // 用户消息不属于任何一步:挂在根上,折叠永远不碰它。
+  ctx.transcript = ctx.root;
   if (ctx.view.firstRun) {
-    ctx.transcript.removeChild(ctx.view.firstRun);
+    ctx.root.removeChild(ctx.view.firstRun);
     ctx.view.firstRun = undefined;
   }
   // 用户消息:朱色 › 起头,正文加粗,整块一条底带;续行缩到 › 之后。
@@ -418,10 +422,17 @@ function renderToolResult(ctx: TuiContext, e: Extract<AgentEvent, { type: "tool/
  * 与上一次正常步比出"未变 / 新增",参数来自 provider.wire,与线路正文同源。
  */
 function renderRequest(ctx: TuiContext, e: Extract<AgentEvent, { type: "request" }>): void {
-  const { log, agent, req, transcript } = ctx;
+  const { log, agent, req } = ctx;
   req.count += 1;
   req.lastIndex = log.events.length - 1;
   req.providersAt.set(req.lastIndex, agent.provider);
+  // 账簿:这次请求是新的一步;更早的步按 foldSteps 折起。脉搏记下这次的占用比。
+  beginStep(ctx, req.count, req.lastIndex);
+  autoFold(ctx);
+  const threshold = e.threshold ?? ctx.threshold();
+  ctx.view.pulse.push(threshold > 0 ? e.estimatedTokens / threshold : 0);
+  if (ctx.view.pulse.length > PULSE_STEPS) ctx.view.pulse.shift();
+  const transcript = ctx.transcript;
   // 来历:正常步的正文就是之前事件的投影,每条都能对回事件号;摘要请求的正文由策略记的 body 重建,没有来历。
   // 一次投影同时给消息与来历,不再算两遍。
   let messages: Message[];

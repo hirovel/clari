@@ -12,6 +12,7 @@ import {
   CombinedAutocompleteProvider,
   Container,
   Editor,
+  getKeybindings,
   isViewportTUI,
   Key,
   Loader,
@@ -67,6 +68,7 @@ import {
   toggleReasoning,
 } from "./tui-render.js";
 import { approveImpl, initialApproval, initialSlotState } from "./tui-slots.js";
+import { clearStepSelection, FOLD_STEPS, selectStep, toggleSelectedStep } from "./tui-steps.js";
 
 export { toolCallDetail } from "./tui-format.js";
 export { childEventLines } from "./tui-render.js";
@@ -117,6 +119,8 @@ export type TuiAppDeps = {
   fold?: boolean;
   /** 折叠时保留的结果行数;缺省 5。 */
   foldLines?: number;
+  /** 账簿保持展开的最新步数;缺省 3,0 = 从不自动折。 */
+  foldSteps?: number;
   /** 屏幕模式:alt(缺省)备用屏,main 主屏。 */
   screen?: "alt" | "main";
   /** 桌面通知:unfocused(缺省)| always | off。 */
@@ -195,6 +199,9 @@ export type TuiApp = {
   stop(): void;
 };
 
+/** 脉搏的八级格。 */
+const PULSE_BLOCKS = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"] as const;
+
 export function createTuiApp(deps: TuiAppDeps): TuiApp {
   const { log, tools, compaction } = deps;
 
@@ -231,6 +238,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       process.cwd(),
     ),
   );
+  let scroll: ScrollView | undefined;
   if (isViewportTUI(tui)) {
     const body = new Container();
     body.addChild(transcript);
@@ -242,18 +250,21 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     bottom.addChild(new Spacer(1));
     bottom.addChild(status);
     bottom.addChild(editor);
+    scroll = new ScrollView(body, { follow: "end", primary: true, overscroll: "chain" });
     tui.setLayoutRoot(
       new VStack([
         { component: top, basis: "auto" },
-        {
-          component: new ScrollView(body, { follow: "end", primary: true, overscroll: "chain" }),
-          basis: 0,
-          grow: 1,
-          minSize: 1,
-        },
+        { component: scroll, basis: 0, grow: 1, minSize: 1 },
         { component: bottom, basis: "auto", shrink: 1, minSize: 1 },
       ]),
     );
+    // PgUp / PgDn 归账簿(按步移动光标并滚到那一步);引擎的整页滚动让给它。Ctrl+↑↓ 仍是引擎的按标记跳。
+    const kb = getKeybindings();
+    kb.setUserBindings({
+      ...kb.getUserBindings(),
+      "tui.altScreen.pageUp": [],
+      "tui.altScreen.pageDown": [],
+    });
   } else {
     tui.addChild(header);
     tui.addChild(new Spacer(1));
@@ -318,7 +329,10 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     agent,
     tui,
     header,
+    root: transcript,
     transcript,
+    scroll,
+    steps: [],
     live,
     status,
     editor,
@@ -328,6 +342,10 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     view: {
       foldResults: deps.fold ?? true,
       foldLines: deps.foldLines ?? FOLD_HEAD,
+      foldSteps: deps.foldSteps ?? FOLD_STEPS,
+      selectedStep: undefined,
+      pulse: [],
+      sealFrame: 0,
       showReasoning: false,
       childMode: "tail",
       firstRun: undefined,
@@ -420,12 +438,14 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       if (mode === "unfocused" && ctx.view.focused) return;
       deps.terminal.write(notifySequence("clari", text));
     },
+    // 朱印呼吸:模型工作时印章按四个相位缓慢明暗,两秒一息;空闲时定在最亮。
     updateHeader() {
       const { info } = ctx.model;
+      const tone = c.seal[ctx.view.sealFrame % c.seal.length] ?? c.zhu;
       header.setText(
         info.providerName === "none"
-          ? `${c.zhu(G.seal)} ${c.bold(c.jin("clari"))}  ${c.zhu("no model")}  ${c.faint(`/login to add an API key · ${info.sessionFile}`)}`
-          : `${c.zhu(G.seal)} ${c.bold(c.jin("clari"))}  ${c.ink(info.model)}  ${c.faint(`${info.providerName} · ${info.sessionFile}`)}`,
+          ? `${tone(G.seal)} ${c.bold(c.jin("clari"))}  ${c.zhu("no model")}  ${c.faint(`/login to add an API key · ${info.sessionFile}`)}`
+          : `${tone(G.seal)} ${c.bold(c.jin("clari"))}  ${c.ink(info.model)}  ${c.faint(`${info.providerName} · ${info.sessionFile}`)}`,
       );
     },
     updateStatus,
@@ -438,10 +458,16 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
         `${message} · ${Math.round((Date.now() - startedAt) / 1000)}s · Esc to interrupt`;
       const loader = new Loader(tui, c.zhu, c.faint, text());
       ctx.view.loader = loader;
+      // 半秒一拍:印章进一个相位;每两拍刷一次用时与标题。
       ctx.view.loaderTimer = setInterval(() => {
-        loader.setMessage(text());
-        updateTitle();
-      }, 1000);
+        ctx.view.sealFrame += 1;
+        ctx.updateHeader();
+        if (ctx.view.sealFrame % 2 === 0) {
+          loader.setMessage(text());
+          updateTitle();
+        }
+        tui.requestRender();
+      }, 500);
       live.addChild(loader);
       loader.start();
     },
@@ -449,6 +475,8 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       const loader = ctx.view.loader;
       if (ctx.view.loaderTimer) clearInterval(ctx.view.loaderTimer);
       ctx.view.loaderTimer = undefined;
+      ctx.view.sealFrame = 0;
+      ctx.updateHeader();
       if (!loader) return;
       loader.stop();
       live.removeChild(loader);
@@ -505,8 +533,11 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
   let wasRunning = false;
   /** 状态行:左边是状态与上下文占用,右边是会话累计与快捷键入口;放不下时右边先让。 */
   function updateStatus(): void {
-    // 回合结束(运行 → 空闲)时通知一次;审批提示在 askApproval 里自己通知。
-    if (wasRunning && !agent.running) ctx.notify("turn finished");
+    // 回合结束(运行 → 空闲)时通知一次;审批提示在 askApproval 里自己通知。之后的说明行回到根上,不进最后一步。
+    if (wasRunning && !agent.running) {
+      ctx.notify("turn finished");
+      ctx.transcript = ctx.root;
+    }
     wasRunning = agent.running;
     updateTitle();
     const state = agent.running ? c.zhu(`${G.running} running`) : c.soft(`${G.idle} idle`);
@@ -540,7 +571,21 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       totals.requests > 0
         ? `↑${fmtTok(totals.inputTokens)} ↓${fmtTok(totals.outputTokens)}${totals.cacheReadTokens > 0 ? ` · cache ${fmtTok(totals.cacheReadTokens)}` : ""}${totals.cost !== undefined ? ` · ${fmtCost(totals.cost)}` : ""} · `
         : "";
-    status.set(`${state}  ${tokens}${effort}${queued}${kids}`, c.faint(`${sum}? shortcuts`));
+    // 上下文脉搏:最近十次请求的占用比各一格,压缩发生在哪、上下文在涨还是稳,一眼看到。
+    const pulse =
+      ctx.view.pulse.length > 1
+        ? ` ${c.faint(ctx.view.pulse.map((r) => PULSE_BLOCKS[Math.min(7, Math.max(0, Math.round(r * 7)))]).join(""))}`
+        : "";
+    const cursor =
+      ctx.view.selectedStep !== undefined
+        ? c.soft(
+            ` · step ${ctx.view.selectedStep + 1}/${ctx.steps.length} · Enter fold or unfold · Esc release`,
+          )
+        : "";
+    status.set(
+      `${state}  ${tokens}${pulse}${effort}${queued}${kids}${cursor}`,
+      c.faint(`${sum}? shortcuts`),
+    );
     tui.requestRender();
   }
 
@@ -632,6 +677,23 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     }
     if (matchesKey(data, Key.ctrl("o"))) {
       toggleFold(ctx);
+      return { consume: true };
+    }
+    // 账簿光标:PgUp / PgDn 在步之间移动并滚到那一步;Enter(输入框为空)展开或折起;Esc 放开。
+    if (matchesKey(data, "pageUp") || matchesKey(data, "pageDown")) {
+      selectStep(ctx, matchesKey(data, "pageUp") ? -1 : 1);
+      return { consume: true };
+    }
+    if (
+      matchesKey(data, Key.enter) &&
+      editor.getText() === "" &&
+      !editor.isShowingAutocomplete() &&
+      ctx.view.selectedStep !== undefined
+    ) {
+      toggleSelectedStep(ctx);
+      return { consume: true };
+    }
+    if (matchesKey(data, Key.escape) && !agent.running && clearStepSelection(ctx)) {
       return { consume: true };
     }
     if (matchesKey(data, Key.ctrl("t"))) {

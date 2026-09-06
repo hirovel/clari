@@ -427,6 +427,64 @@ scene = "7";
   save("7-login", "7 Start without a key: login dialog and model picker", shots);
 }
 
+scene = "8";
+// ---------- 8 账簿:自动折叠、光标、脉搏、命令面板 ----------
+{
+  let n = 0;
+  const provider: Provider = {
+    model: "fake-agent",
+    async complete() {
+      n += 1;
+      return {
+        text: n % 2 ? `Step ${n}: read the file and found the bug in the drain logic.` : `Step ${n}: patched it.`,
+        toolCalls: [],
+        stopReason: "end",
+        usage: { inputTokens: 900 + n * 700, outputTokens: 20 + n * 5 },
+      };
+    },
+  };
+  const term = new VirtualTerminal(W, 44);
+  const app = createTuiApp({
+    terminal: term,
+    log: new EventLog(),
+    provider,
+    tools: [],
+    compaction: { strategy: async () => null, window: 12000, reserveTokens: 2000 },
+    reserveTokens: 2000,
+    info: { model: "fake-agent", providerName: "local-fake", sessionFile: "sessions/demo.jsonl" },
+    systemPrompt: "sys",
+    settings: {
+      listModels: () => ["deepseek/deepseek-v4-pro", "anthropic/claude-sonnet-5"],
+      switchModel: () => { throw new Error("n/a"); },
+      setKey: () => {},
+      setDefault: () => {},
+      providers: () => [{ name: "deepseek", protocol: "openai", keySource: "credentials", models: ["deepseek-v4-pro"] }],
+      verifyKey: async () => [],
+    },
+    price: { input: 0.28, output: 0.42 },
+    onExit: () => {},
+  });
+  const shots: string[] = [];
+  const questions = ["Why does the queue-mode test fail?", "Fix it.", "Run the tests again.", "Now update the docs.", "Commit."];
+  for (const q of questions) await app.submit(q);
+  shots.push(...divider("five steps: the two oldest folded into ledger lines, the newest three open; the pulse shows context growing"), ...app.lines(W));
+  term.feed("\x1b[5~");
+  term.feed("\x1b[5~");
+  term.feed("\x1b[5~");
+  term.feed("\x1b[5~");
+  term.feed("\x1b[5~");
+  shots.push(...divider("PgUp to step 1: the ledger line takes the cursor, the status line says where you are"), ...app.lines(W).slice(0, 12), ...app.lines(W).slice(-3));
+  term.feed("\r");
+  shots.push(...divider("Enter unfolds it (and pins it: it will not fold again on its own)"), ...app.lines(W).slice(0, 16));
+  term.feed("\x1b");
+  term.feed("\x0b");
+  for (const ch of "mod") app.dialogInput(ch);
+  shots.push(...divider("Ctrl+K command palette, filtered by \"mod\""), ...app.dialogLines());
+  app.dialogInput("\x1b");
+  app.stop();
+  save("8-ledger", "8 Ledger: auto-folded steps, step cursor, context pulse, command palette", shots);
+}
+
 const index = [
   "<!doctype html><meta charset=utf-8><title>clari visual suite</title><body style='font:14px system-ui;padding:20px'><h1>clari visual suite</h1><ol>",
   ...files.map((f) => `<li><a href='${f.name}.html'>${f.title}</a> (${f.lines.length} lines)</li>`),

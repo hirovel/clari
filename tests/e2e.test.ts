@@ -140,6 +140,8 @@ describe("端到端(假服务器)", () => {
       log,
       provider,
       tools: [big],
+      // 这条测的是内核链路,每一步都要在屏幕上看得到:关掉账簿折叠。
+      foldSteps: 0,
       // 保留策略只留最近 50 tok,溢出恢复才有东西可摘要(缺省保留 20000,小会话下无事可做)。
       compaction: {
         strategy: llmSummarize(),

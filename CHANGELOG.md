@@ -5,6 +5,17 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ## [Unreleased]
 
+### Added
+
+- Alt-screen viewport by default: fixed header and status line, own scrolling, mouse wheel, select-to-copy, Ctrl+Shift+F search, Ctrl+Up/Down jumps between requests (`screen: main` keeps the terminal scrollback; `--screen`).
+- Ledger: every request is a step; the newest `foldSteps` (3) stay open, older ones fold to one ledger line (stop reason, calls, tokens, cost, first line of the reply). PgUp/PgDn move a step cursor and scroll that step to the top, Enter unfolds or folds it, Esc releases; `foldSteps: 0` never folds.
+- Ctrl+K command palette: fuzzy search over commands, configured models, provider logins, skills and templates.
+- Desktop notification (OSC 9/777 and bell) when a turn ends or approval is needed while the terminal is unfocused (`notify: unfocused | always | off`); the terminal title follows the state.
+- `/copy` copies the last reply, `/copy N` its Nth code block (OSC 52). Ctrl+G writes the message in `$EDITOR`. Shift+Enter inserts a newline.
+- File paths in tool calls are OSC 8 `file://` links; clicking them in the alt screen opens the file.
+- The seal in the header breathes while the model works; the status line shows a context pulse (last ten requests as a tiny bar chart).
+- Streaming coalesced to 30 frames per second; under 80 columns the label gutter narrows and long labels shorten.
+
 ### Changed
 
 - Palette and hierarchy after a design review. Morandi palette derived in OKLCH (rules in `cli/theme.ts`): ink scale with equal lightness steps (faint text now 4.6:1), two accents only, ochre red `#c87a70` for tool actions and errors, oat gold `#c7ad82` for the brand and for what changed; green is only the diff-add foreground and ✓ is ink-coloured. One glyph family: `›` you, `»` call, `└` result, `≈` compaction, `·` note, `▸` cursor, `┆` guide, `▪` seal in the header. Markdown headings and inline code are ink (code on a band), links underline only; the context bar is a thin faint line that turns red past 70%; the Response line carries usage on the same line; picker and inspector titles, cursors and section names are ink.
