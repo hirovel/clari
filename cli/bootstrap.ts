@@ -11,7 +11,6 @@ import {
   findApiKey,
   type KernelConfig,
   loadConfig,
-  modelConfig,
   modelNames,
   resolveApiKey,
   resolveModel,
@@ -35,10 +34,12 @@ import {
   type Skill,
 } from "./prompt.js";
 import {
+  capabilityNote,
   fetchRegistry,
   inferModelConfig,
+  loadRegistrySync,
   type Registry,
-  registryDisagreement,
+  resolveCapabilities,
 } from "./registry.js";
 import { openSession, SESSIONS_DIR } from "./sessions.js";
 import { applyToolPrompts } from "./tool-prompts.js";
@@ -98,16 +99,26 @@ export function noProviderChoice(): ModelChoice {
 export function bootstrap(): Bootstrap {
   const loaded = loadConfig();
   let config = loaded.config;
+  // 能力数据:模型对象里明写的 > models.dev > 供应商级配置 > 假设;出处随选择一起带到界面。
   const choose = (name?: string): ModelChoice => {
     const r = resolveModel(config, name);
+    const caps = resolveCapabilities(r.providerName, r.provider, r.model, registryNow);
     const apiKey = resolveApiKey(r.providerName, r.provider);
+    const resolved = {
+      ...r,
+      contextWindow: caps.contextWindow,
+      ...(caps.maxTokens !== undefined && { maxTokens: caps.maxTokens }),
+      ...(caps.effortLevels && { effortLevels: caps.effortLevels }),
+      ...(caps.price && { price: caps.price }),
+    };
     return {
-      provider: createProvider(r, apiKey),
+      provider: createProvider(resolved, apiKey),
       model: r.model,
       providerName: r.providerName,
-      contextWindow: r.contextWindow,
-      ...(r.effortLevels && { effortLevels: r.effortLevels }),
-      ...(r.price && { price: r.price }),
+      contextWindow: caps.contextWindow,
+      capabilitySource: caps.source,
+      ...(caps.effortLevels && { effortLevels: caps.effortLevels }),
+      ...(caps.price && { price: caps.price }),
     };
   };
   /** 没有 key 也要进界面:拿不到 provider 时返回占位,界面据此打开登录对话框。 */
@@ -156,7 +167,7 @@ export function bootstrap(): Bootstrap {
     setDefault: (model) => {
       config = setDefaultModel(config, model);
     },
-    // 配置里没有的模型:models.dev 登记簿 → 抄最像的 → 假设;登记簿只在这一刻用,写进去的值归用户。
+    // 配置里没有的模型:models.dev 命中只写名字(数据保持活的)→ 抄最像的 → 只写名字按假设。
     describeModel: async (providerName, modelId) => {
       const p = config.providers[providerName];
       if (!p) throw new Error(`unknown provider "${providerName}"`);
@@ -165,19 +176,23 @@ export function bootstrap(): Bootstrap {
     addModel: (providerName, model) => {
       config = addModel(config, providerName, model);
     },
-    registryNote: async (providerName, modelId) => {
+    capabilityNote: async (providerName, modelId) => {
       const p = config.providers[providerName];
-      if (!p) return undefined;
-      const configured = modelConfig(p, modelId).contextWindow ?? p.contextWindow;
-      return registryDisagreement(await registry(), providerName, p, modelId, configured);
+      if (!p) return "";
+      return capabilityNote(await registry(), providerName, p, modelId);
     },
   };
-  // 登记簿一次进程内只取一次(缓存一天,联网失败退回旧缓存)。
+  // 登记簿:启动时同步用缓存或内置快照,后台每天刷新一次;刷新失败退回旧的。
+  let registryNow: Registry = loadRegistrySync();
   let registryOnce: Promise<Registry | undefined> | undefined;
   const registry = () => {
-    registryOnce ??= fetchRegistry();
+    registryOnce ??= fetchRegistry().then((r) => {
+      if (r) registryNow = r;
+      return registryNow;
+    });
     return registryOnce;
   };
+  void registry();
   return {
     get config() {
       return config;

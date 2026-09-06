@@ -111,7 +111,7 @@ describe("config 解析", () => {
     expect(explicit).toMatchObject({
       providerName: "openai",
       model: "gpt-x",
-      contextWindow: 400000,
+      contextWindow: 128000,
     });
     expect(resolveModel(CONFIG_TEMPLATE).model).toBe("deepseek-v4-pro");
   });
@@ -131,14 +131,14 @@ describe("config 解析", () => {
 });
 
 describe("按模型的能力数据与强度映射", () => {
-  it("模型对象:窗口与强度集合取模型级,缺省回落到供应商级", () => {
+  it("模型对象:强度集合与 thinking 模式取模型级;模板不预填窗口,配置层只给内置缺省,真值由登记簿层给", () => {
     const r = resolveModel(CONFIG_TEMPLATE, "claude-haiku-4-5-20251001");
-    expect(r.contextWindow).toBe(200000);
-    expect(r.maxTokens).toBe(16384);
+    expect(r.contextWindow).toBe(128000);
+    expect(r.maxTokens).toBeUndefined();
     expect(r.thinkingMode).toBe("budget");
     expect(r.effortLevels).toEqual(["off", "low", "medium", "high"]);
     const d = resolveModel(CONFIG_TEMPLATE, "deepseek-v4-flash");
-    expect(d.contextWindow).toBe(131072);
+    expect(d.contextWindow).toBe(128000);
     expect(d.provider.dialect).toBe("deepseek");
     expect(modelNames(CONFIG_TEMPLATE.providers.openai as ProviderConfig)).toEqual([
       "gpt-5.5",

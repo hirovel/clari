@@ -243,6 +243,8 @@ export type SendCardInput = {
    * 参数、系统段、工具与消息表算了也不显示。
    */
   collapsed?: boolean;
+  /** 窗口数据的出处(config / models.dev / assumed),写在 limit 行末;假设值标红。 */
+  limitSource?: string;
 };
 
 export function requestKind(r: RequestEvent): string {
@@ -375,12 +377,18 @@ export function sendCardLines(input: SendCardInput): string[] {
 
   if (r.threshold !== undefined) {
     const room = r.threshold - r.estimatedTokens;
+    // 窗口的出处跟在后面;假设值标红,提醒去配置里写。
+    const src = input.limitSource
+      ? input.limitSource === "assumed"
+        ? ` · ${c.zhu("window assumed")}`
+        : c.faint(` · ${input.limitSource}`)
+      : "";
     lines.push(
       g(
         "limit",
-        room > 0
+        (room > 0
           ? c.faint(`${fmtTok(room)} tok until the compaction threshold (${fmtTok(r.threshold)})`)
-          : c.zhu(`over the auto-compaction threshold by ${fmtTok(-room)} tok`),
+          : c.zhu(`over the auto-compaction threshold by ${fmtTok(-room)} tok`)) + src,
       ),
     );
   } else lines.push(g("limit", c.faint("no compaction configured")));

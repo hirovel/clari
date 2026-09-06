@@ -43,6 +43,7 @@ import { fmtTok, RequestInspector, type SessionSource } from "./inspector.js";
 import { setCompact } from "./layout.js";
 import type { McpServerStatus } from "./mcp/bridge.js";
 import type { Skill } from "./prompt.js";
+import type { CapabilitySource, Inferred } from "./registry.js";
 import type { PromptTemplate } from "./templates.js";
 import {
   FOCUS_OFF,
@@ -82,6 +83,8 @@ export type ModelChoice = {
   effortLevels?: EffortLevel[];
   /** 价格数据(配置里给了才有),只用于显示费用。 */
   price?: Price;
+  /** 窗口数据的出处:config / models.dev / assumed。 */
+  capabilitySource?: CapabilitySource;
   /** 拿不到 provider 的原因(缺 key);界面据此打开登录对话框,发消息时提示。 */
   unavailable?: string;
 };
@@ -102,14 +105,11 @@ export type TuiSettings = {
   /** 用一把 key 向供应商查模型清单;抛错即无效。登录对话框验证用。 */
   verifyKey?(providerName: string, key: string): Promise<string[]>;
   /** 给配置里没有的模型推出配置(models.dev → 抄最像的 → 假设),带出处;选择器用来写行注与落盘。 */
-  describeModel?(
-    providerName: string,
-    modelId: string,
-  ): Promise<{ model: ModelConfig; source: string }>;
+  describeModel?(providerName: string, modelId: string): Promise<Inferred>;
   /** 把一个模型写进配置并落盘。 */
   addModel?(providerName: string, model: ModelConfig): void;
-  /** 已配置模型与 models.dev 的分歧(窗口不同);没有返回 undefined。 */
-  registryNote?(providerName: string, modelId: string): Promise<string | undefined>;
+  /** 已配置模型生效的能力数据一行注(窗口、价格、出处;配置覆盖了登记簿时带登记簿的值)。 */
+  capabilityNote?(providerName: string, modelId: string): Promise<string>;
 };
 
 export type TuiAppDeps = {
@@ -119,7 +119,14 @@ export type TuiAppDeps = {
   tools: Tool[];
   compaction: CompactionConfig;
   reserveTokens: number;
-  info: { model: string; providerName: string; sessionFile: string };
+  info: {
+    model: string;
+    providerName: string;
+    sessionFile: string;
+    /** 窗口与出处,头部显示;假设值标红。 */
+    contextWindow?: number;
+    capabilitySource?: CapabilitySource;
+  };
   settings?: TuiSettings;
   /** 日志为空时用它落 session/start;入口已经落过(bootstrap.beginSession)就不需要。 */
   systemPrompt?: string;
@@ -207,6 +214,15 @@ export type TuiApp = {
   toggleReasoning(): void;
   stop(): void;
 };
+
+/** 头部的窗口标签:1M ctx (models.dev);假设值用朱色,提醒去配置里写。 */
+function contextTag(info: TuiAppDeps["info"]): string {
+  if (!info.contextWindow) return "";
+  const n = info.contextWindow;
+  const w = n >= 1_000_000 ? `${Math.round(n / 100_000) / 10}M` : `${Math.round(n / 1024)}k`;
+  const src = info.capabilitySource ?? "config";
+  return src === "assumed" ? c.zhu(`${w} ctx assumed`) : c.faint(`${w} ctx (${src})`);
+}
 
 /** 脉搏的八级格。 */
 const PULSE_BLOCKS = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"] as const;
@@ -454,7 +470,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       header.setText(
         info.providerName === "none"
           ? `${tone(G.seal)} ${c.bold(c.jin("clari"))}  ${c.zhu("no model")}  ${c.faint(`/login to add an API key · ${info.sessionFile}`)}`
-          : `${tone(G.seal)} ${c.bold(c.jin("clari"))}  ${c.ink(info.model)}  ${c.faint(`${info.providerName} · ${info.sessionFile}`)}`,
+          : `${tone(G.seal)} ${c.bold(c.jin("clari"))}  ${c.ink(info.model)}  ${c.faint(`${info.providerName} · `)}${contextTag(info)}${c.faint(` · ${info.sessionFile}`)}`,
       );
     },
     updateStatus,

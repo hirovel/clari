@@ -1,10 +1,18 @@
-// 模型登记簿:models.dev 的公开清单(opencode 与 pi 都用它),给"服务器上有、配置里没有"的模型补能力数据。
-// 配置仍持真相:登记簿只在把一个模型写进配置的那一刻用一次,写进去的值以后归用户改。
-// 三级回退:models.dev 命中 → 抄最像的已配置模型(最长公共前缀)→ 保守假设 64k,每一级都在行上标出处。
+// 模型登记簿:models.dev 的公开清单(opencode 与 pi 都用它)是能力数据的缺省来源,配置只写覆盖。
+// 顺序:模型对象里明写的 > models.dev(内置快照 + 每天刷新的缓存)> 供应商级配置 > 假设;每一级都有出处,上屏可见。
+// 服务器上有、配置里没有的模型:models.dev 命中就只把名字写进配置(数据保持活的);
+// 没命中抄最像的已配置模型(最长公共前缀)写进去;再不行只写名字,运行时按假设值并标红。
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { clariHome, type ModelConfig, type ProviderConfig } from "../src/config.js";
+import {
+  clariHome,
+  type ModelConfig,
+  type ModelPrice,
+  modelConfig,
+  type ProviderConfig,
+} from "../src/config.js";
 import type { EffortLevel } from "../src/provider.js";
+import { SNAPSHOT, SNAPSHOT_DATE } from "./models.snapshot.js";
 
 export const REGISTRY_URL = "https://models.dev/api.json";
 /** 缓存有效期:一天。过期后后台重取,取不到就继续用旧的。 */
@@ -14,9 +22,9 @@ export type RegistryModel = {
   id: string;
   name?: string;
   reasoning?: boolean;
-  reasoning_options?: { type: string; values?: string[] }[];
+  reasoning_options?: { type: string; values?: string[]; [k: string]: unknown }[];
   tool_call?: boolean;
-  limit?: { context?: number; output?: number };
+  limit?: { context?: number; input?: number; output?: number };
   /** 每百万 token 的美元。 */
   cost?: { input?: number; output?: number; cache_read?: number; cache_write?: number };
 };
@@ -53,6 +61,13 @@ export async function fetchRegistry(
     return cached?.data;
   }
 }
+
+/** 同步取登记簿:缓存文件能读就用它(新旧不论),否则内置快照。启动时用,不等网络。 */
+export function loadRegistrySync(cachePath = registryCachePath()): Registry {
+  return readCache(cachePath)?.data ?? SNAPSHOT;
+}
+
+export { SNAPSHOT, SNAPSHOT_DATE };
 
 function readCache(path: string): { data: Registry; mtime: number } | undefined {
   if (!existsSync(path)) return undefined;
@@ -123,14 +138,75 @@ export function modelConfigFromRegistry(modelId: string, m: RegistryModel): Mode
   };
 }
 
+/** 假设值:没有任何依据时的保守窗口。宁可早压缩,不要撞 400。 */
+export const ASSUMED_CONTEXT = 65536;
+
+export type CapabilitySource = "config" | "models.dev" | "assumed";
+
+/** 一个模型生效的能力数据与每项的出处。 */
+export type Capabilities = {
+  contextWindow: number;
+  maxTokens?: number;
+  effortLevels?: EffortLevel[];
+  price?: ModelPrice;
+  /** 窗口的出处;上屏显示的就是它。 */
+  source: CapabilitySource;
+  priceSource?: CapabilitySource;
+};
+
+/**
+ * 生效的能力数据:模型对象里明写的 > models.dev > 供应商级配置 > 假设。
+ * 每项独立回退(窗口可能来自登记簿而强度档来自配置)。
+ */
+export function resolveCapabilities(
+  providerName: string,
+  p: ProviderConfig,
+  modelId: string,
+  registry: Registry | undefined,
+): Capabilities {
+  const m = modelConfig(p, modelId);
+  const hit = registry
+    ? lookupModel(registry, registryProviderId(providerName, p), modelId)
+    : undefined;
+  const reg = hit ? modelConfigFromRegistry(modelId, hit) : undefined;
+  const contextWindow = m.contextWindow ?? reg?.contextWindow ?? p.contextWindow ?? ASSUMED_CONTEXT;
+  const source: CapabilitySource =
+    m.contextWindow !== undefined
+      ? "config"
+      : reg?.contextWindow !== undefined
+        ? "models.dev"
+        : p.contextWindow !== undefined
+          ? "config"
+          : "assumed";
+  const maxTokens = m.maxTokens ?? reg?.maxTokens ?? p.maxTokens;
+  const effortLevels = m.effortLevels ?? reg?.effortLevels ?? p.effortLevels;
+  const price = m.price ?? reg?.price;
+  return {
+    contextWindow,
+    source,
+    ...(maxTokens !== undefined && { maxTokens }),
+    ...(effortLevels && { effortLevels }),
+    ...(price && { price, priceSource: m.price ? "config" : "models.dev" }),
+  };
+}
+
+/** 能力数据的一行说明:窗口、价格、出处。 */
+export function describeCapabilities(caps: Capabilities): string {
+  return [
+    `${fmtWindow(caps.contextWindow)} ctx`,
+    ...(caps.price ? [`$${caps.price.input}/$${caps.price.output} per 1M`] : []),
+    caps.source,
+  ].join(" · ");
+}
+
 export type Inferred = {
+  /** 写进配置的对象:登记簿命中只写名字(数据保持活的),抄来的带数据。 */
   model: ModelConfig;
+  /** 写进去之后生效的能力数据。 */
+  caps: Capabilities;
   /** 数据从哪来,原样显示在行上。 */
   source: string;
 };
-
-/** 假设值:没有任何依据时的保守窗口。宁可早压缩,不要撞 400。 */
-export const ASSUMED_CONTEXT = 65536;
 
 /** 最像的已配置模型:最长公共前缀,至少 6 个字符才算像。 */
 export function closestConfigured(p: ProviderConfig, modelId: string): ModelConfig | undefined {
@@ -153,48 +229,59 @@ export function inferModelConfig(
   registry: Registry | undefined,
 ): Inferred {
   const hit = registry && lookupModel(registry, registryProviderId(providerName, p), modelId);
-  if (hit?.limit?.context)
-    return { model: modelConfigFromRegistry(modelId, hit), source: "models.dev" };
+  const withIt = (model: ModelConfig): ProviderConfig => ({ ...p, models: [...p.models, model] });
+  if (hit?.limit?.context) {
+    // 登记簿命中:配置里只留名字,窗口与价格每天跟着登记簿走。
+    const model: ModelConfig = { name: modelId };
+    return {
+      model,
+      caps: resolveCapabilities(providerName, withIt(model), modelId, registry),
+      source: "models.dev",
+    };
+  }
   const sibling = closestConfigured(p, modelId);
   if (sibling) {
     const { name: _name, ...rest } = sibling;
+    const model: ModelConfig = { ...rest, name: modelId };
     return {
-      model: { ...rest, name: modelId },
+      model,
+      caps: resolveCapabilities(providerName, withIt(model), modelId, registry),
       source: `copied from ${sibling.name}`,
     };
   }
-  return {
-    model: { name: modelId, contextWindow: p.contextWindow ?? ASSUMED_CONTEXT },
-    source: `assumed ${Math.round((p.contextWindow ?? ASSUMED_CONTEXT) / 1024)}k context`,
-  };
+  const model: ModelConfig = { name: modelId };
+  const caps = resolveCapabilities(providerName, withIt(model), modelId, registry);
+  return { model, caps, source: `assumed ${fmtWindow(caps.contextWindow)} context` };
 }
 
 /** 一行说明:窗口与价格,给选择器的行注。 */
 export function describeInferred(inf: Inferred): string {
-  const m = inf.model;
-  const parts = [
-    ...(m.contextWindow ? [`${fmtWindow(m.contextWindow)} ctx`] : []),
-    ...(m.price ? [`$${m.price.input}/$${m.price.output} per 1M`] : []),
+  const k = inf.caps;
+  return [
+    `${fmtWindow(k.contextWindow)} ctx`,
+    ...(k.price ? [`$${k.price.input}/$${k.price.output} per 1M`] : []),
     inf.source,
-  ];
-  return parts.join(" · ");
+  ].join(" · ");
 }
 
 function fmtWindow(n: number): string {
   return n >= 1_000_000 ? `${Math.round(n / 100_000) / 10}M` : `${Math.round(n / 1024)}k`;
 }
 
-/** 已配置模型与登记簿的分歧(窗口不同),给选择器提示;没分歧返回 undefined。 */
-export function registryDisagreement(
+/** 已配置模型的一行注:生效的窗口、价格、出处;配置覆盖了登记簿且两者不同时,把登记簿的值也带上。 */
+export function capabilityNote(
   registry: Registry | undefined,
   providerName: string,
   p: ProviderConfig,
   modelId: string,
-  configured: number | undefined,
-): string | undefined {
-  if (!registry || configured === undefined) return undefined;
-  const hit = lookupModel(registry, registryProviderId(providerName, p), modelId);
-  const ctx = hit?.limit?.context;
-  if (!ctx || ctx === configured) return undefined;
-  return `config ${fmtWindow(configured)} · models.dev ${fmtWindow(ctx)}`;
+): string {
+  const caps = resolveCapabilities(providerName, p, modelId, registry);
+  const hit = registry
+    ? lookupModel(registry, registryProviderId(providerName, p), modelId)
+    : undefined;
+  const reg = hit?.limit?.context;
+  const note = describeCapabilities(caps);
+  return caps.source === "config" && reg !== undefined && reg !== caps.contextWindow
+    ? `${note} (models.dev says ${fmtWindow(reg)})`
+    : note;
 }

@@ -200,7 +200,7 @@ export const DEFAULT_CONFIG_PATH =
 
 export const CONFIG_TEMPLATE: KernelConfig = {
   default: "deepseek-v4-pro",
-  verifiedAt: "2026-09-02",
+
   // 每个可选项的内置缺省值。命令行与预设可以覆盖;删掉某一项等于用内置缺省。
   defaults: {
     compaction: "llm",
@@ -237,7 +237,7 @@ export const CONFIG_TEMPLATE: KernelConfig = {
       apiKeyEnv: "DEEPSEEK_API_KEY",
       dialect: "deepseek",
       reasoningField: "reasoning_content",
-      contextWindow: 131072,
+      // 窗口、输出上限、价格不预填:缺省来自 models.dev(内置快照,每天刷新);想覆盖就在模型对象里写。
       models: [
         { name: "deepseek-v4-pro", effortLevels: ["off", "low", "high", "max"] },
         { name: "deepseek-v4-flash", effortLevels: ["off", "low", "high", "max"] },
@@ -247,9 +247,6 @@ export const CONFIG_TEMPLATE: KernelConfig = {
       protocol: "anthropic",
       baseUrl: "https://api.anthropic.com",
       apiKeyEnv: "ANTHROPIC_API_KEY",
-      contextWindow: 200000,
-      // 思考与正文共用这个上限;5 系模型思考常开,给足。
-      maxTokens: 16384,
       models: [
         { name: "claude-opus-5", effortLevels: ["off", "low", "medium", "high", "xhigh", "max"] },
         { name: "claude-sonnet-5", effortLevels: ["off", "low", "medium", "high", "xhigh", "max"] },
@@ -266,7 +263,6 @@ export const CONFIG_TEMPLATE: KernelConfig = {
       baseUrl: "https://api.openai.com/v1",
       apiKeyEnv: "OPENAI_API_KEY",
       reasoningSummary: "auto",
-      contextWindow: 400000,
       models: [
         { name: "gpt-5.5", effortLevels: ["off", "low", "medium", "high", "xhigh"] },
         { name: "gpt-5.6", effortLevels: ["off", "low", "medium", "high", "xhigh", "max"] },

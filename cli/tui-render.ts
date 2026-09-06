@@ -472,6 +472,7 @@ function renderRequest(ctx: TuiContext, e: Extract<AgentEvent, { type: "request"
     // 回放历史:不是最后一次的请求卡马上会折成两行,只画那两行。
     collapsed: req.lastIndex < req.finalRequestIndex,
     dropsThinking: agent.provider.fields?.protocol.startsWith("anthropic") ?? false,
+    ...(ctx.model.info.capabilitySource && { limitSource: ctx.model.info.capabilitySource }),
   });
   // 旧的 Request 卡折成两行(头 + changed,):当步的信息在新卡上,全文永远在检视器。
   if (req.lastCard) req.lastCard.node.setText(req.lastCard.lines.slice(0, 2).join("\n"));

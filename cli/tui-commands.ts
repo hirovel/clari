@@ -441,7 +441,13 @@ function useModel(ctx: TuiContext, name: string, setDefault: boolean): boolean {
   try {
     const choice = deps.settings.switchModel(name);
     agent.setProvider(choice.provider);
-    model.info = { ...model.info, model: choice.model, providerName: choice.providerName };
+    model.info = {
+      ...model.info,
+      model: choice.model,
+      providerName: choice.providerName,
+      contextWindow: choice.contextWindow,
+      ...(choice.capabilitySource && { capabilitySource: choice.capabilitySource }),
+    };
     model.effortLevels = choice.effortLevels;
     model.contextWindow = choice.contextWindow;
     ctx.compaction.window = choice.contextWindow;
@@ -690,13 +696,13 @@ async function listRemoteModels(ctx: TuiContext): Promise<void> {
   const s = ctx.deps.settings;
   const rows: PickRow[] = [];
   for (const m of configured) {
-    const disagreement = (await s?.registryNote?.(providerName, m)) ?? undefined;
+    const note = (await s?.capabilityNote?.(providerName, m)) ?? "";
     rows.push({
       label: m,
       ...(m === currentModel && { current: true }),
       note: remote.includes(m)
-        ? [m === currentModel ? "current" : "", disagreement ?? ""].filter(Boolean).join(" · ")
-        : `${c.zhu("✗")} not on the server; possibly retired`,
+        ? [m === currentModel ? "current" : "", note].filter(Boolean).join(" · ")
+        : `${c.zhu("✗")} not on the server; possibly retired${note ? ` · ${note}` : ""}`,
     });
   }
   // 服务器上有、配置里没有的:能力数据从 models.dev 补,补不到抄最像的,再不行假设;选中即写进配置。

@@ -7,6 +7,7 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ### Added
 
+- Model capability data (context window, output limit, effort levels, price) now comes from the models.dev registry by default: a snapshot ships in the package (`pnpm models:update` refreshes it), a cached copy refreshes daily, and the config only holds overrides. Order: model entry in config, then models.dev, then provider-level config, then an assumed 64k. The header shows the window and its source (`1M ctx (models.dev)`, red `assumed`), the request card's limit line carries the source, `/models` and the login dialog show the effective values per row. The template no longer pre-fills windows or prices.
 - Models the server lists but the config does not know are now selectable in the login dialog and `/models`: their context window, output limit, effort levels and price come from the models.dev registry (cached a day in `~/.clari/models.dev.json`), else are copied from the most similar configured model, else assumed at 64k; the row says which, and choosing one writes it into the config. Configured models whose window disagrees with the registry get a note.
 - The start screen is one line; the login dialog has no intro sentence and no duplicate error line; the thesis moved to the top of `/help`.
 - Alt-screen viewport by default: fixed header and status line, own scrolling, mouse wheel, select-to-copy, Ctrl+Shift+F search, Ctrl+Up/Down jumps between requests (`screen: main` keeps the terminal scrollback; `--screen`).
