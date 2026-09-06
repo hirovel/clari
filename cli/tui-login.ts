@@ -1,6 +1,8 @@
 // 登录对话框与列表选择器:没有 key 也能进界面,在界面里选供应商、贴 key、验证、选模型。
 // 两个组件都不画框线;↑↓ 选,Enter 定,Esc 退。key 输入遮罩,只露尾四位,从不上屏、不进日志。
 import { type Component, Key, matchesKey } from "@earendil-works/pi-tui";
+import type { ModelConfig } from "../src/config.js";
+import { describeInferred, type Inferred } from "./registry.js";
 import { c } from "./theme.js";
 
 export type PickRow = {
@@ -110,6 +112,10 @@ export type LoginDeps = {
   /** 用这把 key 向供应商查模型清单;抛错即 key 无效或网络不通。返回服务器上的模型名。 */
   verifyKey(providerName: string, key: string): Promise<string[]>;
   setKey(providerName: string, key: string): void;
+  /** 给配置里没有的模型推出配置(带出处);有它,服务器上多出来的模型就可选。 */
+  describeModel?(providerName: string, modelId: string): Promise<Inferred>;
+  /** 把模型写进配置。 */
+  addModel?(providerName: string, model: ModelConfig): void;
   /** 切换到 供应商/模型;setDefault 为真时同时设为缺省。 */
   useModel(name: string, setDefault: boolean): void;
   /** 结束(成功或取消)。 */
@@ -121,7 +127,15 @@ type Step =
   | { kind: "providers"; index: number }
   | { kind: "key"; provider: ProviderSummary; buffer: string; error?: string | undefined }
   | { kind: "checking"; provider: ProviderSummary }
-  | { kind: "models"; provider: ProviderSummary; rows: PickRow[]; index: number; remote: number };
+  | {
+      kind: "models";
+      provider: ProviderSummary;
+      rows: PickRow[];
+      index: number;
+      remote: number;
+      /** 服务器上有、配置里没有的模型推出的配置;选中时先写进配置。 */
+      inferred: Map<string, ModelConfig>;
+    };
 
 /** 剥掉括号粘贴的包裹标记,只留可打印字符。 */
 function pasted(data: string): string {
@@ -167,7 +181,7 @@ export class LoginDialog implements Component {
     if (s.kind === "providers") {
       const rows = this.providerRows();
       return [
-        `${c.bold(c.ink("Set up a provider"))}  ${c.faint(this.intro ?? "pick a provider, paste its key, choose a model")}`,
+        `${c.bold(c.ink("Set up a provider"))}${this.intro ? `  ${c.faint(this.intro)}` : ""}`,
         ...renderRows(rows, s.index),
         c.faint("  ↑↓ choose · Enter continue · Esc close (/login opens this again)"),
       ];
@@ -238,6 +252,8 @@ export class LoginDialog implements Component {
     else if (matchesKey(data, Key.enter) || data === "d") {
       const row = s.rows[s.index];
       if (row && !row.disabled) {
+        const add = s.inferred.get(row.label);
+        if (add) this.deps.addModel?.(s.provider.name, add);
         this.deps.useModel(`${s.provider.name}/${row.label}`, data === "d");
         this.deps.onDone();
         return;
@@ -259,7 +275,7 @@ export class LoginDialog implements Component {
   private providerRows(): PickRow[] {
     return this.deps.providers().map((p) => ({
       label: p.name,
-      note: `${p.protocol}   key: ${p.keySource ? `set (${p.keySource})` : "missing"}${p.env ? `   ${p.env}` : ""}`,
+      note: `${p.protocol}   ${p.keySource ? `key: ${p.keySource}` : "no key"}${p.env ? `   ${p.env}` : ""}`,
     }));
   }
 
@@ -277,13 +293,23 @@ export class LoginDialog implements Component {
     this.deps.setKey(provider.name, key);
     const rows: PickRow[] = provider.models.map((m) => ({
       label: m,
-      note: remote.includes(m) ? "configured" : "configured · not on the server",
+      ...(remote.includes(m) ? {} : { note: "not on the server" }),
     }));
-    for (const m of remote) {
-      if (!provider.models.includes(m)) {
-        rows.push({ label: m, note: "on the server, not in config", disabled: true });
-      }
-    }
+    // 服务器上多出来的:能推出配置就可选,行上写窗口、价格与出处;推不出就只列出。
+    const inferred = new Map<string, ModelConfig>();
+    const extra = remote.filter((m) => !provider.models.includes(m));
+    if (this.deps.describeModel && this.deps.addModel) {
+      const described = await Promise.all(
+        extra.map((m) => this.deps.describeModel?.(provider.name, m)),
+      );
+      extra.forEach((m, i) => {
+        const d = described[i];
+        if (d) {
+          inferred.set(m, d.model);
+          rows.push({ label: m, note: `not in config · ${describeInferred(d)}` });
+        } else rows.push({ label: m, note: "not in config", disabled: true });
+      });
+    } else for (const m of extra) rows.push({ label: m, note: "not in config", disabled: true });
     const first = rows.findIndex((r) => !r.disabled);
     this.step = {
       kind: "models",
@@ -291,6 +317,7 @@ export class LoginDialog implements Component {
       rows,
       index: Math.max(0, first),
       remote: remote.length,
+      inferred,
     };
     this.deps.onChange();
   }

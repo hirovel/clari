@@ -29,7 +29,7 @@ import {
 import { Agent, type DeliverAs } from "../src/agent.js";
 import type { ApprovalConfig } from "../src/approval.js";
 import { contextTokens } from "../src/compaction.js";
-import type { ToolPromptsConfig } from "../src/config.js";
+import type { ModelConfig, ToolPromptsConfig } from "../src/config.js";
 import { fmtCost, type Price, UsageAccumulator } from "../src/cost.js";
 import { type AgentEvent, now } from "../src/events.js";
 import type { EventLog } from "../src/log.js";
@@ -101,6 +101,15 @@ export type TuiSettings = {
   providers?(): ProviderSummary[];
   /** 用一把 key 向供应商查模型清单;抛错即无效。登录对话框验证用。 */
   verifyKey?(providerName: string, key: string): Promise<string[]>;
+  /** 给配置里没有的模型推出配置(models.dev → 抄最像的 → 假设),带出处;选择器用来写行注与落盘。 */
+  describeModel?(
+    providerName: string,
+    modelId: string,
+  ): Promise<{ model: ModelConfig; source: string }>;
+  /** 把一个模型写进配置并落盘。 */
+  addModel?(providerName: string, model: ModelConfig): void;
+  /** 已配置模型与 models.dev 的分歧(窗口不同);没有返回 undefined。 */
+  registryNote?(providerName: string, modelId: string): Promise<string | undefined>;
 };
 
 export type TuiAppDeps = {
@@ -609,8 +618,11 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     });
   }
   if (!log.events.some((e) => e.type === "user/message")) {
-    ctx.view.firstRun = new Text(firstRunLines().join("\n"), 1, 0);
-    transcript.addChild(ctx.view.firstRun);
+    // 首屏一行占位;没 key 时连这一行也不要,屏幕上只有头部与登录对话框。
+    if (deps.info.providerName !== "none") {
+      ctx.view.firstRun = new Text(firstRunLines().join("\n"), 1, 0);
+      transcript.addChild(ctx.view.firstRun);
+    }
   }
   ctx.updateHeader();
   updateStatus();
@@ -709,10 +721,8 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
 
   tui.setFocus(editor);
   tui.start();
-  if (deps.unavailable) {
-    ctx.note(c.zhu(`✗ ${deps.unavailable}`));
-    openLogin(ctx, { intro: "no API key yet: pick a provider, paste its key, choose a model" });
-  }
+  // 没 key:屏幕上只留头部与对话框;原因已在头部(no model),不再另打一行。
+  if (deps.unavailable) openLogin(ctx, {});
 
   return {
     tui,

@@ -447,8 +447,8 @@ describe("Request 卡:changed 行与消息表", () => {
     expect(expanded).toContain("summary · the model reads the opaque block");
     expect(expanded).toContain("line two");
     const first = plain(firstRunLines().join("\n"));
-    for (const verb of ["type", "watch", "inspect", "change", "more"])
-      expect(first).toContain(verb);
+    expect(first).toContain("Ask anything");
+    expect(first).toContain("? shortcuts");
   });
 });
 

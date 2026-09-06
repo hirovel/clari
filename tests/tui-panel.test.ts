@@ -190,12 +190,12 @@ describe("上下文面板的动作与后果", () => {
       onExit: () => {},
     });
     let doc = plain(app.lines(120).join("\n"));
-    expect(doc).toContain("Everything the model sees");
-    expect(doc).toContain("Try:");
+    expect(doc).toContain("Ask anything");
+    expect(doc).toContain("? shortcuts");
     await app.submit("first");
     await app.submit("second");
     doc = plain(app.lines(120).join("\n"));
-    expect(doc).not.toContain("Everything the model sees");
+    expect(doc).not.toContain("Ask anything");
     expect(doc).toContain("Request #2");
     expect(doc).toContain("+2 new");
     expect(doc).toContain("reply");

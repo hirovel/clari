@@ -120,12 +120,13 @@ describe("config 解析", () => {
     expect(() => resolveModel(CONFIG_TEMPLATE, "mystery")).toThrow("deepseek/deepseek-v4-pro");
   });
 
-  it("key:配置字段优先,其次环境变量,都缺则指路", () => {
+  it("key:环境变量 > 凭据文件 > 配置字段,都缺则指路;测试指向一个不存在的凭据文件,不碰本机的", () => {
     const p = CONFIG_TEMPLATE.providers.deepseek;
     if (!p) throw new Error("模板缺 deepseek");
-    expect(resolveApiKey("deepseek", { ...p, apiKey: " k1 " }, {})).toBe("k1");
-    expect(resolveApiKey("deepseek", p, { DEEPSEEK_API_KEY: "k2" })).toBe("k2");
-    expect(() => resolveApiKey("deepseek", p, {})).toThrow("DEEPSEEK_API_KEY");
+    const env = { CLARI_CREDENTIALS: "C:/nonexistent/clari-test-credentials.json" };
+    expect(resolveApiKey("deepseek", { ...p, apiKey: " k1 " }, env)).toBe("k1");
+    expect(resolveApiKey("deepseek", p, { ...env, DEEPSEEK_API_KEY: "k2" })).toBe("k2");
+    expect(() => resolveApiKey("deepseek", p, env)).toThrow("DEEPSEEK_API_KEY");
   });
 });
 

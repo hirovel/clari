@@ -83,7 +83,7 @@ The fake model needs no network and no key; the kernel, tools, session files, UI
 
 ### Provide a key
 
-`pnpm tui` starts without any key. On first start a dialog opens: pick the provider, paste the key (masked), it is checked with the provider's model list and saved, then pick a model. `/login` opens the same dialog any time; `/model` and `/models` are pickers too.
+`pnpm tui` starts without any key. Models the server lists but the config does not know can be picked too: their capability data comes from [models.dev](https://models.dev) (else copied from the most similar configured model, else assumed), the row says which, and picking one writes it into the config. On first start a dialog opens: pick the provider, paste the key (masked), it is checked with the provider's model list and saved, then pick a model. `/login` opens the same dialog any time; `/model` and `/models` are pickers too.
 
 Where a key can come from, highest priority first:
 

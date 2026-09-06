@@ -4,12 +4,14 @@
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
+  addModel,
   clariHome,
   createProvider,
   DEFAULT_CONFIG_PATH,
   findApiKey,
   type KernelConfig,
   loadConfig,
+  modelConfig,
   modelNames,
   resolveApiKey,
   resolveModel,
@@ -32,6 +34,12 @@ import {
   type PromptSection,
   type Skill,
 } from "./prompt.js";
+import {
+  fetchRegistry,
+  inferModelConfig,
+  type Registry,
+  registryDisagreement,
+} from "./registry.js";
 import { openSession, SESSIONS_DIR } from "./sessions.js";
 import { applyToolPrompts } from "./tool-prompts.js";
 import { bashTool } from "./tools/bash.js";
@@ -148,6 +156,27 @@ export function bootstrap(): Bootstrap {
     setDefault: (model) => {
       config = setDefaultModel(config, model);
     },
+    // 配置里没有的模型:models.dev 登记簿 → 抄最像的 → 假设;登记簿只在这一刻用,写进去的值归用户。
+    describeModel: async (providerName, modelId) => {
+      const p = config.providers[providerName];
+      if (!p) throw new Error(`unknown provider "${providerName}"`);
+      return inferModelConfig(providerName, p, modelId, await registry());
+    },
+    addModel: (providerName, model) => {
+      config = addModel(config, providerName, model);
+    },
+    registryNote: async (providerName, modelId) => {
+      const p = config.providers[providerName];
+      if (!p) return undefined;
+      const configured = modelConfig(p, modelId).contextWindow ?? p.contextWindow;
+      return registryDisagreement(await registry(), providerName, p, modelId, configured);
+    },
+  };
+  // 登记簿一次进程内只取一次(缓存一天,联网失败退回旧缓存)。
+  let registryOnce: Promise<Registry | undefined> | undefined;
+  const registry = () => {
+    registryOnce ??= fetchRegistry();
+    return registryOnce;
   };
   return {
     get config() {

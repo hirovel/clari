@@ -2,6 +2,7 @@
 // 每条命令的实现是接 ctx 的小函数(列表类在下半部分,编辑类在 tui-edit,槽类在 tui-slots)。
 import { existsSync, readFileSync } from "node:fs";
 import type { DeliverAs } from "../src/agent.js";
+import type { ModelConfig } from "../src/config.js";
 import { contextBreakdown } from "../src/context.js";
 import { fmtCost } from "../src/cost.js";
 import { now } from "../src/events.js";
@@ -9,8 +10,10 @@ import { recordingProvider } from "../src/loop.js";
 import { EFFORT_LEVELS, parseEffort } from "../src/provider.js";
 import { expandFileRefs } from "./attachments.js";
 import { SESSIONS_DIR } from "./bootstrap.js";
+import { thesisLines } from "./cards.js";
 import { describeStatus } from "./mcp/bridge.js";
 import { expandSkill } from "./prompt.js";
+import { describeInferred } from "./registry.js";
 import { listSessions, sessionRows } from "./sessions.js";
 import { expandTemplate } from "./templates.js";
 import { copySequence } from "./terminal-extras.js";
@@ -220,6 +223,8 @@ export async function submit(
 
 function helpText(ctx: TuiContext): string {
   return [
+    ...thesisLines(),
+    "",
     ...COMMANDS.map((x) => `${c.ink(`/${x.name}`.padEnd(12))} ${c.soft(x.description)}`),
     ...ctx.templates.map(
       (t) => `${c.ink(`/${t.name}`.padEnd(12))} ${c.soft(`template: ${t.description}`)}`,
@@ -596,6 +601,13 @@ export function openLogin(ctx: TuiContext, opts: { intro?: string; provider?: st
     {
       providers: () => settings.providers?.() ?? [],
       verifyKey: (p, k) => settings.verifyKey?.(p, k) ?? Promise.resolve([]),
+      ...(settings.describeModel && { describeModel: settings.describeModel }),
+      ...(settings.addModel && {
+        addModel: (p: string, m: ModelConfig) => {
+          settings.addModel?.(p, m);
+          ctx.note(c.soft(`· ${p}/${m.name} added to the config`));
+        },
+      }),
       setKey: (p, k) => {
         settings.setKey(p, k);
         ctx.note(c.soft(`· key for ${p} saved to the credentials file`));
@@ -675,23 +687,45 @@ async function listRemoteModels(ctx: TuiContext): Promise<void> {
   const configured = (ctx.deps.settings?.listModels() ?? [])
     .filter((m) => m.startsWith(prefix))
     .map((m) => m.slice(prefix.length));
-  const rows: PickRow[] = configured.map((m) => ({
-    label: m,
-    ...(m === currentModel && { current: true }),
-    note: remote.includes(m)
-      ? `${c.soft("✓")} on the server${m === currentModel ? " · current" : ""}`
-      : `${c.zhu("✗")} not on the server; possibly retired`,
-  }));
+  const s = ctx.deps.settings;
+  const rows: PickRow[] = [];
+  for (const m of configured) {
+    const disagreement = (await s?.registryNote?.(providerName, m)) ?? undefined;
+    rows.push({
+      label: m,
+      ...(m === currentModel && { current: true }),
+      note: remote.includes(m)
+        ? [m === currentModel ? "current" : "", disagreement ?? ""].filter(Boolean).join(" · ")
+        : `${c.zhu("✗")} not on the server; possibly retired`,
+    });
+  }
+  // 服务器上有、配置里没有的:能力数据从 models.dev 补,补不到抄最像的,再不行假设;选中即写进配置。
+  const inferred = new Map<string, ModelConfig>();
   for (const m of remote) {
-    if (!configured.includes(m))
-      rows.push({ label: m, note: "on the server, not in config", disabled: true });
+    if (configured.includes(m)) continue;
+    if (s?.describeModel && s.addModel) {
+      const d = await s.describeModel(providerName, m);
+      inferred.set(m, d.model);
+      rows.push({ label: m, note: `not in config · ${describeInferred(d)}` });
+    } else rows.push({ label: m, note: "not in config", disabled: true });
   }
   openPicker(
     ctx,
     `${c.bold(c.ink("Models"))}  ${c.soft(providerName)}  ${c.faint(`server ${remote.length} · configured ${configured.length}`)}`,
     rows,
     "↑↓ choose · Enter switch · d switch and make it the default · Esc close",
-    (row, key) => useModel(ctx, `${providerName}/${row.label}`, key === "d"),
+    (row, key) => {
+      const add = inferred.get(row.label);
+      if (add && s?.addModel) {
+        s.addModel(providerName, add);
+        ctx.note(
+          c.soft(
+            `· ${providerName}/${row.label} added to the config (${row.note?.replace(/^not in config · /, "") ?? ""})`,
+          ),
+        );
+      }
+      useModel(ctx, `${providerName}/${row.label}`, key === "d");
+    },
   );
 }
 

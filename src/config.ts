@@ -390,6 +390,24 @@ export function setDefaultModel(
   return next;
 }
 
+/** 把一个模型(带能力数据)写进某供应商的模型表并落盘;已有同名的就替换。 */
+export function addModel(
+  config: KernelConfig,
+  providerName: string,
+  model: ModelConfig,
+  path = DEFAULT_CONFIG_PATH,
+): KernelConfig {
+  const p = config.providers[providerName];
+  if (!p) throw new Error(`unknown provider "${providerName}"`);
+  const models = p.models.filter((m) => (typeof m === "string" ? m : m.name) !== model.name);
+  const next = {
+    ...config,
+    providers: { ...config.providers, [providerName]: { ...p, models: [...models, model] } },
+  };
+  saveConfig(next, path);
+  return next;
+}
+
 function validate(raw: unknown, path: string): KernelConfig {
   const c = raw as Partial<KernelConfig>;
   if (!c || typeof c !== "object" || typeof c.default !== "string" || !c.providers) {

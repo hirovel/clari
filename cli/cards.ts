@@ -584,30 +584,21 @@ export function errorCardLines(
   return lines;
 }
 
-/** 首屏:新用户输入任何东西之前看到的。五个动词,一行一个,加一条可以直接试的提示。 */
+/**
+ * 首屏:新用户输入任何东西之前看到的。一行,像输入框的占位符;说明都在 ? 与 /help 后面。
+ * Codex、opencode、Claude Code 的起始页都只有一行提示加一个快捷键入口。
+ */
 export function firstRunLines(): string[] {
+  return [
+    c.faint("Ask anything · @path attaches a file · / commands · Ctrl+K palette · ? shortcuts"),
+  ];
+}
+
+/** 论点两句:/help 的开头。 */
+export function thesisLines(): string[] {
   return [
     c.soft("Everything the model sees, and everything the kernel decides, is one append-only log."),
     c.soft("This screen is a projection of it. So is every request."),
-    "",
-    g(
-      "type",
-      c.faint("a message and press Enter · Alt+Enter queues it for after the current step"),
-    ),
-    g("watch", c.faint("each step shows what was sent and what changed, then what came back")),
-    g(
-      "inspect",
-      c.faint("Ctrl+R  requests · events · compactions · context   Ctrl+E  context panel"),
-    ),
-    g(
-      "change",
-      c.faint(
-        "context panel: edit · drop · rewind · retry · fork · all recorded, nothing destroyed",
-      ),
-    ),
-    g("more", c.faint("/help commands · ? shortcuts · /fields what this protocol sends and reads")),
-    "",
-    `${c.faint("Try:")} ${c.soft("What's in this directory? Read the README.")}`,
   ];
 }
 

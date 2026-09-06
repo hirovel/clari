@@ -7,6 +7,8 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ### Added
 
+- Models the server lists but the config does not know are now selectable in the login dialog and `/models`: their context window, output limit, effort levels and price come from the models.dev registry (cached a day in `~/.clari/models.dev.json`), else are copied from the most similar configured model, else assumed at 64k; the row says which, and choosing one writes it into the config. Configured models whose window disagrees with the registry get a note.
+- The start screen is one line; the login dialog has no intro sentence and no duplicate error line; the thesis moved to the top of `/help`.
 - Alt-screen viewport by default: fixed header and status line, own scrolling, mouse wheel, select-to-copy, Ctrl+Shift+F search, Ctrl+Up/Down jumps between requests (`screen: main` keeps the terminal scrollback; `--screen`).
 - Ledger: every request is a step; the newest `foldSteps` (3) stay open, older ones fold to one ledger line (stop reason, calls, tokens, cost, first line of the reply). PgUp/PgDn move a step cursor and scroll that step to the top, Enter unfolds or folds it, Esc releases; `foldSteps: 0` never folds.
 - Ctrl+K command palette: fuzzy search over commands, configured models, provider logins, skills and templates.

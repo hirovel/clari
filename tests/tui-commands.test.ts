@@ -270,7 +270,6 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
     const dlg = app.dialogLines().map(stripAnsi).join("\n");
     expect(dlg).toContain("server 2 · configured 2");
     expect(dlg).toContain("fake-model");
-    expect(dlg).toContain("✓ on the server");
     expect(dlg).toContain("retired-model");
     expect(dlg).toContain("possibly retired");
     expect(dlg).toContain("fresh-model");

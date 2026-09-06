@@ -51,9 +51,9 @@ describe("LoginDialog", () => {
     let out = plain(dlg.render());
     expect(out).toContain("Set up a provider");
     expect(out).toContain("▸ 1. deepseek");
-    expect(out).toContain("key: missing");
+    expect(out).toContain("no key");
     expect(out).toContain("anthropic");
-    expect(out).toContain("key: set (env)");
+    expect(out).toContain("key: env");
     // 数字键直接跳到该行;再按回到第 1 项
     dlg.handleInput("2");
     expect(plain(dlg.render())).toContain("▸ 2. anthropic");
@@ -77,11 +77,10 @@ describe("LoginDialog", () => {
     expect(calls).toContain("set:deepseek:sk-abcdef12345");
     expect(out).toContain("key saved · 2 models on the server");
     expect(out).toContain("deepseek-v4-pro");
-    expect(out).toContain("configured");
     expect(out).toContain("deepseek-v4-flash");
     expect(out).toContain("not on the server");
     expect(out).toContain("deepseek-v4-lite");
-    expect(out).toContain("on the server, not in config");
+    expect(out).toContain("not in config");
     dlg.handleInput("\x1b[B"); // 到 flash
     dlg.handleInput("\x1b[B"); // lite 不可选,跳回 pro
     dlg.handleInput("d");
@@ -157,7 +156,6 @@ describe("没有 key 的界面", () => {
     };
     const { app, log } = boot(settings, "no API key for provider deepseek");
     expect(doc(app)).toContain("no model");
-    expect(doc(app)).toContain("✗ no API key for provider deepseek");
     expect(plain(app.dialogLines())).toContain("Set up a provider");
     app.dialogInput("\x1b");
     expect(app.dialogLines()).toEqual([]);
