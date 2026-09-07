@@ -244,7 +244,11 @@ export function decisionLines(rec: RequestRecord): string[] {
             ? `${c.soft("·")} steering injected ${e.injected} (${e.boundary} boundary)`
             : e.slot === "execution"
               ? `${c.soft("·")} parallel execution of ${e.parallel} calls: ${e.tools.join(", ")}`
-              : `${c.soft("·")} termination stopped the loop at step ${e.steps}: ${e.reason}`,
+              : e.slot === "plan"
+                ? `${c.soft("·")} plan restated at step ${e.steps} (${e.reason === "compacted" ? "after compaction" : "not updated for a while"})`
+                : e.slot === "facts"
+                  ? `${c.soft("·")} fact injected: ${e.note}`
+                  : `${c.soft("·")} termination stopped the loop at step ${e.steps}: ${e.reason}`,
         );
         break;
       case "session/interrupt":

@@ -170,6 +170,8 @@ app = createTuiApp({
   fold: args.fold,
   ...(args.foldLines !== undefined && { foldLines: args.foldLines }),
   ...(args.results && { results: args.results }),
+  ...(args.facts && { facts: args.facts }),
+  ...(args.planReminder !== undefined && { planReminder: args.planReminder }),
   ...(args.foldSteps !== undefined && { foldSteps: args.foldSteps }),
   ...(args.screen && { screen: args.screen }),
   ...(args.notify && { notify: args.notify }),

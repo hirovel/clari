@@ -34,6 +34,10 @@ export type CommonArgs = {
   foldLines?: number;
   /** 每个工具的结果可见度(配置 results)。 */
   results?: Record<string, ResultView>;
+  /** 事实附注开关(配置 facts)。 */
+  facts?: { repeats?: boolean; slow?: boolean; date?: boolean };
+  /** 计划复述的步数(配置 planReminder)。 */
+  planReminder?: number;
   /** 账簿保持展开的最新步数(配置 foldSteps)。 */
   foldSteps?: number;
   /** 屏幕模式(--screen / 配置 screen)。 */
@@ -395,6 +399,9 @@ export function applyPreset(args: CommonArgs, config: KernelConfig): CommonArgs 
     if (out.foldLines === undefined && layer.foldLines !== undefined)
       out.foldLines = layer.foldLines;
     if (out.results === undefined && layer.results !== undefined) out.results = layer.results;
+    if (out.facts === undefined && layer.facts !== undefined) out.facts = layer.facts;
+    if (out.planReminder === undefined && layer.planReminder !== undefined)
+      out.planReminder = layer.planReminder;
     if (out.foldSteps === undefined && layer.foldSteps !== undefined)
       out.foldSteps = layer.foldSteps;
     if (out.screen === undefined && layer.screen !== undefined) out.screen = layer.screen;

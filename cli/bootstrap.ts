@@ -22,6 +22,7 @@ import {
 import { now } from "../src/events.js";
 import type { EventLog } from "../src/log.js";
 import type { CompactionConfig, TurnDeps } from "../src/loop.js";
+import { planTool } from "../src/plan.js";
 import type { Provider } from "../src/provider.js";
 import { type ChildInfo, createTaskTool } from "../src/subagent.js";
 import type { Tool } from "../src/tools.js";
@@ -240,6 +241,7 @@ export function buildTools(
     grepTool,
     globTool,
     createFetchTool({ ...(fetchConfig && { config: fetchConfig }) }),
+    planTool,
   ].map((t) => ({ ...t }));
   applyToolPrompts(base, toolPrompts);
   if (memory) base.push(createRememberTool(memory));

@@ -125,6 +125,10 @@ export type Preset = {
   foldLines?: number;
   /** 每个工具的结果可见度:count 只报行数,head 前几行,tail 后几行,all 全部;没写的工具按 head。 */
   results?: Record<string, ResultView>;
+  /** 事实附注:repeats 同样参数的重复失败,slow 比中位耗时慢得多的调用,date 日期变化。缺省全开。 */
+  facts?: { repeats?: boolean; slow?: boolean; date?: boolean };
+  /** 计划复述:连续这么多步没碰 plan 且还有未完成项就把计划贴到末尾;0 = 从不。缺省 8。 */
+  planReminder?: number;
   /** 账簿:保持展开的最新步数,更早的折成一行;缺省 3,0 = 从不自动折。 */
   foldSteps?: number;
   /** 屏幕模式:alt(缺省,备用屏,头尾固定、自己滚、鼠标、搜索)| main(主屏,保留终端回滚)。 */
@@ -227,6 +231,8 @@ export const CONFIG_TEMPLATE: KernelConfig = {
       grep: "count",
       bash: "tail",
     },
+    facts: { repeats: true, slow: true, date: true },
+    planReminder: 8,
     foldSteps: 3,
     screen: "alt",
     notify: "unfocused",

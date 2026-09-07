@@ -1,5 +1,7 @@
-// bash 工具(照抄 pi 方案):Windows 找 Git Bash,打断杀进程树。
+// bash 工具:Windows 找 Git Bash,打断杀进程树。
 // 截断策略可换:默认保尾,自定义策略经 createBashTool 注入。
+// 工作目录跨调用保持:每次命令末尾打印 $PWD,下一次从那里起;目录变了就在结果末尾说一句,
+// 模型不必自己记 cd 过哪里。每个工具实例各有自己的目录(子 agent 用自己的实例)。
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -13,16 +15,24 @@ export const DEFAULT_TIMEOUT_S = 120;
 export const MAX_OUTPUT_BYTES = 10 * 1024 * 1024;
 
 export function createBashTool(
-  opts: { truncate?: TruncationPolicy; defaultTimeoutS?: number; maxOutputBytes?: number } = {},
+  opts: {
+    truncate?: TruncationPolicy;
+    defaultTimeoutS?: number;
+    maxOutputBytes?: number;
+    /** 起始工作目录;缺省进程目录。 */
+    cwd?: string;
+  } = {},
 ) {
   const truncate = opts.truncate ?? keepTail();
   const defaultTimeout = opts.defaultTimeoutS ?? DEFAULT_TIMEOUT_S;
   const maxBytes = opts.maxOutputBytes ?? MAX_OUTPUT_BYTES;
+  let cwd = opts.cwd ?? process.cwd();
   return defineTool({
     name: "bash",
     ...described({
       core:
-        "Run a bash command in the current working directory; returns stdout and stderr combined. " +
+        "Run a bash command; returns stdout and stderr combined. The working directory persists across calls " +
+        "(cd changes it for later calls) and the result says so whenever it changed. " +
         `Default timeout ${defaultTimeout} s; raise the timeout parameter for long tasks. ` +
         "Output past the limit is truncated and the full output is saved to a temp file whose path is appended.",
       guidance:
@@ -47,11 +57,17 @@ export function createBashTool(
         );
       }
       const timeoutS = args.timeout ?? defaultTimeout;
-      const r = await run(shell, args.command, ctx.signal, {
+      const r = await run(shell, withCwdMarker(args.command), ctx.signal, {
         timeoutMs: timeoutS > 0 ? timeoutS * 1000 : 0,
         maxBytes,
+        cwd,
       });
-      const shown = applyTruncation(r.output, truncate);
+      const { output, pwd } = splitCwdMarker(r.output);
+      let shown = applyTruncation(output, truncate);
+      if (pwd && !samePath(pwd, cwd)) {
+        cwd = pwd;
+        shown = shown ? `${shown}\n[cwd is now ${cwd}]` : `[cwd is now ${cwd}]`;
+      }
       if (r.aborted) throw new Error(`command interrupted. Output so far:\n${shown}`);
       if (r.timedOut) {
         throw new Error(
@@ -71,6 +87,28 @@ export function createBashTool(
 
 /** 默认实例:保尾截断 —— 命令输出的错误与结论通常在末尾。 */
 export const bashTool = createBashTool();
+
+/** 目录标记:命令跑完后打印 $PWD(Git Bash 下取 Windows 形态的路径),退出码照旧。命令自己 exit 就没有标记,目录视为没变。 */
+const CWD_MARK = "";
+function withCwdMarker(command: string): string {
+  return `${command}\n__clari_rc=$?\nprintf '\\n${CWD_MARK}%s' "$(pwd -W 2>/dev/null || pwd)"\nexit $__clari_rc`;
+}
+
+/** 同一个目录的两种写法算同一个:进程目录是反斜杠的 Windows 形态,pwd -W 给的是正斜杠;Windows 上不分大小写。 */
+function samePath(a: string, b: string): boolean {
+  const norm = (x: string) => x.replace(/\\/g, "/").replace(/\/+$/, "");
+  return process.platform === "win32"
+    ? norm(a).toLowerCase() === norm(b).toLowerCase()
+    : norm(a) === norm(b);
+}
+
+function splitCwdMarker(output: string): { output: string; pwd?: string } {
+  const i = output.lastIndexOf(CWD_MARK);
+  if (i < 0) return { output };
+  const pwd = output.slice(i + 1).trim();
+  const body = output.slice(0, i).replace(/\n$/, "");
+  return pwd ? { output: body, pwd } : { output: body };
+}
 
 function applyTruncation(output: string, truncate: TruncationPolicy): string {
   const t = truncate(output);
@@ -103,12 +141,12 @@ function run(
   shell: string,
   command: string,
   signal: AbortSignal,
-  limits: { timeoutMs: number; maxBytes: number },
+  limits: { timeoutMs: number; maxBytes: number; cwd: string },
 ): Promise<RunResult> {
   return new Promise((resolvePromise, rejectPromise) => {
     // POSIX 下 detached 开进程组,打断时整组杀掉;Windows 用 taskkill /T 杀进程树。
     const child = spawn(shell, ["-c", command], {
-      cwd: process.cwd(),
+      cwd: limits.cwd,
       windowsHide: true,
       detached: process.platform !== "win32",
     });

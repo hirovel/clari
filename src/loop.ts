@@ -6,8 +6,10 @@ import {
   type PreservationPolicy,
 } from "./compaction.js";
 import { type AgentEvent, now, type ToolCall } from "./events.js";
+import { annotateResult, DEFAULT_FACTS, dateNote, type FactsConfig } from "./facts.js";
 import type { EventLog } from "./log.js";
 import { deriveMessages, type Message } from "./messages.js";
+import { DEFAULT_PLAN_REMINDER, planOpen, planState, planText, stepsSincePlan } from "./plan.js";
 import type { AssistantTurn, EffortLevel, Provider, ToolDef } from "./provider.js";
 import {
   classifyError,
@@ -90,6 +92,10 @@ export type TurnDeps = {
   compaction?: CompactionConfig;
   /** 运行这个 turn 的 agent 名(子 agent 用);审批提示据此标明是谁在问。主会话不填。 */
   agent?: string;
+  /** 事实附注的开关(重复失败、慢调用、日期变化);缺省全开。 */
+  facts?: FactsConfig;
+  /** 计划复述:连续这么多步没碰计划且还有未完成项就复述一次;0 = 从不。缺省 8。 */
+  planReminder?: number;
 };
 
 export type CompactionTrigger = "threshold" | "manual" | "remind";
@@ -209,6 +215,8 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   const approve = deps.slots?.approve ?? allowAll;
   const execution = deps.slots?.execution ?? "sequential";
   const drainQueue = deps.drainQueue ?? (() => []);
+  const facts = { ...DEFAULT_FACTS, ...deps.facts };
+  const planReminder = deps.planReminder ?? DEFAULT_PLAN_REMINDER;
   const defs: ToolDef[] = tools.map((t) => ({
     name: t.name,
     description: t.description,
@@ -220,7 +228,15 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   while (true) {
     // 自动压缩检查:每次模型请求前,占用超阈值即压;manual 与 remind 不在这里动手,溢出时另有兜底。
     if (deps.compaction && (deps.compaction.trigger ?? "threshold") === "threshold") {
-      await compactIfNeeded(deps, deps.compaction, false);
+      if (await compactIfNeeded(deps, deps.compaction, false)) restatePlan(log, "compacted", steps);
+    }
+    // 日期变了就说一句;和其它注入一样只追加到末尾。
+    if (facts.date) {
+      const note = dateNote(log.events);
+      if (note) {
+        log.append({ type: "decision", at: now(), slot: "facts", note: "date" });
+        log.append({ type: "user/message", at: now(), text: note });
+      }
     }
 
     // 请求事件:正文不落盘,它就是此刻的投影;记下规模与口径,检视器按需原样重建。
@@ -262,6 +278,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
       overflowRecovered = true;
       const progressed = await compactIfNeeded(deps, cfg, true);
       if (!progressed) throw err;
+      restatePlan(log, "compacted", steps);
       continue;
     }
     log.append({
@@ -283,6 +300,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
         tools,
         approve,
         execution,
+        facts,
         ...(signal && { signal }),
         ...(deps.agent && { origin: { agent: deps.agent } }),
       });
@@ -290,7 +308,15 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
     }
 
     // step 边界。审批等待发生在上面的执行阶段,此处才排队列 —— 留言永不落进确认窗口(硬规矩)。
+    // 计划久未更新且还有未完成项:复述一次,算作这一步边界的注入。
     let injected = steering("step") ? inject(log, "step", drainQueue("step")) : 0;
+    if (
+      turn.stopReason === "tool" &&
+      planReminder > 0 &&
+      stepsSincePlan(log.events) >= planReminder &&
+      restatePlan(log, "stale", steps)
+    )
+      injected += 1;
 
     if (turn.stopReason === "end") {
       if (injected === 0 && steering("turn")) injected = inject(log, "turn", drainQueue("turn"));
@@ -303,6 +329,15 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
       return { stopped: reason };
     }
   }
+}
+
+/** 把模型自己写的计划复述到末尾(有计划且有未完成项才复述)。决定先于内容落盘。返回是否复述了。 */
+function restatePlan(log: EventLog, reason: "compacted" | "stale", steps: number): boolean {
+  const plan = planState(log.events);
+  if (!plan || !planOpen(plan)) return false;
+  log.append({ type: "decision", at: now(), slot: "plan", reason, steps });
+  log.append({ type: "user/message", at: now(), text: planText(plan) });
+  return true;
 }
 
 /** 注入留言。决定先于内容落盘:检视器读到 decision 就知道随后几条 user/message 是插话而非新 turn。 */
@@ -409,6 +444,7 @@ async function executeCalls(
     tools: Tool[];
     approve: ApprovePolicy;
     execution: ExecutionPolicy;
+    facts: FactsConfig;
     signal?: AbortSignal;
     origin?: ApproveOrigin;
   },
@@ -451,7 +487,9 @@ async function executeCalls(
     const results = await Promise.all(items.map((p) => runOne(p, signal)));
     items.forEach((p, i) => {
       const r = results[i] as Executed;
-      appendResult(ctx.log, p.call, r.content, r.isError, r.durationMs);
+      // 事实附注贴在这条结果上:此前同样的失败有几次、这次比中位耗时慢多少。附注进日志,模型看到的就是它。
+      const content = annotateResult(ctx.log.events, p.call, r, ctx.facts);
+      appendResult(ctx.log, p.call, content, r.isError, r.durationMs);
     });
   };
 

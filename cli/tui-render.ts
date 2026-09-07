@@ -504,6 +504,13 @@ export function render(ctx: TuiContext, e: AgentEvent): void {
         ctx.note(c.faint(`· steering: injected ${e.injected} (${e.boundary} boundary)`));
       if (e.slot === "execution")
         ctx.note(c.faint(`· parallel: ${e.parallel} calls at once: ${e.tools.join(", ")}`));
+      if (e.slot === "plan")
+        ctx.note(
+          c.faint(
+            `· plan restated ${e.reason === "compacted" ? "after compaction" : `after ${e.steps} steps without an update`}`,
+          ),
+        );
+      if (e.slot === "facts") ctx.note(c.faint(`· ${e.note} changed; told the model`));
       break;
     case "request/error":
       renderRequestError(ctx, e);

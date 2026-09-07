@@ -121,6 +121,8 @@ const agent = new Agent({
   provider: choice.provider,
   tools,
   compaction,
+  ...(args.facts && { facts: args.facts }),
+  ...(args.planReminder !== undefined && { planReminder: args.planReminder }),
   // 一次性模式没有人在旁边点头:--approve ask 等于全部拒绝,模型会收到"用户拒绝"的结果。
   slots: {
     ...ext.slots,

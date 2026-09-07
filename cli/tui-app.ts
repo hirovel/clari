@@ -136,6 +136,10 @@ export type TuiAppDeps = {
   foldLines?: number;
   /** 每个工具的结果可见度;没写的按 DEFAULT_RESULT_VIEWS,再没有按 head。 */
   results?: Record<string, ResultView>;
+  /** 事实附注开关;缺省全开。 */
+  facts?: { repeats?: boolean; slow?: boolean; date?: boolean };
+  /** 计划复述的步数;缺省 8,0 = 从不。 */
+  planReminder?: number;
   /** 账簿保持展开的最新步数;缺省 3,0 = 从不自动折。 */
   foldSteps?: number;
   /** 屏幕模式:alt(缺省)备用屏,main 主屏。 */
@@ -311,6 +315,8 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     compaction,
     onRaw: (line) => ctx.onRaw(line),
     ...(deps.effort && { effort: deps.effort }),
+    ...(deps.facts && { facts: deps.facts }),
+    ...(deps.planReminder !== undefined && { planReminder: deps.planReminder }),
     slots: { ...deps.slots },
     onDelta: (d) => streamDelta(ctx, d),
     onReasoning: (d) => streamReasoning(ctx, d),

@@ -23,6 +23,10 @@ export function formatArgs(args: unknown): string {
     return `${osc8(shown, fileUrl(a.path))}${range}`;
   } else if (typeof a.task === "string") {
     s = `${a.scope ? `scope=${a.scope}  ` : ""}${brief(a.task)}`;
+  } else if (Array.isArray(a.items)) {
+    const items = a.items as { status?: string }[];
+    const done = items.filter((i) => i.status === "done").length;
+    s = `${items.length} step${items.length === 1 ? "" : "s"} · ${done} done`;
   } else s = JSON.stringify(args) ?? "";
   return s.length > 160 ? `${s.slice(0, 160)}…` : s;
 }
@@ -54,6 +58,18 @@ export function toolCallDetail(name: string, args: unknown): string {
     const all = a.content.split("\n");
     lines = all.slice(0, 12).map((l) => ADD(`+ ${l}`));
     if (all.length > 12) lines.push(c.faint(`… ${all.length} lines total`));
+  } else if (name === "plan" && Array.isArray(a.items)) {
+    // 计划整张可见:进行中的是墨色,其余淡色。
+    const MARK: Record<string, string> = {
+      pending: "[ ]",
+      in_progress: "[>]",
+      done: "[x]",
+      cancelled: "[-]",
+    };
+    lines = (a.items as { text?: string; status?: string }[]).map((it, i) => {
+      const line = `${MARK[it.status ?? "pending"] ?? "[ ]"} ${i + 1}. ${it.text ?? ""}`;
+      return it.status === "in_progress" ? c.ink(line) : c.faint(line);
+    });
   }
   if (lines.length === 0) return "";
   if (lines.length > DETAIL_MAX_LINES) {

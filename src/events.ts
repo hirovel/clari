@@ -168,6 +168,10 @@ export type AgentEvent =
       injected: number;
     }
   | { type: "decision"; at: string; slot: "termination"; steps: number; reason: string }
+  /** 计划复述:随后的 user/message 是模型自己写的计划,harness 在压缩之后或它久未更新时贴到末尾。 */
+  | { type: "decision"; at: string; slot: "plan"; reason: "compacted" | "stale"; steps: number }
+  /** 事实附注以独立消息注入(目前只有日期变化);贴在工具结果里的附注不记决策,结果本身就是记录。 */
+  | { type: "decision"; at: string; slot: "facts"; note: "date" }
   /** 执行槽把一批工具调用并行跑了(只在并行策略下、且批内多于一个调用时记)。 */
   | { type: "decision"; at: string; slot: "execution"; parallel: number; tools: string[] }
   /**

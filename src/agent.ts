@@ -18,6 +18,8 @@ export type AgentOptions = {
   effort?: EffortLevel;
   /** 这个 agent 的名字(子 agent 用);审批提示据此标明是谁在问。 */
   agent?: string;
+  facts?: TurnDeps["facts"];
+  planReminder?: number;
 };
 
 /** 留言的投递方式:steer = 下一个步边界就注入(缺省);followUp = 等模型把手头的事做完再给。 */
@@ -143,6 +145,8 @@ export class Agent {
       ...(this.opts.onRaw && { onRaw: this.opts.onRaw }),
       effort: () => this.opts.effort,
       ...(this.opts.agent && { agent: this.opts.agent }),
+      ...(this.opts.facts && { facts: this.opts.facts }),
+      ...(this.opts.planReminder !== undefined && { planReminder: this.opts.planReminder }),
     });
     try {
       return await this.active;
