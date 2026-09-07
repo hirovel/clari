@@ -63,7 +63,7 @@ describe("/slots 与切换命令", () => {
         { text: "second", toolCalls: [], stopReason: "end" },
       ]),
     );
-    await app.command("/slots");
+    await app.command("/inspect slots");
     let doc = text();
     expect(doc).toContain("execution     sequential");
     expect(doc).toContain("compaction    llm");
@@ -73,7 +73,7 @@ describe("/slots 与切换命令", () => {
     await app.submit("go");
     expect(log.events.some((e) => e.type === "decision" && e.slot === "execution")).toBe(false);
 
-    await app.command("/execution parallel");
+    await app.command("/set execution parallel");
     expect(log.events.at(-1)).toMatchObject({
       type: "session/slot",
       slot: "execution",
@@ -85,14 +85,14 @@ describe("/slots 与切换命令", () => {
     expect(decisions).toHaveLength(1);
     expect(decisions[0]).toMatchObject({ parallel: 2 });
 
-    await app.command("/steering turn");
+    await app.command("/set steering turn");
     expect(app.agent.slots.steering).toBeDefined();
     expect(log.events.at(-1)).toMatchObject({
       type: "session/slot",
       slot: "steering",
       value: "turn",
     });
-    await app.command("/slots");
+    await app.command("/inspect slots");
     doc = text();
     expect(doc).toContain("steering      turn");
     expect(doc).toContain("execution     parallel");
@@ -101,9 +101,9 @@ describe("/slots 与切换命令", () => {
 
   it("参数校验:非法值给用法;运行中拒绝;/compaction clear 换策略且 /compact 用它;/compaction manual 关自动", async () => {
     const { app, log, text } = boot(scripted([]));
-    await app.command("/execution sideways");
+    await app.command("/set execution sideways");
     expect(text()).toContain("Usage: /execution sequential|parallel");
-    await app.command("/preservation ratio 3");
+    await app.command("/set preservation ratio 3");
     expect(text()).toContain("ratio must be between 0 and 1");
 
     // 造几条工具结果,让 clear 策略有东西可清
@@ -124,7 +124,7 @@ describe("/slots 与切换命令", () => {
         isError: false,
       });
     }
-    await app.command("/compaction clear");
+    await app.command("/set compaction clear");
     expect(log.events.at(-1)).toMatchObject({
       type: "session/slot",
       slot: "compaction",
@@ -135,7 +135,7 @@ describe("/slots 与切换命令", () => {
     expect(comp?.type).toBe("compaction");
     expect(comp?.type === "compaction" && comp.strategy).toContain("clearToolResults");
 
-    await app.command("/compaction manual");
+    await app.command("/set compaction manual");
     expect(log.events.at(-1)).toMatchObject({
       type: "session/slot",
       slot: "compaction",
@@ -143,7 +143,7 @@ describe("/slots 与切换命令", () => {
     });
     expect(text()).toContain("compaction → trigger manual");
 
-    await app.command("/compaction ./does-not-exist.mjs");
+    await app.command("/set compaction ./does-not-exist.mjs");
     expect(text()).toContain("✗");
     app.stop();
   });

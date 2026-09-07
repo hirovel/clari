@@ -154,11 +154,11 @@ describe("界面命令", () => {
     await a.command("/edit 1 reasoning x");
     expect(text(a)).toContain("event #1 has no field reasoning");
 
-    await a.command("/drop 2 走错方向");
+    await a.command("/edit drop 2 走错方向");
     expect(log.events.at(-1)).toMatchObject({ type: "context/drop", target: 2, note: "走错方向" });
     expect(text(a)).toContain("· dropped event #2 with its 1 tool results");
 
-    await a.command("/edits");
+    await a.command("/edit list");
     doc = text(a);
     expect(doc).toContain("edit #2.reasoning");
     expect(doc).toContain("drop #2");

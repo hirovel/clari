@@ -135,7 +135,12 @@ export type SlotState = {
   state: Record<string, string>;
   /** 工具描述风格的当前形态:风格加逐工具覆盖。 */
   toolPrompts: ToolPromptsConfig;
+  /** 本会话关掉的工具(/tools、配置 tools.disable);关掉的不随请求发出。 */
+  disabledTools: Set<string>;
 };
+
+/** 换会话的目标:新建、从这里分叉、恢复另一个文件。由入口实现(停掉当前界面,换日志再起)。 */
+export type SessionTarget = { kind: "new" } | { kind: "resume"; file: string };
 
 export type TuiContext = {
   deps: TuiAppDeps;
@@ -171,6 +176,8 @@ export type TuiContext = {
     component: Component | undefined;
     open(component: Component): void;
     close(): void;
+    /** 一条命令弹出选单时叫一声,命令就此返回;由 command 设置与清除。 */
+    onOpen?: (() => void) | undefined;
   };
   inspector: {
     view: RequestInspector;

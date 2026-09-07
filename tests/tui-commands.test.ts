@@ -109,7 +109,7 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
   it("/help 与 /context 输出", async () => {
     const { app } = boot(scripted([]));
     await app.command("/help");
-    await app.command("/context");
+    await app.command("/inspect usage");
     const doc = text(app);
     expect(doc).toContain("/compact");
     expect(doc).toContain("/model");
@@ -153,11 +153,7 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
     expect(text(app)).toContain("model switched to big-model");
     expect(app.agent.provider.model).toBe("big-model");
 
-    await app.command("/key deepseek sk-123");
-    expect(calls).toContain("key:deepseek:sk-123");
-    expect(text(app)).toContain("key for deepseek saved to the credentials file");
-
-    await app.command("/default");
+    await app.command("/model default");
     expect(calls).toContain("default:other/big-model");
     app.stop();
   });
@@ -189,16 +185,16 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
     expect(app.inspector.isOpen()).toBe(false);
     expect(app.inspector.lines(100)).toEqual([]);
     // 命令入口同样可用
-    await app.command("/inspect");
+    await app.command("/inspect requests");
     expect(app.inspector.isOpen()).toBe(true);
     term.feed("\x12");
     expect(app.inspector.isOpen()).toBe(false);
     // /events 直接进事件视图,/compactions 直接进压缩对照
-    await app.command("/events");
+    await app.command("/inspect events");
     expect(app.inspector.isOpen()).toBe(true);
     expect(app.inspector.lines(100).map(stripAnsi).join("\n")).toContain("Events");
     app.inspector.close();
-    await app.command("/compactions");
+    await app.command("/inspect compactions");
     expect(app.inspector.lines(100).map(stripAnsi).join("\n")).toContain("Compactions");
     app.inspector.close();
     app.stop();
@@ -227,23 +223,27 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
       onExit: () => {},
       effortLevels: ["low", "high"],
     });
-    await app.command("/effort");
-    expect(text(app)).toContain("Effort not set");
-    await app.command("/effort xhigh");
+    await app.command("/set effort");
+    // 无参数:弹值选单,当前值标 current;Esc 关闭
+    expect(app.dialogLines().map(stripAnsi).join("\n")).toContain("auto");
+    expect(app.dialogLines().map(stripAnsi).join("\n")).toContain("current");
+    app.dialogInput("\x1b");
+    expect(app.dialogLines()).toEqual([]);
+    await app.command("/set effort xhigh");
     let doc = text(app);
-    expect(doc).toContain("· effort set to xhigh");
+    expect(doc).toContain("· effort xhigh from the next request");
     expect(doc).toContain("clamped down when sending");
     expect(doc).toContain("· effort xhigh");
     await app.submit("x");
     expect(seen).toEqual(["xhigh"]);
     const req = log.events.find((e) => e.type === "request");
     expect(req).toMatchObject({ type: "request", effort: "xhigh" });
-    await app.command("/effort auto");
+    await app.command("/set effort auto");
     doc = text(app);
     expect(doc).toContain("· effort omitted again");
     await app.submit("y");
     expect(seen).toEqual(["xhigh", undefined]);
-    await app.command("/effort ultra");
+    await app.command("/set effort ultra");
     expect(text(app)).toContain('unknown level "ultra"');
     app.stop();
   });
@@ -265,7 +265,7 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
       setDefault: () => {},
     };
     const { app } = boot(provider, settings);
-    await app.command("/models");
+    await app.command("/model list");
     // 结果是一个列表选择器:配置里的标 ✓/✗,服务器上多出来的不可选
     const dlg = app.dialogLines().map(stripAnsi).join("\n");
     expect(dlg).toContain("server 2 · configured 2");
@@ -464,30 +464,30 @@ describe("命令的分支", () => {
         ],
       },
     });
-    await app.command("/raw");
-    expect(doc(app)).toContain("Usage: /raw N  (1..0); raw capture is off (--no-trace)");
-    await app.command("/raw 3");
+    await app.command("/inspect raw");
+    expect(doc(app)).toContain("no requests yet");
+    await app.command("/inspect raw 3");
     expect(doc(app)).toContain("No request #3 (0 so far)");
-    await app.command("/sessions");
+    await app.command("/inspect sessions");
     expect(doc(app)).toContain(`No sessions in ${tmp}/`);
     writeFileSync(
       join(tmp, "2026-09-01T00-00-00-000Z.jsonl"),
       `${JSON.stringify({ type: "session/start", at: "2026-09-01T00:00:00.000Z", model: "p/m", system: "" })}\n`,
     );
-    await app.command("/sessions");
+    await app.command("/inspect sessions");
     expect(doc(app)).toContain("1 most recent in");
     expect(doc(app)).toContain("2026-09-01 00:00");
-    await app.command("/mcp");
+    await app.command("/inspect mcp");
     const d = doc(app);
     expect(d).toContain("MCP 2 servers");
     expect(d).toContain("✓ s1");
     expect(d).toContain("✗ s2");
     expect(d).toContain("boom");
-    await app.command("/fields");
+    await app.command("/inspect fields");
     expect(doc(app)).toContain("known but ignored");
     expect(doc(app)).toContain("logprobs");
     await app.submit("go");
-    await app.command("/raw 1");
+    await app.command("/inspect raw 1");
     expect(app.inspector.isOpen()).toBe(true);
     app.inspector.close();
     app.stop();
@@ -496,13 +496,12 @@ describe("命令的分支", () => {
   it("没有 settings 时 /model /key /default 都说明;/key 用法;/models 供应商不支持;/mcp 无服务器;/fields 无表", async () => {
     const { app } = bootB(scriptedB([]));
     await app.command("/model");
-    await app.command("/key");
-    await app.command("/default");
-    await app.command("/models");
-    await app.command("/mcp");
-    await app.command("/fields");
+    await app.command("/model default");
+    await app.command("/model list");
+    await app.command("/inspect mcp");
+    await app.command("/inspect fields");
     const d = doc(app);
-    expect(d.match(/settings interface not configured/g)?.length).toBe(3);
+    expect(d.match(/settings interface not configured/g)?.length).toBe(2);
     expect(d).toContain("this provider cannot list models");
     expect(d).toContain("No MCP servers");
     expect(d).toContain("this provider has no field table");
@@ -538,7 +537,7 @@ describe("命令的分支", () => {
       },
       log,
     );
-    await app.command("/prompt");
+    await app.command("/inspect prompt");
     let d = doc(app);
     expect(d).toContain("2 sections");
     expect(d).toContain("role");
@@ -547,12 +546,12 @@ describe("命令的分支", () => {
     expect(d).toContain("memory: off");
     await app.command("/compact");
     expect(doc(app)).toContain("compaction failed: no summary today");
-    await app.command("/fork 0");
-    expect(doc(app)).toContain("Usage: /fork or /fork N");
-    await app.command("/fork");
+    await app.command("/session fork 0");
+    expect(doc(app)).toContain("Usage: /session fork [N]");
+    await app.command("/session fork");
     d = doc(app);
     expect(d).toContain("forked: first 1 events");
-    await app.command("/fork 2");
+    await app.command("/session fork 2");
     expect(doc(app)).toContain("forked: first 2 events");
     await app.command("/nothing");
     expect(doc(app)).toContain("unknown command /nothing");
@@ -575,7 +574,11 @@ describe("命令的分支", () => {
     expect(doc(off.app)).toContain("memory is off");
     off.app.stop();
     const { app } = bootB(scriptedB([]), { memory: { project, user } });
+    // 无参数弹选单:show · forget · clear;打字 show 直接列
     await app.command("/memory");
+    expect(app.dialogLines().map(plain).join("\n")).toContain("forget");
+    app.dialogInput("\x1b");
+    await app.command("/memory show");
     let d = doc(app);
     expect(d).toContain("Memory 2 entries");
     expect(d).toContain("likes short answers");
@@ -587,7 +590,7 @@ describe("命令的分支", () => {
     await app.command("/memory clear");
     d = doc(app);
     expect(d).toContain("cleared 1 memories");
-    await app.command("/memory");
+    await app.command("/memory show");
     expect(doc(app)).toContain("no memories");
     app.stop();
   });
@@ -596,35 +599,39 @@ describe("命令的分支", () => {
 describe("槽命令的分支", () => {
   it("/preservation 三种输入;/approve 的 allow/deny/forget/outside 与用法;运行中拒绝", async () => {
     const { app, log } = bootB(scriptedB([]));
-    await app.command("/preservation tokens 5000");
+    await app.command("/set preservation tokens 5000");
     expect(doc(app)).toContain("preservation → tokens 5000");
     expect(log.events.at(-1)).toMatchObject({
       slot: "preservation",
       value: "keepRecentTokens(5000)",
     });
-    await app.command("/preservation ratio 0.3");
+    await app.command("/set preservation ratio 0.3");
     expect(log.events.at(-1)).toMatchObject({ value: "keepRatio(0.3)" });
-    await app.command("/preservation ratio 3");
+    await app.command("/set preservation ratio 3");
     expect(doc(app)).toContain("ratio must be between 0 and 1");
-    await app.command("/preservation lots");
+    await app.command("/set preservation lots");
     expect(doc(app)).toContain("Usage: /preservation tokens 20000 | ratio 0.3");
-    await app.command("/approve");
-    expect(doc(app)).toContain("approve all");
-    await app.command("/approve allow");
+    await app.command("/set approve");
+    // 无值:审批选单,模式、规则、cwd 之外
+    const menu = app.dialogLines().map(plain).join("\n");
+    expect(menu).toContain("policy");
+    expect(menu).toContain("allow a rule");
+    app.dialogInput("\x1b");
+    await app.command("/set approve allow");
     expect(doc(app)).toContain("Usage: /approve allow <rule>");
-    await app.command("/approve allow bash:git *");
+    await app.command("/set approve allow bash:git *");
     expect(doc(app)).toContain("approve → allow bash:git *");
-    await app.command("/approve deny bash:rm *");
-    await app.command("/approve outside allow");
+    await app.command("/set approve deny bash:rm *");
+    await app.command("/set approve outside allow");
     expect(doc(app)).toContain("approve → outside cwd allow");
-    await app.command("/approve outside sideways");
+    await app.command("/set approve outside sideways");
     expect(doc(app)).toContain("Usage: /approve outside ask|allow|deny");
-    await app.command("/approve forget");
+    await app.command("/set approve forget");
     expect(doc(app)).toContain("Usage: /approve forget <rule>");
-    await app.command("/approve forget bash:git *");
+    await app.command("/set approve forget bash:git *");
     expect(doc(app)).toContain("approve → forget bash:git *");
-    await app.command("/approve bogus");
-    await app.command("/slots");
+    await app.command("/set approve bogus");
+    await app.command("/inspect slots");
     const d = doc(app);
     expect(d).toContain("policy:");
     expect(d).toContain("bash:rm *");
@@ -651,25 +658,28 @@ describe("槽命令的分支", () => {
     });
     const { app, log } = bootB(scriptedB([]), { tools: [read], toolPrompts: { style: "brief" } });
     process.env.CLARI_EDITOR = `node "${append}"`;
-    await app.command("/toolprompts edit read");
+    await app.command("/set toolprompts edit read");
     expect(read.description.endsWith("EDITED")).toBe(true);
     expect(doc(app)).toContain("toolPrompts → edit read");
     expect(log.events.at(-1)).toMatchObject({ slot: "toolPrompts", value: "brief, edited: read" });
-    await app.command("/toolprompts");
-    expect(doc(app)).toContain("edited by you: read");
-    await app.command("/toolprompts save");
+    await app.command("/set toolprompts");
+    expect(app.dialogLines().map(plain).join("\n")).toContain("edit");
+    app.dialogInput("\x1b");
+    await app.command("/inspect slots");
+    expect(doc(app)).toContain("edited: read");
+    await app.command("/set toolprompts save");
     const saved = JSON.parse(readFileSync(DEFAULT_CONFIG_PATH, "utf8")) as {
       toolPrompts?: { style: string; descriptions?: Record<string, string> };
     };
     expect(saved.toolPrompts?.style).toBe("brief");
     expect(saved.toolPrompts?.descriptions?.read?.endsWith("EDITED")).toBe(true);
-    await app.command("/toolprompts reset read");
+    await app.command("/set toolprompts reset read");
     expect(read.description).not.toContain("EDITED");
     expect(doc(app)).toContain("toolPrompts → reset read");
     process.env.CLARI_EDITOR = `node "${noop}"`;
-    await app.command("/toolprompts edit read");
+    await app.command("/set toolprompts edit read");
     expect(doc(app)).toContain("unchanged, cancelled");
-    await app.command("/toolprompts edit");
+    await app.command("/set toolprompts edit");
     expect(doc(app)).toContain("no tool named ?");
     app.stop();
   });

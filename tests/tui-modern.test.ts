@@ -116,6 +116,10 @@ describe("通知、标题、剪贴板、链接", () => {
     expect(app.lines(100).map(stripAnsi).join("\n")).toContain("nothing to copy yet");
     await app.submit("go");
     await app.command("/copy");
+    // 回复里有代码块:先选整条回复还是某个代码块
+    expect(stripAnsi(app.dialogLines().join("\n"))).toContain("block 1");
+    app.dialogInput("\r");
+    await new Promise((r) => setTimeout(r, 5));
     const b64 = Buffer.from("hello there\n\n```ts\nconst a = 1;\n```\n\ndone").toString("base64");
     expect(term.raw.join("")).toContain(`\x1b]52;c;${b64}\x07`);
     await app.command("/copy 1");

@@ -93,11 +93,11 @@ describe("Ctrl+K", () => {
     expect(app.dialogLines()).toEqual([]);
 
     term.feed("\x0b");
-    for (const ch of "/rewind") app.dialogInput(ch);
+    for (const ch of "/edit") app.dialogInput(ch);
     app.dialogInput("\r");
-    expect(plain(app.lines(110))).not.toContain("Usage: /rewind");
-    // 输入框里现在是 "/rewind ",等用户补事件号
-    app.dialogInput("x"); // 面板已关,这一键落空
+    // 有次级选项的命令直接弹它的选单
+    expect(plain(app.dialogLines())).toContain("retry");
+    app.dialogInput("\x1b");
     term.feed("\x0b");
     for (const ch of "/help") app.dialogInput(ch);
     app.dialogInput("\r");

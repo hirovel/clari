@@ -105,29 +105,32 @@ describe("/toolprompts", () => {
       onExit: () => {},
     });
     const text = () => app.lines(120).map(plain).join("\n");
-    await app.command("/toolprompts");
+    await app.command("/set toolprompts");
+    // 无值弹选单:三档加 save / edit / reset,当前档标 current
+    const menu = app.dialogLines().map(plain).join("\n");
+    expect(menu).toContain("explain");
+    expect(menu).toContain("current");
+    expect(menu).toContain("rules");
+    app.dialogInput("\x1b");
     let doc = text();
-    expect(doc).toContain("● explain");
-    expect(doc).toContain("○ brief");
-    expect(doc).toContain("○ rules");
-    await app.command("/toolprompts brief");
+    await app.command("/set toolprompts brief");
     expect(read.description).toBe("Read core.");
     expect(log.events.at(-1)).toMatchObject({
       type: "session/slot",
       slot: "toolPrompts",
       value: "brief",
     });
-    await app.command("/slots");
+    await app.command("/inspect slots");
     expect(text()).toContain("toolPrompts   brief");
-    await app.command("/toolprompts reset read");
+    await app.command("/set toolprompts reset read");
     expect(text()).toContain("read is not edited");
-    await app.command("/toolprompts reset nope");
+    await app.command("/set toolprompts reset nope");
     expect(text()).toContain("no tool named nope");
-    await app.command("/toolprompts loud");
+    await app.command("/set toolprompts loud");
     doc = text();
     expect(doc).toContain("Usage: /toolprompts brief|explain|rules");
-    await app.command("/tools");
-    expect(text()).toContain("style brief");
+    await app.command("/inspect tools");
+    expect(text()).toContain("level brief");
     app.stop();
   });
 });

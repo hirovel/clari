@@ -204,7 +204,7 @@ describe("界面里的技能", () => {
     expect(user?.type === "user/message" && user.text).toContain('Skill "deploy"');
     expect(plain(app.lines(110).join("\n"))).toContain("skill /deploy");
 
-    await app.command("/skills");
+    await app.command("/inspect skills");
     const doc = plain(app.lines(110).join("\n"));
     expect(doc).toContain("/deploy");
     expect(doc).toContain("allowed-tools: bash read");

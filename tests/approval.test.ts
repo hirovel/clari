@@ -148,7 +148,7 @@ describe("界面:策略提示、r 附理由、/approve 规则", () => {
     expect((denied as { content: string }).content).toBe("The user denied this call: not now");
     expect(plain(app.lines(120).join("\n"))).toContain("· approve: denied echo: not now");
 
-    await app.command("/approve allow echo");
+    await app.command("/set approve allow echo");
     const slot = log.events.at(-1);
     expect(slot).toMatchObject({ type: "session/slot", slot: "approve" });
     expect((slot as { value: string }).value).toContain("echo");
@@ -156,8 +156,9 @@ describe("界面:策略提示、r 附理由、/approve 规则", () => {
     const results = log.events.filter((e) => e.type === "tool/result");
     expect(results).toHaveLength(2);
     expect((results[1] as { content: string; isError: boolean }).isError).toBe(false);
-    await app.command("/approve");
-    expect(plain(app.lines(120).join("\n"))).toContain("approve policy");
+    await app.command("/set approve");
+    expect(plain(app.dialogLines().join("\n"))).toContain("now policy");
+    app.dialogInput("\x1b");
     app.stop();
   });
 });

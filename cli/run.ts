@@ -97,7 +97,7 @@ const baseTools = buildTools(
 const tools = [
   ...baseTools.filter((t) => !ext.tools?.some((x) => x.name === t.name)),
   ...(ext.tools ?? []),
-];
+].filter((t) => !args.disabledTools?.includes(t.name));
 // MCP 服务器:一次性模式也连,跑完关。
 const mcpCfg = mcpConfigOf(boot.config.mcp);
 const mcpServers = loadMcpServers(mcpCfg, process.cwd());

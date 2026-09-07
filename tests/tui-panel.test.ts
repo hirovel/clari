@@ -218,16 +218,16 @@ describe("上下文面板的动作与后果", () => {
 
     // 命令:编辑 #1 的 content,再 compare 与 restore;rewind 到 #1 丢掉之后的三条。
     await app.command("/edit 1 content first (edited)");
-    await app.command("/compare 1");
+    await app.command("/edit compare 1");
     doc = plain(app.lines(120).join("\n"));
     expect(doc).toContain("#1.content  original 5 chars → current 14 chars");
     expect(doc).toContain("- first");
     expect(doc).toContain("+ first (edited)");
-    await app.command("/restore 1");
+    await app.command("/edit restore 1");
     const restore = log.events.at(-1);
     expect(restore?.type).toBe("context/edit");
     expect((restore as { value: string }).value).toBe("first");
-    await app.command("/rewind 1");
+    await app.command("/edit rewind 1");
     const drops = log.events.filter((e) => e.type === "context/drop");
     expect(drops.map((e) => (e as { target: number }).target)).toEqual([3, 4, 6]);
     doc = plain(app.lines(120).join("\n"));
@@ -322,7 +322,7 @@ describe("/retry 与面板的 drop、fork", () => {
     );
     await app.submit("q");
     expect(doc(app)).toContain("first answer");
-    await app.command("/retry");
+    await app.command("/edit retry");
     expect(doc(app)).toContain("second answer");
     expect(log.events.some((e) => e.type === "context/drop")).toBe(true);
     // 面板:最后一条(用户消息 q 之后是助手回复)→ Enter 出菜单 → ↓↓ 到 Drop → Enter

@@ -260,7 +260,8 @@ export function editsList(ctx: TuiContext): string {
   const rows = ctx.log.events
     .map((e, i) => ({ e, i }))
     .filter(({ e }) => e.type === "context/edit" || e.type === "context/drop");
-  if (rows.length === 0) return c.faint("No edits. /edit N changes a message, /drop N drops one");
+  if (rows.length === 0)
+    return c.faint("No edits. /edit N changes a message, /edit drop N drops one");
   return rows
     .map(({ e, i }) =>
       e.type === "context/edit"

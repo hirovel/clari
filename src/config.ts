@@ -129,6 +129,8 @@ export type Preset = {
   facts?: { repeats?: boolean; slow?: boolean; date?: boolean };
   /** plan 工具总开关:关了定义不发(每次请求省 170–250 token)、复述不做。缺省开。 */
   plan?: boolean;
+  /** 工具集:disable 列出的内置工具不装(/tools 在会话里还能开关)。 */
+  tools?: { disable?: string[] };
   /** 计划复述:连续这么多步没碰 plan 且还有未完成项就把计划贴到末尾;0 = 从不。缺省 8。 */
   planReminder?: number;
   /** 账簿:保持展开的最新步数,更早的折成一行;缺省 3,0 = 从不自动折。 */

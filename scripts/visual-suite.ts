@@ -172,10 +172,10 @@ scene = "1";
   const { app } = boot(provider, { toolPrompts: { style: "explain" } });
   await app.submit("Why does the queue-mode test fail?");
   const shots = [...app.lines(W)];
-  await app.command("/toolprompts");
+  await app.command("/set toolprompts");
   shots.push(...divider("/toolprompts: three levels with token totals"), ...app.lines(W).slice(-14));
-  await app.command("/toolprompts brief");
-  await app.command("/tools");
+  await app.command("/set toolprompts brief");
+  await app.command("/inspect tools");
   await app.submit("Say one line.");
   shots.push(...divider("after /toolprompts brief: /tools with the new token totals"), ...app.lines(W).slice(-26));
   app.stop();
@@ -231,8 +231,8 @@ scene = "2";
   app.approvalInput("y");
   await run;
   shots.push(...divider("main screen after both approvals"), ...app.lines(W));
-  await app.command("/approve policy");
-  await app.command("/approve deny bash");
+  await app.command("/set approve policy");
+  await app.command("/set approve deny bash");
   run = app.submit("Now try a bash command.");
   await run;
   shots.push(...divider("policy mode: deny rule for bash, reason fed back to the model"), ...app.lines(W).slice(-16));
@@ -313,11 +313,11 @@ scene = "4";
   const shots: string[] = [];
   await app.submit("Read the README and tell me what this is.");
   shots.push(...divider("trigger = remind: past the threshold, the status bar asks for /compact"), ...app.lines(W));
-  await app.command("/compaction manual");
+  await app.command("/set compaction manual");
   await app.command("/compact keep the file names");
   shots.push(...divider("/compaction manual then /compact with an instruction"), ...app.lines(W).slice(-14));
   await app.submit("What did you keep?");
-  await app.command("/context");
+  await app.command("/inspect usage");
   shots.push(...divider("next request after compaction and /context"), ...app.lines(W).slice(-30));
   app.inspector.openCompactions();
   shots.push(...divider("Ctrl+R Tab Tab: compactions"), ...app.inspector.lines(W));
@@ -483,6 +483,47 @@ scene = "8";
   app.dialogInput("\x1b");
   app.stop();
   save("8-ledger", "8 Ledger: auto-folded steps, step cursor, context pulse, command palette", shots);
+}
+
+scene = "9";
+// ---------- 9 命令选单:次级选项都是选出来的 ----------
+{
+  const { app } = boot(scripted([{ text: "ok", toolCalls: [], stopReason: "end", usage: { inputTokens: 900, outputTokens: 12 } }]), {
+    settings: {
+      listModels: () => ["local-fake/fake-agent", "deepseek/deepseek-v4-pro"],
+      switchModel: () => { throw new Error("n/a"); },
+      setKey: () => {},
+      setDefault: () => {},
+    },
+  });
+  await app.submit("Say ok.");
+  const shots: string[] = [];
+  await app.command("/help");
+  shots.push(...divider("/help: thirteen commands in groups, then the keys"), ...app.lines(W).slice(-22));
+  await app.command("/inspect");
+  shots.push(...divider("/inspect: pick what to look at; each row says what it is and how many"), ...app.dialogLines());
+  app.dialogInput("\x1b");
+  await app.command("/set");
+  shots.push(...divider("/set: pick a slot; the row shows the current value"), ...app.dialogLines());
+  app.dialogInput("5");
+  app.dialogInput("\r");
+  await tick();
+  shots.push(...divider("then pick a value; the current one is marked"), ...app.dialogLines());
+  app.dialogInput("\x1b");
+  await app.command("/set approve");
+  shots.push(...divider("/set approve: modes, rules and the cwd boundary in one list"), ...app.dialogLines());
+  app.dialogInput("\x1b");
+  await app.command("/tools");
+  shots.push(...divider("/tools: Enter flips a tool on or off; the token cost of each definition is on the row"), ...app.dialogLines());
+  app.dialogInput("\x1b");
+  await app.command("/session");
+  shots.push(...divider("/session: new, fork, resume, list"), ...app.dialogLines());
+  app.dialogInput("\x1b");
+  await app.command("/model");
+  shots.push(...divider("/model: configured models, d makes one the default, the last row asks the provider"), ...app.dialogLines());
+  app.dialogInput("\x1b");
+  app.stop();
+  save("9-menus", "9 Command menus: inspect, set, tools, session, model", shots);
 }
 
 const index = [

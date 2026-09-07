@@ -81,6 +81,11 @@ export class Agent {
   }
 
   /** 会话中切换模型:下一次请求起生效;记一条只给人看的事件,审计时知道哪段由谁生成。 */
+  /** 换随请求发出的工具集(/tools 开关);下一次 turn 起生效。 */
+  setTools(tools: Tool[]): void {
+    this.opts.tools = tools;
+  }
+
   setProvider(provider: Provider): void {
     this.opts.provider = provider;
     this.opts.log.append({ type: "session/model", at: now(), model: provider.model });

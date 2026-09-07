@@ -55,7 +55,7 @@ import { c, editorTheme, G } from "./theme.js";
 import type { MemoryFiles } from "./tools/memory.js";
 import { Block, SplitLine } from "./tui-block.js";
 import { COMMANDS, command, openLogin, openPalette, submit } from "./tui-commands.js";
-import { FOLD_HEAD, RAW_LINE_CAP, type TuiContext } from "./tui-context.js";
+import { FOLD_HEAD, RAW_LINE_CAP, type SessionTarget, type TuiContext } from "./tui-context.js";
 import { contextAction } from "./tui-edit.js";
 import { brief, pct } from "./tui-format.js";
 import type { ProviderSummary } from "./tui-login.js";
@@ -180,6 +180,10 @@ export type TuiAppDeps = {
   preservationName?: string;
   /** 启动时没有可用的 provider(缺 key)的原因:界面先弹登录对话框。 */
   unavailable?: string;
+  /** 启动时关掉的工具(配置 tools.disable)。 */
+  disabledTools?: string[];
+  /** 换会话(/session new · fork · resume):由入口实现,停掉这个界面、换日志再起一个。 */
+  switchSession?: (target: SessionTarget) => void;
 };
 
 export type TuiApp = {
@@ -217,6 +221,8 @@ export type TuiApp = {
   openLogin(provider?: string): void;
   toggleFold(): void;
   toggleReasoning(): void;
+  /** 往对话流追加一行说明(入口层报错用)。 */
+  note(text: string): void;
   stop(): void;
 };
 
@@ -308,10 +314,12 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
 
   // ---------- Agent:界面是它的事件订阅者;流式增量走两个回调 ----------
   const approval = initialApproval(deps.approve);
+  // 关掉的工具(配置 tools.disable、/tools)不随请求发出;全表仍在 ctx.tools 里,开关随时可翻。
+  const disabledTools = new Set(deps.disabledTools ?? []);
   const agent = new Agent({
     log,
     provider: deps.provider,
-    tools,
+    tools: tools.filter((t) => !disabledTools.has(t.name)),
     compaction,
     onRaw: (line) => ctx.onRaw(line),
     ...(deps.effort && { effort: deps.effort }),
@@ -324,7 +332,9 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
 
   // ---------- 检视器 ----------
   const defs = (): ToolDef[] =>
-    tools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters }));
+    tools
+      .filter((t) => !ctx.slots.disabledTools.has(t.name))
+      .map((t) => ({ name: t.name, description: t.description, parameters: t.parameters }));
   const sessions = (): SessionSource[] => [
     { name: "main", events: log.events },
     ...ctx.children.views.map((v) => ({
@@ -415,6 +425,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
         style: deps.toolPrompts?.style ?? "explain",
         descriptions: { ...deps.toolPrompts?.descriptions },
       },
+      disabledTools,
     },
     children: { views: [], slots: new Map() },
     dialog: {
@@ -425,6 +436,8 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
         ctx.dialog.component = component;
         ctx.dialog.overlay = tui.showOverlay(component, { width: "100%", anchor: "bottom-left" });
         tui.requestRender();
+        // 命令层在等"选单开了"这个信号,好把控制权交回去。
+        ctx.dialog.onOpen?.();
       },
       close() {
         if (!ctx.dialog.overlay) return;
@@ -784,6 +797,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     slots: () => ctx.agent.slots,
     approvalLines: () => approval.prompt?.render() ?? [],
     approvalInput: (data) => approval.prompt?.handleInput(data),
+    note: (text) => ctx.note(text),
     dialogLines: () => ctx.dialog.component?.render(deps.terminal.columns) ?? [],
     dialogInput: (data) => ctx.dialog.component?.handleInput?.(data),
     openLogin: (provider) => openLogin(ctx, provider ? { provider } : {}),

@@ -287,13 +287,13 @@ describe("TUI /memory 与 /prompt", () => {
     const off = make(false);
     await off.command("/memory");
     expect(text(off)).toContain("memory is off. Start with --memory");
-    await off.command("/prompt");
+    await off.command("/inspect prompt");
     expect(text(off)).toContain("System prompt");
     expect(text(off)).toContain("memory: off");
     off.stop();
 
     const on = make(true);
-    await on.command("/memory");
+    await on.command("/memory show");
     const doc = text(on);
     expect(doc).toContain("Memory 2 entries");
     expect(doc).toContain("[correction] 2026-09-03 一");

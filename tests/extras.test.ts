@@ -121,7 +121,7 @@ describe("raw 缺省开;/raw N;/tools", () => {
       trace: true,
       onExit: () => {},
     });
-    await app.command("/tools");
+    await app.command("/inspect tools");
     let doc = plain(app.lines(120).join("\n"));
     expect(doc).toContain("Tools 1");
     expect(doc).toContain("echo");
@@ -134,9 +134,9 @@ describe("raw 缺省开;/raw N;/tools", () => {
     expect(doc).not.toContain("finish_reason");
     expect(doc).not.toContain("as received");
 
-    await app.command("/raw 9");
+    await app.command("/inspect raw 9");
     expect(plain(app.lines(120).join("\n"))).toContain("No request #9");
-    await app.command("/raw 1");
+    await app.command("/inspect raw 1");
     expect(app.inspector.isOpen()).toBe(true);
     const ins = plain(app.inspector.lines(120).join("\n"));
     expect(ins).toContain("Request #1");

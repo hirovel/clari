@@ -9,6 +9,7 @@
 //   --approve ask  每个工具调用在界面里问一次(y 允许 / n 拒绝 / a 本会话总是允许该工具);缺省 all 不问
 import { appendFileSync } from "node:fs";
 import { ProcessTerminal } from "@earendil-works/pi-tui";
+import type { EventLog } from "../src/log.js";
 import { queueToTurnEnd } from "../src/loop.js";
 import {
   beginSession,
@@ -18,6 +19,7 @@ import {
   DEFAULT_CONFIG_PATH,
   loadExtensions,
   memoryFiles,
+  openSession,
   parseCommonArgs,
   parsePreservation,
   RESERVE,
@@ -112,94 +114,128 @@ try {
 }
 const skills = discoverSkills(process.cwd());
 const toolPromptsCfg = resolveToolPrompts(args, boot.config);
-const baseTools = buildTools(
-  log,
-  first,
-  compaction,
-  args.subagent,
-  (child) => app?.attachChild(child),
-  memory,
-  args.skillsLoad === "tool" ? skills : undefined,
-  boot.config.fetch,
-  toolPromptsCfg,
-  {
-    ...(boot.config.subagents && { config: boot.config.subagents }),
-    slots: () => app?.slots(),
-    providerFor: (model) => boot.choose(model).provider,
-  },
-  { plan: args.plan ?? true },
-);
-// 扩展模块的工具重名时覆盖内置的。
-const tools = [
-  ...baseTools.filter((t) => !ext.tools?.some((x) => x.name === t.name)),
-  ...(ext.tools ?? []),
-];
-// MCP 服务器:启动时连接,工具原地追加到 tools;required 的失败即退出。
-const mcpCfg = mcpConfigOf(boot.config.mcp);
-const mcpServers = loadMcpServers(mcpCfg, process.cwd());
+const { resume: _resume, continue: _continue, ...promptArgs } = args;
+const sessionArgs = { ...promptArgs, continue: false };
+// MCP 工具在第一次连接时拿到,换会话时原样带过去(桥接进程不重连)。
+let mcpTools: Awaited<ReturnType<typeof buildTools>> = [];
 let mcp: McpBridge | undefined;
-if (mcpServers.length > 0) {
-  try {
-    mcp = await connectMcpServers(mcpServers, {
-      log,
-      tools,
-      artifactsDir: sessionFile.replace(/.jsonl$/, ".mcp"),
-      ...(mcpCfg && { mcp: mcpCfg }),
-    });
-  } catch (err) {
-    console.error((err as Error).message);
-    process.exit(1);
-  }
-}
-const traceFile = sessionFile.replace(/.jsonl$/, ".trace.jsonl");
 
-app = createTuiApp({
-  terminal: new ProcessTerminal(),
-  log,
-  provider: first.provider,
-  tools,
-  compaction,
-  reserveTokens: RESERVE,
-  info: {
-    model: first.model,
-    providerName: first.providerName,
-    sessionFile,
-    contextWindow: first.contextWindow,
-    ...(first.capabilitySource && { capabilitySource: first.capabilitySource }),
-  },
-  settings: boot.settings,
-  fold: args.fold,
-  ...(args.foldLines !== undefined && { foldLines: args.foldLines }),
-  ...(args.results && { results: args.results }),
-  ...(args.facts && { facts: args.facts }),
-  ...(args.planReminder !== undefined && { planReminder: args.planReminder }),
-  ...(args.foldSteps !== undefined && { foldSteps: args.foldSteps }),
-  ...(args.screen && { screen: args.screen }),
-  ...(args.notify && { notify: args.notify }),
-  trace: args.trace,
-  approve: resolveApproval(args, boot.config),
-  compactionName: args.compaction,
-  slots: {
-    ...ext.slots,
-    ...(args.execution && { execution: args.execution }),
-    ...(args.steering === "turn" && { steering: queueToTurnEnd }),
-  },
-  ...(args.preservation && { preservationName: parsePreservation(args.preservation).label }),
-  templates: discoverTemplates(),
-  skills,
-  sessionsDir: sessionDir,
-  ...(mcp && { mcp }),
-  toolPrompts: toolPromptsCfg,
-  onExit: () => {
-    void (mcp?.close() ?? Promise.resolve()).finally(() => process.exit(0));
-  },
-  ...(memory && { memory }),
-  ...(args.effort && { effort: args.effort }),
-  ...(first.effortLevels && { effortLevels: first.effortLevels }),
-  ...(first.price && { price: first.price }),
-  ...(first.unavailable && { unavailable: first.unavailable }),
-  ...(args.trace && {
-    onRaw: (requestIndex: number, line: string) =>
-      appendFileSync(traceFile, `${JSON.stringify({ request: requestIndex, line })}\n`),
-  }),
-});
+/** 起一个界面:按会话组装工具(task 工具绑定父日志)与 app。换会话就是停掉旧的再调一次。 */
+async function launch(current: { log: EventLog; sessionFile: string }): Promise<void> {
+  const { log, sessionFile } = current;
+  const baseTools = buildTools(
+    log,
+    first,
+    compaction,
+    args.subagent,
+    (child) => app?.attachChild(child),
+    memory,
+    args.skillsLoad === "tool" ? skills : undefined,
+    boot.config.fetch,
+    toolPromptsCfg,
+    {
+      ...(boot.config.subagents && { config: boot.config.subagents }),
+      slots: () => app?.slots(),
+      providerFor: (model) => boot.choose(model).provider,
+    },
+    { plan: args.plan ?? true },
+  );
+  // 扩展模块的工具重名时覆盖内置的。
+  const tools = [
+    ...baseTools.filter((t) => !ext.tools?.some((x) => x.name === t.name)),
+    ...(ext.tools ?? []),
+  ];
+  // MCP 服务器:第一次启动时连接,工具原地追加到 tools;required 的失败即退出。
+  if (mcp === undefined) {
+    const mcpCfg = mcpConfigOf(boot.config.mcp);
+    const mcpServers = loadMcpServers(mcpCfg, process.cwd());
+    if (mcpServers.length > 0) {
+      const before = tools.length;
+      try {
+        mcp = await connectMcpServers(mcpServers, {
+          log,
+          tools,
+          artifactsDir: sessionFile.replace(/.jsonl$/, ".mcp"),
+          ...(mcpCfg && { mcp: mcpCfg }),
+        });
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exit(1);
+      }
+      mcpTools = tools.slice(before);
+    }
+  } else tools.push(...mcpTools);
+  const traceFile = sessionFile.replace(/.jsonl$/, ".trace.jsonl");
+
+  app = createTuiApp({
+    terminal: new ProcessTerminal(),
+    log,
+    provider: first.provider,
+    tools,
+    compaction,
+    reserveTokens: RESERVE,
+    info: {
+      model: first.model,
+      providerName: first.providerName,
+      sessionFile,
+      contextWindow: first.contextWindow,
+      ...(first.capabilitySource && { capabilitySource: first.capabilitySource }),
+    },
+    settings: boot.settings,
+    fold: args.fold,
+    ...(args.foldLines !== undefined && { foldLines: args.foldLines }),
+    ...(args.results && { results: args.results }),
+    ...(args.facts && { facts: args.facts }),
+    ...(args.planReminder !== undefined && { planReminder: args.planReminder }),
+    ...(args.disabledTools && { disabledTools: args.disabledTools }),
+    ...(args.foldSteps !== undefined && { foldSteps: args.foldSteps }),
+    ...(args.screen && { screen: args.screen }),
+    ...(args.notify && { notify: args.notify }),
+    trace: args.trace,
+    approve: resolveApproval(args, boot.config),
+    compactionName: args.compaction,
+    slots: {
+      ...ext.slots,
+      ...(args.execution && { execution: args.execution }),
+      ...(args.steering === "turn" && { steering: queueToTurnEnd }),
+    },
+    ...(args.preservation && { preservationName: parsePreservation(args.preservation).label }),
+    templates: discoverTemplates(),
+    skills,
+    sessionsDir: sessionDir,
+    ...(mcp && { mcp }),
+    toolPrompts: toolPromptsCfg,
+    onExit: () => {
+      void (mcp?.close() ?? Promise.resolve()).finally(() => process.exit(0));
+    },
+    ...(memory && { memory }),
+    ...(args.effort && { effort: args.effort }),
+    ...(first.effortLevels && { effortLevels: first.effortLevels }),
+    ...(first.price && { price: first.price }),
+    ...(first.unavailable && { unavailable: first.unavailable }),
+    ...(args.trace && {
+      onRaw: (requestIndex: number, line: string) =>
+        appendFileSync(
+          traceFile,
+          `${JSON.stringify({ request: requestIndex, line })}
+`,
+        ),
+    }),
+    // 换会话:停掉这个界面,开或恢复另一份日志,再起一个;事件即真相,分叉就是复制前缀。
+    switchSession: (target) => {
+      let next: { log: EventLog; sessionFile: string };
+      try {
+        if (target.kind === "new")
+          next = beginSession(sessionArgs, first, process.cwd(), sessionDir);
+        else next = openSession({ resume: target.file, continue: false }, sessionDir);
+      } catch (err) {
+        app?.note((err as Error).message);
+        return;
+      }
+      app?.stop();
+      void launch(next);
+    },
+  });
+}
+
+await launch({ log, sessionFile });
