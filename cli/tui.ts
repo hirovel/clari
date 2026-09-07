@@ -127,6 +127,7 @@ const baseTools = buildTools(
     slots: () => app?.slots(),
     providerFor: (model) => boot.choose(model).provider,
   },
+  { plan: args.plan ?? true },
 );
 // 扩展模块的工具重名时覆盖内置的。
 const tools = [

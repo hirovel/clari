@@ -92,6 +92,7 @@ const baseTools = buildTools(
     slots: () => agent.slots,
     providerFor: (model) => boot.choose(model).provider,
   },
+  { plan: args.plan ?? true },
 );
 const tools = [
   ...baseTools.filter((t) => !ext.tools?.some((x) => x.name === t.name)),

@@ -231,6 +231,8 @@ export function buildTools(
     slots?: () => TurnDeps["slots"] | undefined;
     providerFor?: (model: string) => Provider;
   },
+  /** 总开关:plan 工具(配置 plan;缺省开)。关了定义不发、复述不做。 */
+  opts: { plan?: boolean } = {},
 ): Tool[] {
   // 每次组装复制一份工具对象:描述风格槽原地改描述,不能碰模块级单例。
   const base: Tool[] = [
@@ -241,7 +243,7 @@ export function buildTools(
     grepTool,
     globTool,
     createFetchTool({ ...(fetchConfig && { config: fetchConfig }) }),
-    planTool,
+    ...((opts.plan ?? true) ? [planTool] : []),
   ].map((t) => ({ ...t }));
   applyToolPrompts(base, toolPrompts);
   if (memory) base.push(createRememberTool(memory));

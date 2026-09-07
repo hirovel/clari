@@ -127,6 +127,8 @@ export type Preset = {
   results?: Record<string, ResultView>;
   /** 事实附注:repeats 同样参数的重复失败,slow 比中位耗时慢得多的调用,date 日期变化。缺省全开。 */
   facts?: { repeats?: boolean; slow?: boolean; date?: boolean };
+  /** plan 工具总开关:关了定义不发(每次请求省 170–250 token)、复述不做。缺省开。 */
+  plan?: boolean;
   /** 计划复述:连续这么多步没碰 plan 且还有未完成项就把计划贴到末尾;0 = 从不。缺省 8。 */
   planReminder?: number;
   /** 账簿:保持展开的最新步数,更早的折成一行;缺省 3,0 = 从不自动折。 */
@@ -232,6 +234,7 @@ export const CONFIG_TEMPLATE: KernelConfig = {
       bash: "tail",
     },
     facts: { repeats: true, slow: true, date: true },
+    plan: true,
     planReminder: 8,
     foldSteps: 3,
     screen: "alt",
