@@ -79,7 +79,7 @@ describe("事件一句话", () => {
     const s = (i: number) => stripAnsi(eventSummary(e, i).text);
     expect(s(0)).toContain("system prompt · m · 1 sections");
     expect(s(1)).toBe("hello there");
-    expect(s(2)).toContain("request · m · 2 msgs · ≈1.2k tok · cache 80% · 1.2s · effort high");
+    expect(s(2)).toBe("m · 2 msgs · ≈1.2k tok · cache 80% · 1.2s · effort high");
     expect(s(3)).toContain("429 rate limited · waited 800ms · attempt 1");
     expect(s(4)).toContain("Reading. · » read · thinking 2");
     expect(s(5)).toContain("✓ read · 3 lines · 4ms");
@@ -90,6 +90,18 @@ describe("事件一句话", () => {
     expect(s(9)).toContain("#1.content · 3 → 5 tok");
     expect(s(10)).toBe("dropped #4 assistant · retry");
     expect(s(11)).toContain("mcp");
+    // 只有调用没有正文时,记号列已经是 »,正文里不再重复一个
+    const bare: AgentEvent[] = [
+      {
+        type: "assistant/message",
+        at,
+        text: "",
+        toolCalls: [{ id: "c", name: "read", args: {} }],
+        stopReason: "tool",
+      },
+    ];
+    expect(eventSummary(bare, 0).sign).toBe("»");
+    expect(stripAnsi(eventSummary(bare, 0).text)).toBe("read");
   });
 
   it("模型眼里的状态:sent · kernel · covered · cleared · dropped · edited · not sent yet", () => {
@@ -153,6 +165,10 @@ describe("事件一句话", () => {
     let s = insp.render(130).map(stripAnsi).join("\n");
     expect(s).toContain("[1 all]");
     expect(s).toMatch(/\n\s*\n\s*#2\s+\d\d:\d\d:\d\d\s+request/); // request 前空一行
+    // request 是章节靠空行分,不靠缩进:类型列与右边的状态列都不许错开
+    const line = (n: number) => s.split("\n").find((l) => l.includes(`#${n} `)) as string;
+    expect(line(2).indexOf("request")).toBe(line(1).indexOf("user/message"));
+    expect(line(2).indexOf("kernel")).toBe(line(1).indexOf("covered"));
     expect(s).toMatch(/#1 .*covered/);
     expect(s).toMatch(/#11 .*kernel/);
     insp.handleInput("4");

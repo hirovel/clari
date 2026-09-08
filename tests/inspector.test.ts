@@ -229,7 +229,7 @@ describe("请求检视器", () => {
     // 右列:模型眼里的状态;request 行前空一行,一句人读的话
     expect(doc).toContain("kernel");
     expect(doc).toContain("sent");
-    expect(doc).toMatch(/→ request · .* msgs · ≈/);
+    expect(doc).toMatch(/→ .+ · \d+ msgs · ≈/);
     expect(doc).toContain("[1 all]");
     // 筛选:3 kernel 只留 request 之类
     insp.handleInput("3");

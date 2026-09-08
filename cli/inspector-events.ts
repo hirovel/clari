@@ -100,8 +100,11 @@ export function eventSummary(
     case "assistant/message": {
       const calls = e.toolCalls.map((t) => t.name).join(" ");
       const parts: string[] = [];
-      if (e.text) parts.push(firstLine(e.text));
-      if (calls) parts.push(`${G.call} ${calls}`);
+      // 没有正文时记号列已经是 »,正文里不再重复一个。
+      if (e.text) {
+        parts.push(firstLine(e.text));
+        if (calls) parts.push(`${G.call} ${calls}`);
+      } else if (calls) parts.push(calls);
       if (e.reasoning) parts.push(`thinking ${estimateTokens(e.reasoning)}`);
       if (e.stopReason === "aborted") parts.push("interrupted");
       if (e.stopReason === "length") parts.push("cut by the output limit");
@@ -126,12 +129,13 @@ export function eventSummary(
       };
     }
     case "request": {
+      // 类型列已经写着 request,正常步不再重复一遍;只有压缩与溢出重发要点名。
       const kind =
         e.reason === "compaction"
-          ? "summary request"
+          ? "summary request · "
           : e.reason === "overflow-retry"
-            ? "overflow retry"
-            : "request";
+            ? "overflow retry · "
+            : "";
       const next = events
         .slice(i + 1)
         .find((x) => x.type === "assistant/message" || x.type === "request");
@@ -143,7 +147,7 @@ export function eventSummary(
           : "";
       return {
         sign: "→",
-        text: `${kind} · ${e.model} · ${plural(e.messages, "msg")} · ≈${fmtTok(e.estimatedTokens)} tok${cache}${resp?.latencyMs !== undefined ? ` · ${fmtMs(resp.latencyMs)}` : ""}${e.effort ? ` · effort ${e.effort}` : ""}`,
+        text: `${kind}${e.model} · ${plural(e.messages, "msg")} · ≈${fmtTok(e.estimatedTokens)} tok${cache}${resp?.latencyMs !== undefined ? ` · ${fmtMs(resp.latencyMs)}` : ""}${e.effort ? ` · effort ${e.effort}` : ""}`,
         tok: undefined,
       };
     }
@@ -270,10 +274,12 @@ export function eventLine(
   const s = eventSummary(events, i);
   const sees = modelSees(events, i);
   const cursor = opts.selected ? c.zhu(G.cursor) : " ";
+  // request 是章节:靠上面的空行与正文色区分,不靠缩进 —— 缩进会把右边每一列都错开。
   const isRequest = e.type === "request";
   const fixed = 2 + 6 + 10 + 17 + 2 + 6 + 2 + 13;
   const w = Math.max(10, opts.width - fixed);
-  const what = truncateToWidth(`${s.sign} ${s.text}`, w, "…").padEnd(w);
+  // 第四个参数按显示宽度补齐:宽字符(中日韩)一个字占两列,按码元补会把右边的列顶歪。
+  const what = truncateToWidth(`${s.sign} ${s.text}`, w, "…", true);
   const body = `${`#${i}`.padEnd(5)} ${clock(e.at)}  ${e.type.padEnd(16)} ${what} ${(s.tok === undefined ? "" : String(s.tok)).padStart(5)}`;
   const seesText = sees.changed ? c.jin(sees.text) : c.faint(sees.text);
   const tone = opts.selected
@@ -283,7 +289,7 @@ export function eventLine(
       : isProjected(e)
         ? c.soft(body)
         : c.faint(body);
-  return `${cursor} ${isRequest ? "" : "  "}${tone}  ${seesText}`;
+  return `${cursor}   ${tone}  ${seesText}`;
 }
 
 /** 详情第一页:按字段排版。 */

@@ -159,7 +159,8 @@ describe("检视器组装视图", () => {
     expect(screen).toMatch(/#0\s+system/);
     expect(screen).toMatch(/tools\s+0 definitions/);
     expect(screen).toMatch(/≈ #9\s+summary\s+SUM/);
-    expect(screen).toContain("#2–#5  4 messages covered by the summary");
+    expect(screen).toContain("#2–#5  4 messages · ");
+    expect(screen).toContain("→ summary · Enter shows them");
     // 底部预览:最后一条的来历
     expect(screen).toContain("sent as messages[4]");
     // Enter 先开动作菜单,第一项"View full message"再 Enter 才进全文

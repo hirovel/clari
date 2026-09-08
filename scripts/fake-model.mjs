@@ -19,8 +19,11 @@ const sse = (res, events) => {
   };
   tick();
 };
+// 短文按 6 字一块流(看得清逐字);长文按 400 字一块,否则两万字要流四十秒。
 const textChunks = (s) =>
-  [...s.matchAll(/.{1,6}/gs)].map((m) => ({ choices: [{ delta: { content: m[0] } }] }));
+  [...s.matchAll(s.length > 2000 ? /.{1,400}/gs : /.{1,6}/gs)].map((m) => ({
+    choices: [{ delta: { content: m[0] } }],
+  }));
 const toolCall = (id, name, args) => ({
   choices: [
     {

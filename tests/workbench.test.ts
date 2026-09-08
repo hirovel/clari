@@ -3,10 +3,11 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { systemPromptFor } from "../cli/bootstrap.js";
-import { workbench } from "../cli/inspector-workbench.js";
+import { workbench, workbenchLine } from "../cli/inspector-workbench.js";
 import { sectionStates, systemWithSections } from "../cli/prompt-sections.js";
 import { createTuiApp } from "../cli/tui-app.js";
 import type { AgentEvent } from "../src/events.js";
@@ -93,6 +94,40 @@ describe("工作台的行", () => {
     const none = workbench({ events, tools: [] });
     expect(none.rows.some((r) => r.kind === "cache")).toBe(false);
     expect(none.cached).toBeUndefined();
+  });
+
+  it("宽字符不把右边的列顶歪:中文预览的行与英文行,token 与占比尺同一列", () => {
+    const wide: AgentEvent[] = [
+      { type: "session/start", at, model: "m", system: "sys" },
+      { type: "user/message", at, text: "English question here" },
+      {
+        type: "request",
+        at,
+        model: "m",
+        messages: 2,
+        tools: [],
+        estimatedTokens: 10,
+        reason: "turn",
+      },
+      {
+        type: "assistant/message",
+        at,
+        text: "先看一下目录,再读文件",
+        toolCalls: [],
+        stopReason: "end",
+      },
+    ];
+    const wb = workbench({
+      events: wide,
+      tools: [{ name: "read", description: "Read.", parameters: {} }],
+    });
+    const lines = wb.rows.map((r) =>
+      stripAnsi(workbenchLine(wide, r, { selected: false, width: 100, maxTok: 10 })),
+    );
+    // 尺之前的部分显示宽度处处相同:补齐按显示宽度算,不是按码元。按码元补的话中文行会把尺顶右。
+    const heads = lines.map((l) => visibleWidth(l.split("▮")[0] as string));
+    expect(new Set(heads).size).toBe(1);
+    expect(lines.some((l) => l.includes("先看一下目录"))).toBe(true);
   });
 
   it("编辑之后线上移变金并说明在哪;丢弃的淡显在原位;清掉的结果说原来多大;摘要后折一行被覆盖的", () => {

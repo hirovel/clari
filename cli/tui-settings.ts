@@ -162,6 +162,9 @@ export async function applySettingNow(
   }
 }
 
+/** 键列按最长的键定宽:短一格,最长的那一行就会把右边所有列顶歪。 */
+const KEY_WIDTH = Math.max(...SETTINGS.map((s) => s.key.length)) + 1;
+
 export type SettingsRow = { def: SettingDef; group: boolean } | { group: true; name: string };
 
 type Mode =
@@ -425,8 +428,8 @@ export class SettingsView implements Component {
       const src = sourceOf(ctx, def, value);
       const shown = formatSetting(def, value);
       const selected = k === this.index;
-      const noteWidth = Math.max(10, inner - 4 - 17 - 14 - 26);
-      const body = `${def.key.padEnd(16)} ${truncateToWidth(shown, 13, "…").padEnd(13)} ${truncateToWidth(def.note, noteWidth, "…").padEnd(noteWidth)} ${src}${def.scope === "next start" ? " · next start" : ""}`;
+      const noteWidth = Math.max(10, inner - 4 - KEY_WIDTH - 1 - 14 - 26);
+      const body = `${def.key.padEnd(KEY_WIDTH)} ${truncateToWidth(shown, 13, "…", true)} ${truncateToWidth(def.note, noteWidth, "…", true)} ${src}${def.scope === "next start" ? " · next start" : ""}`;
       lines.push(
         pad(selected ? `  ${c.zhu(G.cursor)} ${c.bold(c.ink(body))}` : `    ${c.soft(body)}`),
       );

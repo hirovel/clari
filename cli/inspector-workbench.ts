@@ -204,7 +204,7 @@ function describe(
       return {
         sign: G.compact,
         role: "",
-        text: `#${r.from}–#${r.upTo - 1}  ${r.count} message${r.count === 1 ? "" : "s"} covered by the summary · Enter shows them · ${fmtTok(r.tok)} → summary`,
+        text: `#${r.from}–#${r.upTo - 1}  ${r.count} message${r.count === 1 ? "" : "s"} · ${fmtTok(r.tok)} → summary · Enter shows them`,
         faint: true,
       };
     case "dropped":
@@ -316,7 +316,7 @@ export function workbenchLine(
         : "";
   const fixed = 2 + 2 + 6 + 11 + 1 + 6 + 2 + BAR;
   const previewWidth = Math.max(10, width - fixed);
-  const body = `${num.padEnd(5)} ${d.role.padEnd(10)} ${truncateToWidth(d.text, previewWidth, "…").padEnd(previewWidth)} ${tok.padStart(5)}  ${bar}`;
+  const body = `${num.padEnd(5)} ${d.role.padEnd(10)} ${truncateToWidth(d.text, previewWidth, "…", true)} ${tok.padStart(5)}  ${bar}`;
   const sign = d.gold ? c.jin(d.sign) : d.faint ? c.faint(d.sign) : c.soft(d.sign);
   const tone = selected ? c.bold(c.ink(body)) : d.faint ? c.faint(body) : c.soft(body);
   return `${cursor} ${sign.padEnd(1)} ${tone}`;

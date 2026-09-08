@@ -10,7 +10,8 @@ pnpm test                       # 只跑测试
 pnpm tui                        # 交互界面(需要 key;没有 key 会弹登录对话框)
 pnpm demo tui                   # 本机假模型跑界面,不需要 key
 FORCE_COLOR=1 pnpm exec tsx scripts/visual-suite.ts   # 十个场景渲染成 .preview/visual/*.html
-pnpm checkup sessions/<文件>.jsonl                    # 跑完一次真实会话之后的对照:预测 vs 实测,八条判据
+pnpm rehearsal                                        # 不带 key 的彩排:对着假模型真跑几轮,判据加截图
+pnpm checkup sessions/<文件>.jsonl                    # 跑完一次真实会话之后的对照:预测 vs 实测,九条判据
 pnpm replay sessions/<文件>.jsonl                     # 按请求组织地打印一份会话
 ```
 

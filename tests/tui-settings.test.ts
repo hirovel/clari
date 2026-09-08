@@ -72,6 +72,12 @@ describe("/settings", () => {
     expect(m).toMatch(/foldSteps\s+5\s+.*config/);
     expect(m).toMatch(/notify\s+unfocused\s+.*built-in/);
     expect(m).toMatch(/fold\s+on\s+.*built-in/);
+    // 最长的键(compactionReserve)不把值列顶歪:键列按最长的键定宽
+    const col = (key: string, value: string) => {
+      const line = m.split("\n").find((l) => l.includes(key)) as string;
+      return line.indexOf(value, line.indexOf(key) + key.length);
+    };
+    expect(col("compactionReserve", "1000")).toBe(col("screen", "alt"));
     expect(m).toMatch(/screen\s+alt\s+.*next start/);
     // 光标缺省在第一行 screen;↓↓↓ 到 foldSteps,Enter 开值选单
     app.dialogInput("\x1b[B");
