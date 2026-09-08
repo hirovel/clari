@@ -4,8 +4,8 @@
 
 ## 1 现状(2026-09-07)
 
-- 本地 master 最新提交 71e8038;公开仓库 github.com/hirovel/clari 落后约 90 个提交,自 2026-09-06 的界面改版起全部未发布。发布命令在 AGENTS.md。
-- 测试 54 个文件、367 个用例,全绿;tsc strict 与 biome 干净。语句覆盖约 90%(`pnpm coverage`)。
+- 本地 master 最新提交 f286f87;公开仓库 github.com/hirovel/clari 落后约 93 个提交,自 2026-09-06 的界面改版起全部未发布。发布命令在 AGENTS.md。
+- 测试 55 个文件、374 个用例,全绿;tsc strict 与 biome 干净。语句覆盖约 90%(`pnpm coverage`)。
 - 版本 0.1.0(`npx github:hirovel/clari` 可装)。CHANGELOG 的 Unreleased 段积累了整个界面改版,发布时应升到 0.2.0。
 - **从未用真实供应商 key 跑过长会话**。所有验证都是本机假服务器、虚拟终端与子进程入口。用户有 DeepSeek key,会自己跑;不要向用户要 key。
 - LICENSE 文件还没有,等用户定。
@@ -85,7 +85,7 @@
 ## 6 待办(按用户提过的优先级)
 
 1. **发布**:等用户一句话,`bash scripts/publish-public.sh origin main`;发布前把 CHANGELOG 的 Unreleased 升版本。
-2. **真实供应商测试(C 层)**:不带 key 的几轮已经用 `pnpm rehearsal` 彩排过(对着假模型真跑 HTTP、工具、压缩、重试,判据全过,画面逐张核对过)。计划与判据在 `docs/architecture.html` 的 6.10 节,八轮,每轮写了怎么跑、看什么、通过判据、不过改哪里。工具是 `pnpm checkup sessions/<文件>.jsonl`:离线只读一份会话文件,把发请求前的预测与供应商的实测摆成一张表,再跑八条判据(最要紧的是 A 前缀不变量)。用户自己带 key 在 `pnpm tui` 里跑,跑完把 checkup 的输出贴回来;脚本不碰 key,输出里也没有 key。
+2. **真实供应商测试(C 层)**:不带 key 的几轮已经用 `pnpm rehearsal` 彩排过(对着假模型真跑 HTTP、工具、压缩、重试,判据全过,画面逐张核对过)。计划与判据在 `docs/architecture.html` 的 6.10 节,八轮,每轮写了怎么跑、看什么、通过判据、不过改哪里。工具是 `pnpm checkup sessions/<文件>.jsonl`:离线只读一份会话文件,把发请求前的预测与供应商的实测摆成一张表,再跑九条判据(最要紧的是 A 前缀不变量与 B 日志能重建当时发的请求)。用户自己带 key 在 `pnpm tui` 里跑,跑完把 checkup 的输出贴回来;脚本不碰 key,输出里也没有 key。
 3. **LICENSE**:用户定。
 4. **plan 缺省**:现在缺省开;建议缺省关、`long` 预设开。用户未定。
 5. **技能**:三档(name、brief、full)与 `/skills probe`;兼容 Claude Code 格式的技能(`references/`、`scripts/`、`/skills install <github>`)。
@@ -102,5 +102,5 @@
 - `command()` 在选单打开时就返回,测试用 `app.dialogInput` 逐键驱动,不要 await 一个等人的 Promise。
 - 检视器的行有缓存(`lineCache`、`wbCache`),键里含事件数;改了行的算法但事件数不变时记得 `invalidate()`。
 - `saveConfig` 整文件写回;`/settings` 只改 `defaults` 下那一个键。`session/start.sections.chars` 是修剪后的长度,段开关靠它切回全文。
-- 视觉核对:预览服务器 `.claude/launch.json` 的 `tui-preview`(:4174)提供 `.preview/`;本工具环境的浏览器截图常超时,用页面文本核对。
+- 视觉核对:预览服务器 `.claude/launch.json` 的 `tui-preview`(:4174)提供 `.preview/`。截图有两个坑:窗口被挡住时会超时,重试即可;缺省视口只有 800 宽,110 列的画面右边会被裁掉,先 `resize_window` 到 1050×820 再截,长页面用 `find` 拿到 ref 再 `scroll_to`。对不齐这类问题必须看图,`get_page_text` 会把它抹平。
 - 长会话性能有守卫(`tests/perf.test.ts`、`perf-tui.test.ts`):投影按事件对象缓存,账簿折叠只换节点;不要在每个按键上重算全文。
