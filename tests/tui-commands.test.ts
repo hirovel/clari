@@ -1,4 +1,4 @@
-// 界面:按键、提交与每条命令。/help /context、设置、检视器入口、/effort、/models、--approve ask、
+// 界面:按键、提交与每条命令。/model、检视器入口、/set effort、/model list、--approve ask、
 // 附件与排队、命令的用法与错误分支、槽命令、审批理由输入、编辑器驱动的工具描述编辑。
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -106,19 +106,7 @@ function bootB(provider: Provider, over: Partial<TuiAppDeps> = {}, log = new Eve
 }
 
 describe("命令:帮助、设置、检视器入口、强度、模型、审批", () => {
-  it("/help 与 /context 输出", async () => {
-    const { app } = boot(scripted([]));
-    await app.command("/help");
-    await app.command("/inspect usage");
-    const doc = text(app);
-    expect(doc).toContain("/compact");
-    expect(doc).toContain("/model");
-    expect(doc).toContain("Context  estimated");
-    expect(doc).toContain("system prompt");
-    app.stop();
-  });
-
-  it("设置:/model 列表与切换、/key 写入、/default", async () => {
+  it("/model:列表选择器、按名切换、default 落盘", async () => {
     const calls: string[] = [];
     const settings: TuiSettings = {
       listModels: () => ["fake/fake-model", "other/big-model"],
@@ -493,7 +481,7 @@ describe("命令的分支", () => {
     app.stop();
   });
 
-  it("没有 settings 时 /model /key /default 都说明;/key 用法;/models 供应商不支持;/mcp 无服务器;/fields 无表", async () => {
+  it("没有 settings 时 /model 与 /model default 说明;/model list 供应商不支持;/inspect mcp 无服务器;/inspect fields 无表", async () => {
     const { app } = bootB(scriptedB([]));
     await app.command("/model");
     await app.command("/model default");

@@ -123,7 +123,7 @@ describe("组装槽", () => {
 });
 
 describe("检视器组装视图", () => {
-  it("行含投影号、来源事件、wire 下标、阶段;Enter 看单条的来历与全文;Tab 从压缩对照进入", () => {
+  it("行的来源事件、wire 下标与阶段;工作台里 Enter 出动作单再看全文;Tab 从压缩对照进入", () => {
     const events: AgentEvent[] = [
       ...sample(),
       { type: "compaction", at: "", summary: "SUM", coversFrom: 2, coversUpTo: 6 },

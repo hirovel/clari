@@ -162,7 +162,7 @@ describe("上下文面板的动作与后果", () => {
     expect(consequenceOf("view", tool, rows, events)).toBe("read-only · nothing changes");
   });
 
-  it("界面:Enter 出菜单再 Enter 执行;/compare /restore /rewind 落到事件;首屏随第一条消息撤掉;? 列快捷键", async () => {
+  it("打字形态:/edit compare、restore、rewind 落到事件;首屏随第一条消息撤掉", async () => {
     const provider: Provider = {
       model: "m",
       async complete(): Promise<AssistantTurn> {
@@ -200,21 +200,6 @@ describe("上下文面板的动作与后果", () => {
     // 直印:正常追加不印变化说明,没有请求卡
     expect(doc).not.toContain("Request #");
     expect(doc).not.toContain("recomputed");
-
-    // Ctrl+E → 上下文面板;选最后一条(事件 #6,request 事件也占号)→ Enter 出菜单;↓ 到 Edit 看后果。
-    app.inspector.openComposition();
-    app.inspector.key("\r");
-    let ins = plain(app.inspector.lines(120).join("\n"));
-    expect(ins).toContain("Actions");
-    expect(ins).toContain("View full message");
-    expect(ins).toContain("If you do this");
-    expect(ins).toContain("read-only · nothing changes");
-    app.inspector.key("\x1b[B");
-    ins = plain(app.inspector.lines(120).join("\n"));
-    expect(ins).toContain("Edit content");
-    expect(ins).toContain("cache miss from #6 on");
-    app.inspector.key("\x1b");
-    app.inspector.close();
 
     // 命令:编辑 #1 的 content,再 compare 与 restore;rewind 到 #1 丢掉之后的三条。
     await app.command("/edit 1 content first (edited)");

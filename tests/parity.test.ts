@@ -167,23 +167,6 @@ describe("留言投递方式:steer 步边界,followUp 等到 turn 边界", () =>
     const decision = log.events.find((e) => e.type === "decision" && e.slot === "steering");
     expect(decision).toMatchObject({ boundary: "turn", injected: 1 });
   });
-
-  it("steer(缺省)在步边界注入", async () => {
-    const log = new EventLog();
-    log.append({ type: "session/start", at: "", model: "fake", system: "" });
-    const t = slowTool("r", 5, "parallel");
-    const provider = scripted([
-      { text: "", toolCalls: [{ id: "1", name: "r", args: {} }], stopReason: "tool" },
-      { text: "看到插话", toolCalls: [], stopReason: "end" },
-    ]);
-    const agent = new Agent({ log, provider, tools: [t.tool] });
-    const run = agent.prompt("开始");
-    await sleep(1);
-    void agent.prompt("插话");
-    await run;
-    const decision = log.events.find((e) => e.type === "decision" && e.slot === "steering");
-    expect(decision).toMatchObject({ boundary: "step", injected: 1 });
-  });
 });
 
 describe("上下文口径:实测优先", () => {

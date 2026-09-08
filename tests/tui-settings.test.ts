@@ -141,8 +141,9 @@ describe("/settings", () => {
     expect(m).toMatch(/1\s+echo\s+head/);
     app.dialogInput("\r");
     await tick();
-    expect(saved.at(-1)?.[0]).toBe("results");
-    expect((saved.at(-1)?.[1] as Record<string, string>).echo).toBe("tail");
+    const last = saved.at(-1);
+    expect(last?.[0]).toBe("results");
+    expect((last?.[1] as Record<string, string> | undefined)?.echo).toBe("tail");
     app.dialogInput("\x1b");
     await app.command("/settings prompt.sections");
     app.dialogInput("\r");

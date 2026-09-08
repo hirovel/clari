@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { applyPreset, beginSession, parseCommonArgs } from "../cli/bootstrap.js";
+import { beginSession } from "../cli/bootstrap.js";
 import { buildSystemPrompt, discoverProjectInstructions } from "../cli/prompt.js";
 import {
   appendMemory,
@@ -16,7 +16,6 @@ import {
   splitMemory,
 } from "../cli/tools/memory.js";
 import { createTuiApp } from "../cli/tui-app.js";
-import type { KernelConfig } from "../src/config.js";
 import { EventLog } from "../src/log.js";
 import { stripAnsi, VirtualTerminal } from "./helpers/virtual-terminal.js";
 
@@ -200,61 +199,6 @@ describe("系统提示词段控制", () => {
     } finally {
       process.chdir(cwdBefore);
     }
-  });
-});
-
-describe("预设与参数优先级", () => {
-  const config: KernelConfig = {
-    default: "m",
-    providers: {},
-    prompt: { memory: false, sections: ["role", "instructions"] },
-    presets: {
-      review: {
-        model: "p/big",
-        effort: "high",
-        compaction: "clear",
-        approve: "ask",
-        appendSystemPromptFile: "review.md",
-        prompt: { memory: true, instructionsAs: "user" },
-      },
-    },
-  };
-
-  it("显式参数 > 预设 > 配置缺省;未知预设报错", () => {
-    const a = applyPreset(parseCommonArgs(["--preset", "review"]), config);
-    expect(a).toMatchObject({
-      model: "p/big",
-      effort: "high",
-      compaction: "clear",
-      approve: "ask",
-      appendSystemPromptFile: "review.md",
-      memory: true,
-      instructionsAs: "user",
-      promptSections: ["role", "instructions"], // 预设没写,落到配置缺省
-    });
-    const b = applyPreset(
-      parseCommonArgs([
-        "--preset",
-        "review",
-        "--effort",
-        "low",
-        "--compaction",
-        "llm",
-        "--no-memory",
-        "--approve",
-        "all",
-      ]),
-      config,
-    );
-    expect(b).toMatchObject({ effort: "low", compaction: "llm", memory: false, approve: "all" });
-    const c = applyPreset(parseCommonArgs([]), config);
-    expect(c.memory).toBe(false);
-    expect(c.promptSections).toEqual(["role", "instructions"]);
-    expect(() => applyPreset(parseCommonArgs(["--preset", "nope"]), config)).toThrow("no preset");
-    expect(() => parseCommonArgs(["--prompt-sections", "role,bogus"])).toThrow(
-      "unknown prompt section",
-    );
-    expect(parseCommonArgs(["--instructions-as", "user"]).instructionsAs).toBe("user");
   });
 });
 

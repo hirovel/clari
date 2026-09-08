@@ -137,6 +137,8 @@ Every replaceable point is a plain function type: compaction strategy, preservat
 
 ## Development
 
+`AGENTS.md` holds the working rules for anyone, human or agent, changing this repository; `HANDOVER.md` holds the current state, a module map, the invariants, the open work and the traps.
+
 ```bash
 pnpm check   # tsc + biome + vitest
 ```

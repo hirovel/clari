@@ -1,5 +1,5 @@
 // 命令的选单:次级选项不打字,选。每个命令无参数时弹选单,选中即落地;Esc 回去;
-// 打字形态仍然认;帮助只列十三个命令;未知命令给去处。/tools 的开关真的改随请求发出的工具集。
+// 打字形态仍然认;帮助只列十四个命令;未知命令给去处。/tools 的开关真的改随请求发出的工具集。
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
 import { createTuiApp, type TuiAppDeps } from "../cli/tui-app.js";
@@ -56,7 +56,7 @@ function boot(over: Partial<TuiAppDeps> = {}, seen: ToolDef[][] = []) {
 }
 
 describe("命令选单", () => {
-  it("帮助只列十三个命令,按组;未知命令说去哪找", async () => {
+  it("帮助只列十四个命令,按组;未知命令说去哪找", async () => {
     const { app, doc } = boot();
     expect(COMMANDS.map((c) => c.name)).toEqual([
       "help",

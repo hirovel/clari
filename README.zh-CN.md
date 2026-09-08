@@ -116,6 +116,10 @@ pnpm replay sessions/<文件>.jsonl --compaction 1 --json
 
 界面内:`Esc` 打断 · `Ctrl+R` 检视器(Tab 轮换 请求 / 事件 / 压缩 / 上下文,`s` 切会话)· `Ctrl+E` 上下文工作台 · `/settings` 一屏所有开关(当场生效并写回配置)· `Ctrl+O` 折叠 · `Ctrl+T` 思考 · `?` 快捷键 · `/help`
 
+## 交接
+
+`AGENTS.md` 是改这个仓库的人与 agent 都要守的规则;`HANDOVER.md` 是现状、模块地图、不变量、待办与坑。
+
 ## 结构
 
 ```
