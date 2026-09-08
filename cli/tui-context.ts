@@ -187,6 +187,10 @@ export type TuiContext = {
   };
   /** 往对话流追加一行说明。 */
   note(text: string): void;
+  /** 折叠设置变了:按新设置重画已有的工具结果。 */
+  redrawResults?: () => void;
+  /** 工具开关变了:换随请求发出的工具集。 */
+  applyTools?: () => void;
   /** 桌面通知(回合结束、等审批);按 notify 设置与焦点状态决定发不发。 */
   notify(text: string): void;
   updateHeader(): void;

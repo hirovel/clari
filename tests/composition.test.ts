@@ -154,19 +154,23 @@ describe("检视器组装视图", () => {
     expect(insp.currentMode).toBe("composition");
     const screen = insp.render(120).map(plain).join("\n");
     expect(screen).toContain("Context");
-    expect(screen).toContain("6 messages");
-    expect(screen).toContain("summary(covers #2–#5)");
-    expect(screen).toContain("omitted: 4 covered by the summary");
+    expect(screen).toContain("what the model sees on the next request");
+    // 前两行是系统提示词与工具定义;摘要行带 ≈,它下面折一行被覆盖的消息
+    expect(screen).toMatch(/#0\s+system/);
+    expect(screen).toMatch(/tools\s+0 definitions/);
+    expect(screen).toMatch(/≈ #9\s+summary\s+SUM/);
+    expect(screen).toContain("#2–#5  4 messages covered by the summary");
+    // 底部预览:最后一条的来历
+    expect(screen).toContain("sent as messages[4]");
     // Enter 先开动作菜单,第一项"View full message"再 Enter 才进全文
     insp.handleInput("\r");
     expect(insp.currentMode).toBe("actions");
     const menu = insp.render(120).map(plain).join("\n");
-    expect(menu).toContain("Message #6");
-    expect(menu).toContain("View full message");
+    expect(menu).toContain("1  View full message");
     expect(menu).toContain("If you do this");
     insp.handleInput("\r");
     expect(insp.currentMode).toBe("message");
-    expect(insp.render(120).map(plain).join("\n")).toContain("Message #6");
+    expect(insp.render(120).map(plain).join("\n")).toContain("message 6 of 6");
     insp.handleInput("\t");
     insp.handleInput("\x1b");
     expect(insp.currentMode).toBe("composition");

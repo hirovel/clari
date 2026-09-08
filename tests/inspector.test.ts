@@ -223,18 +223,34 @@ describe("请求检视器", () => {
     expect(insp.currentMode).toBe("events");
     expect(doc).toContain("Events");
     expect(doc).toContain(`${log.events.length} events`);
-    expect(doc).toContain("#0    ");
+    expect(doc).toContain("#0   ");
     expect(doc).toContain("session/start");
     expect(doc).toContain("request");
-    expect(doc).toContain("people only");
-    expect(doc).toContain("model-visible");
+    // 右列:模型眼里的状态;request 行前空一行,一句人读的话
+    expect(doc).toContain("kernel");
+    expect(doc).toContain("sent");
+    expect(doc).toMatch(/→ request · .* msgs · ≈/);
+    expect(doc).toContain("[1 all]");
+    // 筛选:3 kernel 只留 request 之类
+    insp.handleInput("3");
+    doc = text();
+    expect(doc).not.toContain("session/start");
+    expect(doc).toContain("request");
+    insp.handleInput("1");
     insp.handleInput("g");
     insp.handleInput("\r");
     doc = text();
     expect(insp.currentMode).toBe("event");
     expect(doc).toContain("Event #0");
+    expect(doc).toContain("[1 view]");
+    expect(doc).toContain("system prompt");
+    insp.handleInput("2");
+    doc = text();
     expect(doc).toContain('"type": "session/start"');
     expect(doc).toContain('"system": "你是助手"');
+    insp.handleInput("3");
+    expect(text()).toContain("position");
+    insp.handleInput("1");
     insp.handleInput("]");
     expect(text()).toContain("Event #1");
     insp.handleInput("\x1b");

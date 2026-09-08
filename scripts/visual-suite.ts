@@ -3,7 +3,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
-import { noProviderChoice } from "../cli/bootstrap.js";
+import { noProviderChoice, systemPromptFor } from "../cli/bootstrap.js";
 import { createTuiApp, type TuiApp, type TuiAppDeps } from "../cli/tui-app.js";
 import { llmSummarize } from "../src/compaction.js";
 import { EventLog } from "../src/log.js";
@@ -524,6 +524,68 @@ scene = "9";
   app.dialogInput("\x1b");
   app.stop();
   save("9-menus", "9 Command menus: inspect, set, tools, session, model", shots);
+}
+
+scene = "10";
+// ---------- 10 上下文工作台、事件视图、设置表 ----------
+{
+  const provider = scripted([
+    { text: "Reading the loop first.", reasoning: "Need the file before answering.", reasoningKind: "full", toolCalls: [{ id: "c1", name: "read", args: { path: "src/loop.ts", limit: 2 } }], stopReason: "tool", usage: { inputTokens: 1400, outputTokens: 30, cacheReadTokens: 900 } },
+    { text: "runTurn drives one turn: it projects the log, sends the request, executes the calls and appends every result.", toolCalls: [], stopReason: "end", usage: { inputTokens: 1800, outputTokens: 60, cacheReadTokens: 1400 } },
+    { text: "The step limit lives in the termination slot.", toolCalls: [], stopReason: "end", usage: { inputTokens: 2000, outputTokens: 20, cacheReadTokens: 1800 } },
+  ]);
+  const log = new EventLog();
+  const p = systemPromptFor({}, process.cwd());
+  log.append({ type: "session/start", at: new Date().toISOString(), model: "fake-agent", system: p.text, sections: p.sections });
+  const { app } = boot(provider, {
+    trace: true,
+    settings: {
+      listModels: () => ["local-fake/fake-agent"],
+      switchModel: () => { throw new Error("n/a"); },
+      setKey: () => {},
+      setDefault: () => {},
+      settingLayers: () => ({ defaults: { foldLines: 5, foldSteps: 3 }, presetName: "long", preset: { compactionReserve: 64000 } }),
+      saveSetting: () => {},
+    },
+  }, log);
+  await app.submit("Explain runTurn.");
+  await app.submit("Where is the step limit?");
+  const shots: string[] = [];
+  app.inspector.openComposition();
+  shots.push(...divider("Ctrl+E: the next request in order, token ruler, cache line, preview of the selected row"), ...app.inspector.lines(W));
+  app.inspector.close();
+  await app.command("/edit 3 text Reading the loop first; the limit is in loop.ts.");
+  app.inspector.openComposition(3);
+  shots.push(...divider("after editing #3: ✎ on the row, the cache line moves up and turns gold"), ...app.inspector.lines(W));
+  app.inspector.key("\r");
+  shots.push(...divider("Enter on a message: numbered actions with the consequence line"), ...app.inspector.lines(W));
+  app.inspector.key("\x1b");
+  app.inspector.openComposition(0);
+  app.inspector.key("\r");
+  shots.push(...divider("Enter on the system row: sections with tokens; Enter flips one for this session"), ...app.inspector.lines(W));
+  app.inspector.key("\x1b");
+  app.inspector.close();
+  app.inspector.openEvents();
+  shots.push(...divider("Ctrl+R Tab: events, one readable line each, the right column is what the model sees now"), ...app.inspector.lines(W));
+  app.inspector.key("4");
+  shots.push(...divider("4 changes: only edits, drops and compactions"), ...app.inspector.lines(W));
+  app.inspector.key("1");
+  app.inspector.key("\x1b[1;5A");
+  app.inspector.key("\r");
+  shots.push(...divider("Enter on a request: the view page; 2 json, 3 projection"), ...app.inspector.lines(W));
+  app.inspector.key("\x1b");
+  app.inspector.close();
+  await app.command("/settings");
+  shots.push(...divider("/settings: every switch, current value, one line, source; Enter changes it and writes the config"), ...app.dialogLines());
+  app.dialogInput("\x1b[B");
+  app.dialogInput("\x1b[B");
+  app.dialogInput("\x1b[B");
+  app.dialogInput("\r");
+  shots.push(...divider("foldSteps: common values, then type a value"), ...app.dialogLines());
+  app.dialogInput("\x1b");
+  app.dialogInput("\x1b");
+  app.stop();
+  save("10-workbench", "10 Context workbench, events and settings", shots);
 }
 
 const index = [

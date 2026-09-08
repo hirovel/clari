@@ -86,6 +86,20 @@ export class Agent {
     this.opts.tools = tools;
   }
 
+  /** 会话中改事实附注与计划复述的设置(/settings);下一次 turn 起生效。 */
+  configure(next: { facts?: TurnDeps["facts"]; planReminder?: number }): void {
+    if (next.facts !== undefined) this.opts.facts = next.facts;
+    if (next.planReminder !== undefined) this.opts.planReminder = next.planReminder;
+  }
+
+  get facts(): TurnDeps["facts"] | undefined {
+    return this.opts.facts;
+  }
+
+  get planReminder(): number | undefined {
+    return this.opts.planReminder;
+  }
+
   setProvider(provider: Provider): void {
     this.opts.provider = provider;
     this.opts.log.append({ type: "session/model", at: now(), model: provider.model });

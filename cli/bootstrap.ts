@@ -15,6 +15,7 @@ import {
   resolveApiKey,
   resolveModel,
   type SubagentsConfig,
+  saveConfig,
   setApiKey,
   setDefaultModel,
   type ToolPromptsConfig,
@@ -24,6 +25,7 @@ import type { EventLog } from "../src/log.js";
 import type { CompactionConfig, TurnDeps } from "../src/loop.js";
 import { planTool } from "../src/plan.js";
 import type { Provider } from "../src/provider.js";
+import { setSetting } from "../src/settings.js";
 import { type ChildInfo, createTaskTool } from "../src/subagent.js";
 import type { Tool } from "../src/tools.js";
 import { applyPreset, type CommonArgs, PROMPT_SECTION_NAMES } from "./args.js";
@@ -177,6 +179,11 @@ export function bootstrap(): Bootstrap {
     addModel: (providerName, model) => {
       config = addModel(config, providerName, model);
     },
+    // /settings:只改 defaults 下的那一个键,其余原样落盘。
+    saveSetting: (key, value) => {
+      config = { ...config, defaults: setSetting(config.defaults, key, value) };
+      saveConfig(config);
+    },
     capabilityNote: async (providerName, modelId) => {
       const p = config.providers[providerName];
       if (!p) return "";
@@ -279,10 +286,12 @@ type PromptArgs = Pick<
   | "skillsList"
 >;
 
+// chars 是修剪后的长度:composeSystemPrompt 修剪每段再以空行相接,所以各段长度加空行正好等于全文,
+// 界面据此把系统提示词切回段(上下文面板的段开关)。
 const meta = (s: PromptSection) => ({
   name: s.name,
   ...(s.source && { source: s.source }),
-  chars: s.text.length,
+  chars: s.text.trim().length,
 });
 
 export function systemPromptFor(

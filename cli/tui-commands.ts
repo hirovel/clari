@@ -10,6 +10,7 @@ import { fmtCost } from "../src/cost.js";
 import { now } from "../src/events.js";
 import { recordingProvider } from "../src/loop.js";
 import { EFFORT_LEVELS, parseEffort } from "../src/provider.js";
+import { SETTINGS, type SettingDef } from "../src/settings.js";
 import { expandFileRefs } from "./attachments.js";
 import { SESSIONS_DIR } from "./bootstrap.js";
 import { firstLine, thesisLines } from "./cards.js";
@@ -35,6 +36,7 @@ import { pct } from "./tui-format.js";
 import { LoginDialog, type PickRow } from "./tui-login.js";
 import { choose, confirm, title, valueRows } from "./tui-menu.js";
 import { Palette, type PaletteItem } from "./tui-palette.js";
+import { applySettingNow, describeChange, parseTyped, SettingsView } from "./tui-settings.js";
 import { slotCommand, slotsList } from "./tui-slots.js";
 
 export type Command = {
@@ -54,6 +56,11 @@ export const COMMANDS: Command[] = [
   {
     name: "set",
     description: "Change a slot: approval, compaction, execution, steering, effort, tool prompts",
+    picks: true,
+  },
+  {
+    name: "settings",
+    description: "Every session: display, context, tools, notifications; saved to the config",
     picks: true,
   },
   {
@@ -1310,6 +1317,14 @@ export function openPalette(ctx: TuiContext): void {
       },
     });
   }
+  for (const def of SETTINGS) {
+    items.push({
+      kind: "setting",
+      label: `settings ${def.key}`,
+      note: def.note,
+      run: () => void command(ctx, `/settings ${def.key}`),
+    });
+  }
   const s = ctx.deps.settings;
   for (const name of s?.listModels() ?? []) {
     const current = name === `${ctx.model.info.providerName}/${ctx.model.info.model}`;
@@ -1354,6 +1369,59 @@ export function openPalette(ctx: TuiContext): void {
   ctx.dialog.open(palette);
 }
 
+// ---------- 设置(/settings) ----------
+
+/** 落一个开关:当场生效(能的话),写回配置,回一句说明。 */
+async function setSetting(ctx: TuiContext, def: SettingDef, value: unknown): Promise<string> {
+  let applied: string | undefined;
+  try {
+    applied = await applySettingNow(ctx, def, value, (slot, v) =>
+      isSlotName(slot) ? applySlot(ctx, slot, v) : Promise.resolve(""),
+    );
+  } catch (err) {
+    return c.zhu((err as Error).message);
+  }
+  const save = ctx.deps.settings?.saveSetting;
+  if (save) save(def.key, value);
+  return describeChange(
+    def,
+    value,
+    applied?.trim()
+      ? applied.replace(new RegExp(`${String.fromCharCode(27)}[[0-9;]*m`, "g"), "")
+      : undefined,
+    save !== undefined,
+  );
+}
+
+/** /settings:无参数开全屏设置表;/settings key 定位到那一行;/settings key value 直接落。 */
+async function settingsCommand(ctx: TuiContext, arg: string): Promise<void> {
+  const [key = "", ...rest] = arg.trim().split(/\s+/);
+  if (key && rest.length > 0) {
+    const parsed = parseTyped(arg);
+    if (typeof parsed === "string") {
+      ctx.note(c.zhu(parsed));
+      return;
+    }
+    ctx.note(c.soft(`· ${await setSetting(ctx, parsed.def, parsed.value)}`));
+    return;
+  }
+  const view = new SettingsView({
+    ctx,
+    set: (def, value) => setSetting(ctx, def, value),
+    fill: (text) => {
+      ctx.editor.setText(text);
+      ctx.tui.requestRender();
+    },
+    onClose: () => ctx.dialog.close(),
+    onChange: () => ctx.tui.requestRender(),
+  });
+  if (key && !view.focus(key)) {
+    ctx.note(c.zhu(`unknown setting ${key}`) + c.faint("  /settings lists them"));
+    return;
+  }
+  ctx.dialog.open(view);
+}
+
 // ---------- 分发 ----------
 
 /**
@@ -1392,6 +1460,9 @@ async function dispatch(ctx: TuiContext, text: string): Promise<void> {
       break;
     case "set":
       await setCommand(ctx, arg);
+      break;
+    case "settings":
+      await settingsCommand(ctx, arg);
       break;
     case "edit":
       await editDispatch(ctx, arg);

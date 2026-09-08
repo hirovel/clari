@@ -10,6 +10,7 @@ import type { EffortLevel, OpenAIDialect, Provider } from "./provider.js";
 import { openaiCompat } from "./provider.js";
 import { anthropic, type ThinkingMode } from "./providers/anthropic.js";
 import { openaiResponses } from "./providers/openai-responses.js";
+import { defaultPreset } from "./settings.js";
 import type { SubagentApproval, SubagentType } from "./subagent.js";
 import type { DescriptionLevel } from "./tools.js";
 
@@ -214,40 +215,8 @@ export const DEFAULT_CONFIG_PATH =
 export const CONFIG_TEMPLATE: KernelConfig = {
   default: "deepseek-v4-pro",
 
-  // 每个可选项的内置缺省值。命令行与预设可以覆盖;删掉某一项等于用内置缺省。
-  defaults: {
-    compaction: "llm",
-    compactionTrigger: "threshold",
-    compactionReserve: 32000,
-    approve: "all",
-    execution: "sequential",
-    steering: "step",
-    toolPrompts: "explain",
-    subagent: false,
-    trace: true,
-    fold: true,
-    foldLines: 5,
-    results: {
-      read: "count",
-      edit: "count",
-      write: "count",
-      glob: "count",
-      grep: "count",
-      bash: "tail",
-    },
-    facts: { repeats: true, slow: true, date: true },
-    plan: true,
-    planReminder: 8,
-    foldSteps: 3,
-    screen: "alt",
-    notify: "unfocused",
-    prompt: {
-      sections: ["role", "env", "instructions", "memory", "skills", "append"],
-      instructionsAs: "system",
-      memory: false,
-      skills: { list: "system", load: "read" },
-    },
-  },
+  // 每个可选项的内置缺省值,从开关登记表(settings.ts)生成。命令行与预设可以覆盖;删掉某一项等于用内置缺省。
+  defaults: defaultPreset(),
   subagents: {
     approval: "inherit",
     depth: 1,

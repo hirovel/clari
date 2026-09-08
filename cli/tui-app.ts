@@ -35,6 +35,7 @@ import { type AgentEvent, now } from "../src/events.js";
 import type { EventLog } from "../src/log.js";
 import { type CompactionConfig, compactionThreshold, type TurnDeps } from "../src/loop.js";
 import type { EffortLevel, Provider, ToolDef } from "../src/provider.js";
+import type { SettingLayers } from "../src/settings.js";
 import type { ChildInfo } from "../src/subagent.js";
 import type { Tool } from "../src/tools.js";
 import { DEFAULT_RESULT_VIEWS, firstRunLines, shortcutLines, thinkingLines } from "./cards.js";
@@ -54,14 +55,15 @@ import {
 import { c, editorTheme, G } from "./theme.js";
 import type { MemoryFiles } from "./tools/memory.js";
 import { Block, SplitLine } from "./tui-block.js";
-import { COMMANDS, command, openLogin, openPalette, submit } from "./tui-commands.js";
+import { applyTools, COMMANDS, command, openLogin, openPalette, submit } from "./tui-commands.js";
 import { FOLD_HEAD, RAW_LINE_CAP, type SessionTarget, type TuiContext } from "./tui-context.js";
-import { contextAction } from "./tui-edit.js";
+import { contextAction, flipSection } from "./tui-edit.js";
 import { brief, pct } from "./tui-format.js";
 import type { ProviderSummary } from "./tui-login.js";
 import {
   attachChild,
   render,
+  resultText,
   streamDelta,
   streamReasoning,
   toggleFold,
@@ -109,6 +111,10 @@ export type TuiSettings = {
   addModel?(providerName: string, model: ModelConfig): void;
   /** 已配置模型生效的能力数据一行注(窗口、价格、出处;配置覆盖了登记簿时带登记簿的值)。 */
   capabilityNote?(providerName: string, modelId: string): Promise<string>;
+  /** 配置的 defaults 与当前预设:/settings 据此写来源列。 */
+  settingLayers?(): SettingLayers;
+  /** 写一个开关进配置 defaults 并落盘;undefined 删掉那一项。 */
+  saveSetting?(key: string, value: unknown): void;
 };
 
 export type TuiAppDeps = {
@@ -199,7 +205,8 @@ export type TuiApp = {
     open(): void;
     openEvents(): void;
     openCompactions(): void;
-    openComposition(): void;
+    /** 打开工作台;at = 事件下标,光标落在从它起的第一条消息上。 */
+    openComposition(at?: number): void;
     close(): void;
     isOpen(): boolean;
     key(data: string): void;
@@ -356,8 +363,16 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     tools: defs,
     rows: () => deps.terminal.rows,
     ...(deps.trace && { rawFor: (i: number) => ctx.req.rawAt.get(i) }),
+    lastSent: () => ctx.req.lastSent,
+    contextWindow: () => ctx.model.contextWindow,
+    running: () => agent.running,
     onClose: () => ctx.inspector.close(),
     onAction: (action, row) => void contextAction(ctx, action, row),
+    onSection: (name) => flipSection(ctx, name),
+    onTools: () => {
+      ctx.inspector.close();
+      void command(ctx, "/tools");
+    },
     requestRender: () => tui.requestRender(),
   });
 
@@ -474,6 +489,11 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       transcript.addChild(new Block(text));
       tui.requestRender();
     },
+    redrawResults() {
+      for (const r of ctx.view.resultNodes) r.node.setText(resultText(ctx, r));
+      tui.requestRender();
+    },
+    applyTools: () => applyTools(ctx),
     notify(text) {
       const mode = deps.notify ?? "unfocused";
       if (mode === "off") return;
@@ -588,8 +608,14 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       // 口径与请求卡的 limit 行一致:实测优先、压缩后按估算,手动 /compact 之后状态栏立刻回落。
       const used = Math.min(1, contextTokens(log.events) / t);
       const cells = used > 0 ? Math.max(1, Math.round(used * 10)) : 0;
-      const bar = "━".repeat(cells) + "┄".repeat(10 - cells);
+      // 条分两色:淡的是上次请求已缓存的前缀,金的是这次新增(金只给变化)。过七成整条转朱色。
+      const predicted = ctx.req.predictedAt.get(ctx.req.lastTurnIndex) ?? 0;
+      const cachedCells = Math.min(cells, Math.round(Math.min(1, predicted / t) * 10));
       const tone = used >= 0.7 ? c.zhu : c.faint;
+      const bar =
+        used >= 0.7
+          ? "━".repeat(cells) + "┄".repeat(10 - cells)
+          : `${c.faint("━".repeat(cachedCells))}${c.jin("━".repeat(cells - cachedCells))}${c.faint("┄".repeat(10 - cells))}`;
       const trigger = compaction.trigger ?? "threshold";
       const room = `${pct(Math.max(0, 1 - used))} ${trigger === "threshold" ? "until auto-compaction" : "until the compaction threshold"}`;
       const over =
@@ -696,9 +722,15 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       return { consume: true };
     }
     if (matchesKey(data, Key.ctrl("e"))) {
-      // Ctrl+E:组装视图,模型下一步会看到的每条消息从哪来、落在线路的第几条。
+      // Ctrl+E:上下文工作台。账簿光标停在某一步时,落在那一步的消息上;再按一次关。
+      if (ctx.inspector.overlay && inspector.currentMode === "composition") {
+        ctx.inspector.close();
+        return { consume: true };
+      }
       if (!ctx.inspector.overlay) ctx.inspector.open();
-      inspector.showComposition();
+      const step =
+        ctx.view.selectedStep !== undefined ? ctx.steps[ctx.view.selectedStep] : undefined;
+      inspector.showComposition(step ? step.requestIndex : undefined);
       tui.requestRender();
       return { consume: true };
     }
@@ -782,9 +814,9 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
         ctx.inspector.open();
         inspector.showCompactions();
       },
-      openComposition: () => {
+      openComposition: (at) => {
         ctx.inspector.open();
-        inspector.showComposition();
+        inspector.showComposition(at);
       },
       close: () => ctx.inspector.close(),
       isOpen: () => ctx.inspector.overlay !== undefined,

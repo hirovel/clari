@@ -2,8 +2,8 @@
 // 打字形态仍然认;帮助只列十三个命令;未知命令给去处。/tools 的开关真的改随请求发出的工具集。
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
-import { COMMANDS } from "../cli/tui-commands.js";
 import { createTuiApp, type TuiAppDeps } from "../cli/tui-app.js";
+import { COMMANDS } from "../cli/tui-commands.js";
 import type { SessionTarget } from "../cli/tui-context.js";
 import { EventLog } from "../src/log.js";
 import type { AssistantTurn, Provider, ToolDef } from "../src/provider.js";
@@ -62,6 +62,7 @@ describe("命令选单", () => {
       "help",
       "inspect",
       "set",
+      "settings",
       "edit",
       "model",
       "login",
@@ -80,7 +81,9 @@ describe("命令选单", () => {
     expect(d).not.toContain("/toolprompts");
     expect(d).not.toContain("/approve");
     await app.command("/approve ask");
-    expect(doc()).toContain("unknown command /approve  /help lists the commands · Ctrl+K searches everything");
+    expect(doc()).toContain(
+      "unknown command /approve  /help lists the commands · Ctrl+K searches everything",
+    );
     app.stop();
   });
 

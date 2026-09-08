@@ -3,7 +3,7 @@
 import { type Component, fuzzyFilter, Key, matchesKey } from "@earendil-works/pi-tui";
 import { c } from "./theme.js";
 
-export type PaletteKind = "command" | "model" | "skill" | "template" | "login";
+export type PaletteKind = "command" | "model" | "skill" | "template" | "login" | "setting";
 
 export type PaletteItem = {
   kind: PaletteKind;
@@ -19,6 +19,7 @@ const KIND_TAG: Record<PaletteKind, string> = {
   skill: "skill",
   template: "tmpl",
   login: "login",
+  setting: "set",
 };
 
 /** 最多显示的行数;超出的按匹配质量截掉,再敲几个字就能缩小。 */

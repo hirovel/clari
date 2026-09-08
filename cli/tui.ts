@@ -181,7 +181,15 @@ async function launch(current: { log: EventLog; sessionFile: string }): Promise<
       contextWindow: first.contextWindow,
       ...(first.capabilitySource && { capabilitySource: first.capabilitySource }),
     },
-    settings: boot.settings,
+    settings: {
+      ...boot.settings,
+      // /settings 的来源列:配置 defaults 与 --preset 指的预设。
+      settingLayers: () => ({
+        defaults: boot.config.defaults,
+        preset: args.preset ? boot.config.presets?.[args.preset] : undefined,
+        presetName: args.preset,
+      }),
+    },
     fold: args.fold,
     ...(args.foldLines !== undefined && { foldLines: args.foldLines }),
     ...(args.results && { results: args.results }),

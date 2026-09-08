@@ -8,7 +8,7 @@ import type { ResultView } from "../src/config.js";
 import { messageTokens as estimateMessageTokens } from "../src/context.js";
 import type { AgentEvent } from "../src/events.js";
 import type { Message } from "../src/messages.js";
-import { fmtMs, fmtTok } from "./inspector.js";
+import { fmtMs, fmtTok } from "./inspector-format.js";
 import { fmtWindow } from "./registry.js";
 import { c, G } from "./theme.js";
 
@@ -178,7 +178,7 @@ export function changeNote(input: ChangeInput): string | undefined {
     note(
       edited.length > 0 ? c.jin(G.edited) : c.jin(G.compact),
       c.jin(parts.join(" · ")),
-      `→ ${recomputed} recomputed · cache ≤${fmtTok(tokensOf(messages, keep))} of ${fmtTok(tokensOf(messages))}`,
+      `→ ${recomputed} recomputed · cache ≤${fmtTok(tokensOf(messages, keep))} of ${fmtTok(tokensOf(messages))} · Ctrl+E`,
     ),
   );
   return lines.join("\n");

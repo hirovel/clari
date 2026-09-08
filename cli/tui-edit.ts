@@ -5,7 +5,8 @@ import { editState } from "../src/messages.js";
 import { forkSession, SESSIONS_DIR } from "./bootstrap.js";
 import { editInExternalEditor } from "./editor.js";
 import type { CompositionRow, ContextAction } from "./inspector.js";
-import { c } from "./theme.js";
+import { sectionStates, systemWithSections } from "./prompt-sections.js";
+import { c, G } from "./theme.js";
 import type { TuiContext } from "./tui-context.js";
 import { toolCallDetail } from "./tui-format.js";
 
@@ -286,6 +287,51 @@ export function forkCommand(ctx: TuiContext, arg: string): string {
   }
   const r = forkSession(log.events, upTo, ctx.deps.sessionsDir ?? SESSIONS_DIR);
   return `${c.soft(`· forked: first ${r.events} events → ${r.file}`)}\n${c.faint(`  pnpm tui -- --resume ${r.file}   continues from there; this session is untouched`)}`;
+}
+
+/**
+ * 工作台的 system 行:翻一段。新的系统提示词 = 开着的段按原顺序以空行相接,记成对事件 #0 的一次编辑;
+ * 原文留在事件里,再翻回来就是又一次编辑。切不回段(旧日志)时说明原因。
+ */
+export function flipSection(ctx: TuiContext, name: string): void {
+  const { log, agent } = ctx;
+  if (agent.running) {
+    ctx.note(c.zhu(BUSY));
+    return;
+  }
+  const states = sectionStates(log.events);
+  const target = log.events.findIndex((e) => e.type === "session/start");
+  if (!states || target < 0) {
+    ctx.note(
+      c.zhu(
+        "the section texts cannot be recovered from this session's log; start a new session to switch sections",
+      ),
+    );
+    return;
+  }
+  const s = states.find((x) => x.name === name);
+  if (!s) return;
+  const value = systemWithSections(states, name);
+  const on = states.filter((x) => (x.name === name ? !x.on : x.on)).map((x) => x.name);
+  log.append({
+    type: "context/edit",
+    at: now(),
+    target,
+    field: "system",
+    value,
+    note: `sections: ${on.join(", ") || "(none)"}`,
+  });
+  ctx.note(
+    [
+      c.soft(
+        `${G.edited} system prompt · ${name} ${s.on ? "off" : "on"} · ≈${Math.ceil(value.length / 4)} tok`,
+      ),
+      c.faint(
+        "  · recorded as an edit of event #0; the cached prefix is recomputed from the top on the next request",
+      ),
+      c.faint("  · /settings prompt.sections makes it the start value for every session"),
+    ].join("\n"),
+  );
 }
 
 /** 上下文面板(Ctrl+E)里选中一条消息后的动作:全部落到已有命令上,面板只是入口。 */

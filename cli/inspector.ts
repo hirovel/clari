@@ -1,12 +1,11 @@
-// 检视器:对事件数组的几种投影,全部只读。
+// 检视器:对事件数组的几种投影,全部只读(上下文工作台的动作交回界面层落成事件)。
 //   请求视图  一行一请求 → 七分区(概要 / 决策 / 发送 / 工具定义 / 线路 JSON / 接收 / 写入)   inspector-requests
-//   事件视图  内核维护的全部事件,逐条大小与可见性 → 原样 JSON                                 inspector-requests
+//   事件视图  同一条流,每种事件一句人读的话;筛选页签;详情三页(排版 / JSON / 在投影里怎么了)   inspector-events
 //   压缩对照  每次压缩:被覆盖的那一大段原文 ↔ 它变成的摘要,带 token 与压缩比                 inspector-compactions
-//   组装视图  模型下一步会看到的每条消息从哪来、经过了什么;动作菜单                              inspector-composition
+//   工作台    Ctrl+E:下一次请求的正文按发送顺序一列,token 尺、缓存线、底部预览;Enter 出动作     inspector-workbench
 //   会话切换  s 键在主会话与子 agent 会话间轮换,以上视图作用在选中的数组上
 // 行数爆炸由视口与按键控制,不靠删内容:任何一字节都能翻到。
-// 本文件只剩覆盖层组件 RequestInspector:模式、选中、滚动、按键、行缓存;各视图的行由上面四个模块算。
-// 其它模块从这里 import 视图函数照旧可用(重构块 5 的再导出)。
+// 本文件只剩覆盖层组件 RequestInspector:模式、选中、滚动、按键、行缓存;各视图的行由上面的模块算。
 import {
   type Component,
   Key,
@@ -15,6 +14,7 @@ import {
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import type { AgentEvent } from "../src/events.js";
+import type { Message } from "../src/messages.js";
 import type { Provider, ToolDef } from "../src/provider.js";
 import {
   COMPACTION_SECTIONS,
@@ -30,16 +30,24 @@ import {
   type CompositionRow,
   type ContextAction,
   compositionLines,
-  compositionRow,
   compositionRows,
   consequenceOf,
 } from "./inspector-composition.js";
-import { clock, messageTokens, roleLabel } from "./inspector-format.js";
+import {
+  EVENT_FILTERS,
+  EVENT_SECTIONS,
+  type EventFilter,
+  type EventSection,
+  eventLine,
+  eventViewLines,
+  filteredIndices,
+  projectionLines,
+} from "./inspector-events.js";
+import { clock, fmtTok, messageTokens, pctOf, roleLabel } from "./inspector-format.js";
 import {
   collectRequests,
   decisionLines,
   eventLines,
-  eventRow,
   listRow,
   messagesFor,
   type RequestRecord,
@@ -52,12 +60,24 @@ import {
   wireLines,
   writtenLines,
 } from "./inspector-requests.js";
-import { c } from "./theme.js";
+import {
+  coveredLines,
+  previewLines,
+  selectable,
+  type Workbench,
+  type WorkbenchRow,
+  workbench,
+  workbenchLine,
+} from "./inspector-workbench.js";
+import { type SectionState, sectionStates } from "./prompt-sections.js";
+import { c, G } from "./theme.js";
 
 export * from "./inspector-compactions.js";
 export * from "./inspector-composition.js";
+export * from "./inspector-events.js";
 export * from "./inspector-format.js";
 export * from "./inspector-requests.js";
+export * from "./inspector-workbench.js";
 
 export type SessionSource = { name: string; events: readonly AgentEvent[] };
 
@@ -75,8 +95,18 @@ export type InspectorDeps = {
   rows: () => number;
   /** 主会话某请求的原始流(开了 trace 才有)。 */
   rawFor?: (requestIndex: number) => string[] | undefined;
-  /** 上下文面板里选中一条消息并选了动作。view 由检视器自己处理,其余交给界面落到命令上。 */
+  /** 上一次正常请求发出的消息:工作台据此画缓存线。 */
+  lastSent?: () => Message[] | undefined;
+  /** 上下文窗口:工作台头行的占比。 */
+  contextWindow?: () => number;
+  /** 模型正在跑:工作台只看不改。 */
+  running?: () => boolean;
+  /** 工作台里选中一条消息并选了动作。view 由检视器自己处理,其余交给界面落到命令上。 */
   onAction?: (action: ContextAction, row: CompositionRow) => void;
+  /** 工作台的 system 行:翻一段(界面层追加 context/edit)。 */
+  onSection?: (name: string) => void;
+  /** 工作台的 tools 行:开 /tools 选单(界面层关掉检视器再开)。 */
+  onTools?: () => void;
   onClose: () => void;
   requestRender: () => void;
 };
@@ -92,21 +122,41 @@ type Mode =
   | "compaction"
   | "composition"
   | "actions"
-  | "message";
+  | "message"
+  | "sections"
+  | "covered";
+
+/** 工作台底部预览区的行数(来历一行加正文四行)。 */
+const PREVIEW_LINES = 5;
+
+function lastIndexWhere<T>(arr: readonly T[], pred: (x: T) => boolean): number {
+  for (let i = arr.length - 1; i >= 0; i--) if (pred(arr[i] as T)) return i;
+  return -1;
+}
+const CTRL_UP = "\x1b[1;5A";
+const CTRL_DOWN = "\x1b[1;5B";
 
 export class RequestInspector implements Component {
   private mode: Mode = "list";
   private sessionIndex = 0;
   private selected = 0;
   private eventSelected = 0;
+  private eventFilter: EventFilter = 1;
+  private eventSection: EventSection = 1;
   private compactionSelected = 0;
   private section: Section = 1;
   private compactionSection: CompactionSection = 1;
   private scroll = 0;
   private folded = false;
   private lastViewport = 10;
+  private sectionSelected = 0;
+  /** 运行中按了会改上下文的键:在预览区说一句,不开动作单。 */
+  private busyNote: string | undefined;
   private recCache:
     | { events: readonly AgentEvent[]; len: number; recs: RequestRecord[] }
+    | undefined;
+  private wbCache:
+    | { events: readonly AgentEvent[]; len: number; key: string; wb: Workbench }
     | undefined;
   /** 已按宽度换行的分区内容缓存;键含会话与事件数,日志一变自然失效。生产级会话动辄上千事件,不能每个按键都重算。 */
   private lineCache = new Map<string, string[]>();
@@ -121,14 +171,15 @@ export class RequestInspector implements Component {
     this.selected = Math.max(0, this.records().length - 1);
   }
 
-  /** 直接进入事件视图(/events)。 */
+  /** 直接进入事件视图(/inspect events)。 */
   showEvents(): void {
     this.mode = "events";
     this.scroll = 0;
-    this.eventSelected = Math.max(0, this.events().length - 1);
+    const idx = filteredIndices(this.events(), this.eventFilter);
+    this.eventSelected = idx.at(-1) ?? 0;
   }
 
-  /** 直接进入压缩对照(/compactions)。 */
+  /** 直接进入压缩对照(/inspect compactions)。 */
   showCompactions(): void {
     this.mode = "compactions";
     this.scroll = 0;
@@ -138,7 +189,7 @@ export class RequestInspector implements Component {
   private messageSelected = 0;
   private actionSelected = 0;
 
-  /** 直接定位到第 n 次请求的某个分区(/raw N → 接收分区)。没有该请求返回 false。 */
+  /** 直接定位到第 n 次请求的某个分区(/inspect raw N → 接收分区)。没有该请求返回 false。 */
   showRequest(n: number, section: Section): boolean {
     const idx = this.records().findIndex((r) => r.n === n);
     if (idx < 0) return false;
@@ -150,15 +201,58 @@ export class RequestInspector implements Component {
     return true;
   }
 
-  /** 直接进入组装视图(Ctrl+E / /context)。 */
-  showComposition(): void {
+  /** 直接进入工作台(Ctrl+E)。at = 事件下标:光标落在从它起的第一条消息上;不给就落在最后一条。 */
+  showComposition(at?: number): void {
     this.mode = "composition";
     this.scroll = 0;
-    this.messageSelected = Math.max(0, this.composition().rows.length - 1);
+    this.busyNote = undefined;
+    const rows = this.workbench().rows;
+    let pick = -1;
+    if (at !== undefined) {
+      pick = rows.findIndex(
+        (r) => (r.kind === "message" || r.kind === "system") && r.row.event >= at,
+      );
+    }
+    if (pick < 0) {
+      for (let i = rows.length - 1; i >= 0; i--) {
+        if (rows[i]?.kind === "message" || rows[i]?.kind === "system") {
+          pick = i;
+          break;
+        }
+      }
+    }
+    this.messageSelected = Math.max(0, pick);
   }
 
   composition(): ReturnType<typeof compositionRows> {
     return compositionRows(this.events(), this.deps.currentProvider?.());
+  }
+
+  /** 工作台的行:按会话、事件数与工具集缓存,同一状态下按键不重算。 */
+  workbench(): Workbench {
+    const events = this.events();
+    const tools = this.deps.tools();
+    const lastSent = this.deps.lastSent?.();
+    const key = `${this.sessionIndex}:${tools.map((t) => t.name).join(",")}:${lastSent?.length ?? -1}`;
+    if (
+      this.wbCache?.events !== events ||
+      this.wbCache.len !== events.length ||
+      this.wbCache.key !== key
+    ) {
+      const wb = workbench({
+        events,
+        provider: this.deps.currentProvider?.(),
+        tools,
+        lastSent,
+      });
+      this.wbCache = { events, len: events.length, key, wb };
+    }
+    return this.wbCache.wb;
+  }
+
+  /** 工作台当前选中的行。 */
+  private selectedRow(): WorkbenchRow | undefined {
+    return this.workbench().rows[this.messageSelected];
   }
 
   get isDetail(): boolean {
@@ -206,9 +300,58 @@ export class RequestInspector implements Component {
     if (n <= 1) return;
     this.sessionIndex = (this.sessionIndex + 1) % n;
     this.selected = Math.max(0, this.records().length - 1);
-    this.eventSelected = Math.max(0, this.events().length - 1);
+    this.eventSelected = filteredIndices(this.events(), this.eventFilter).at(-1) ?? 0;
     this.compactionSelected = Math.max(0, this.compactions().length - 1);
     this.scroll = 0;
+  }
+
+  /** 事件视图:在通过筛选的下标里移动 step 步(负数向上);request 为真时只在 request 之间跳。 */
+  private moveEvent(step: number, request = false): void {
+    const idx = filteredIndices(this.events(), this.eventFilter).filter(
+      (i) => !request || this.events()[i]?.type === "request",
+    );
+    if (idx.length === 0) return;
+    let pos = idx.indexOf(this.eventSelected);
+    if (pos < 0) {
+      // 当前项不在筛选里(如切了筛选):向移动方向找最近的一项。
+      pos =
+        step < 0
+          ? idx.findIndex((i) => i > this.eventSelected)
+          : lastIndexWhere(idx, (i) => i < this.eventSelected);
+      if (pos < 0) pos = step < 0 ? idx.length : -1;
+    }
+    const next = Math.min(idx.length - 1, Math.max(0, pos + step));
+    this.eventSelected = idx[next] as number;
+  }
+
+  /** 工作台:在可停的行之间移动。 */
+  private moveRow(step: number): void {
+    const rows = this.workbench().rows;
+    let i = this.messageSelected;
+    const dir = step < 0 ? -1 : 1;
+    let left = Math.abs(step);
+    while (left > 0) {
+      let j = i + dir;
+      while (j >= 0 && j < rows.length && !selectable(rows[j] as WorkbenchRow)) j += dir;
+      if (j < 0 || j >= rows.length) break;
+      i = j;
+      left--;
+    }
+    this.messageSelected = i;
+    this.busyNote = undefined;
+  }
+
+  private busy(): boolean {
+    return this.deps.running?.() ?? false;
+  }
+
+  /** 提示词段:切得回来就带开关;切不回来只列元数据。 */
+  private sections(): { states: SectionState[] | undefined; names: string[] } {
+    const events = this.events();
+    const states = sectionStates(events);
+    const start = events.find((e) => e.type === "session/start");
+    const names = start?.type === "session/start" ? (start.sections ?? []).map((s) => s.name) : [];
+    return { states, names };
   }
 
   handleInput(data: string): void {
@@ -268,18 +411,24 @@ export class RequestInspector implements Component {
         if (matchesKey(data, Key.escape) || data === "q") this.deps.onClose();
         else if (tab) this.showCompactions();
         else if (data === "s") this.switchSession();
-        else if (matchesKey(data, Key.up) || data === "k")
-          this.eventSelected = clampSel(this.eventSelected - 1, events.length);
-        else if (matchesKey(data, Key.down) || data === "j")
-          this.eventSelected = clampSel(this.eventSelected + 1, events.length);
-        else if (matchesKey(data, Key.pageUp))
-          this.eventSelected = clampSel(this.eventSelected - page, events.length);
-        else if (matchesKey(data, Key.pageDown))
-          this.eventSelected = clampSel(this.eventSelected + page, events.length);
-        else if (matchesKey(data, Key.home) || data === "g") this.eventSelected = 0;
+        else if (data === CTRL_UP) this.moveEvent(-1, true);
+        else if (data === CTRL_DOWN) this.moveEvent(1, true);
+        else if (matchesKey(data, Key.up) || data === "k") this.moveEvent(-1);
+        else if (matchesKey(data, Key.down) || data === "j") this.moveEvent(1);
+        else if (matchesKey(data, Key.pageUp)) this.moveEvent(-page);
+        else if (matchesKey(data, Key.pageDown)) this.moveEvent(page);
+        else if (matchesKey(data, Key.home) || data === "g")
+          this.eventSelected = filteredIndices(events, this.eventFilter)[0] ?? 0;
         else if (matchesKey(data, Key.end) || data === "G")
-          this.eventSelected = Math.max(0, events.length - 1);
-        else if (matchesKey(data, Key.enter) && events.length > 0) {
+          this.eventSelected = filteredIndices(events, this.eventFilter).at(-1) ?? 0;
+        else if (/^[1-5]$/.test(data)) {
+          this.eventFilter = Number(data) as EventFilter;
+          const idx = filteredIndices(events, this.eventFilter);
+          if (!idx.includes(this.eventSelected)) {
+            const at = lastIndexWhere(idx, (i) => i <= this.eventSelected);
+            this.eventSelected = (at >= 0 ? idx[at] : idx[0]) ?? 0;
+          }
+        } else if (matchesKey(data, Key.enter) && events.length > 0) {
           this.mode = "event";
           this.scroll = 0;
         }
@@ -290,47 +439,54 @@ export class RequestInspector implements Component {
           this.scroll = 0;
         } else if (scrollKeys()) {
           // 已处理
+        } else if (/^[1-3]$/.test(data)) {
+          this.eventSection = Number(data) as EventSection;
+          this.scroll = 0;
+        } else if (matchesKey(data, Key.left) || data === "h") {
+          this.eventSection = (this.eventSection === 1 ? 3 : this.eventSection - 1) as EventSection;
+          this.scroll = 0;
+        } else if (matchesKey(data, Key.right) || data === "l") {
+          this.eventSection = (this.eventSection === 3 ? 1 : this.eventSection + 1) as EventSection;
+          this.scroll = 0;
         } else if (data === "[" || data === "]") {
-          this.eventSelected = clampSel(
-            this.eventSelected + (data === "]" ? 1 : -1),
-            events.length,
-          );
+          this.moveEvent(data === "]" ? 1 : -1);
           this.scroll = 0;
         }
         break;
       case "composition": {
-        const rows = this.composition().rows;
+        const row = this.selectedRow();
         if (matchesKey(data, Key.escape) || data === "q") this.deps.onClose();
         else if (tab) {
           this.mode = "list";
           this.scroll = 0;
-        } else if (data === "s") this.switchSession();
-        else if (matchesKey(data, Key.up) || data === "k")
-          this.messageSelected = clampSel(this.messageSelected - 1, rows.length);
-        else if (matchesKey(data, Key.down) || data === "j")
-          this.messageSelected = clampSel(this.messageSelected + 1, rows.length);
-        else if (matchesKey(data, Key.pageUp))
-          this.messageSelected = clampSel(this.messageSelected - page, rows.length);
-        else if (matchesKey(data, Key.pageDown))
-          this.messageSelected = clampSel(this.messageSelected + page, rows.length);
-        else if (matchesKey(data, Key.home) || data === "g") this.messageSelected = 0;
-        else if (matchesKey(data, Key.end) || data === "G")
-          this.messageSelected = Math.max(0, rows.length - 1);
-        else if (matchesKey(data, Key.enter) && rows.length > 0) {
-          this.mode = "actions";
-          this.actionSelected = 0;
-        }
+        } else if (data === "s") {
+          this.switchSession();
+          this.showComposition();
+        } else if (matchesKey(data, Key.up) || data === "k") this.moveRow(-1);
+        else if (matchesKey(data, Key.down) || data === "j") this.moveRow(1);
+        else if (matchesKey(data, Key.pageUp)) this.moveRow(-page);
+        else if (matchesKey(data, Key.pageDown)) this.moveRow(page);
+        else if (matchesKey(data, Key.home) || data === "g") {
+          this.messageSelected = 0;
+          this.moveRow(0);
+        } else if (matchesKey(data, Key.end) || data === "G") {
+          this.messageSelected = this.workbench().rows.length - 1;
+          this.moveRow(0);
+        } else if (matchesKey(data, Key.enter) && row) this.enterRow(row);
         break;
       }
       case "actions": {
-        const rows = this.composition().rows;
-        const r = rows[this.messageSelected];
-        const items = r ? actionsFor(events, r, rows.length) : [];
+        const row = this.selectedRow();
+        const r = row?.kind === "message" || row?.kind === "system" ? row.row : undefined;
+        const total = this.composition().rows.length;
+        const items = r ? actionsFor(events, r, total) : [];
         if (matchesKey(data, Key.escape) || data === "q") this.mode = "composition";
         else if (matchesKey(data, Key.up) || data === "k")
           this.actionSelected = clampSel(this.actionSelected - 1, items.length);
         else if (matchesKey(data, Key.down) || data === "j")
           this.actionSelected = clampSel(this.actionSelected + 1, items.length);
+        else if (/^[1-9]$/.test(data) && Number(data) <= items.length)
+          this.actionSelected = Number(data) - 1;
         else if (matchesKey(data, Key.enter) && r) {
           const item = items[this.actionSelected];
           if (item?.action === "view") {
@@ -344,21 +500,43 @@ export class RequestInspector implements Component {
         break;
       }
       case "message": {
-        const rows = this.composition().rows;
         if (matchesKey(data, Key.escape) || data === "q") {
           this.mode = "composition";
           this.scroll = 0;
         } else if (scrollKeys()) {
           // 已处理
         } else if (data === "[" || data === "]") {
-          this.messageSelected = clampSel(
-            this.messageSelected + (data === "]" ? 1 : -1),
-            rows.length,
-          );
+          this.moveRow(data === "]" ? 1 : -1);
+          const row = this.selectedRow();
+          if (row?.kind !== "message" && row?.kind !== "system") this.mode = "composition";
           this.scroll = 0;
         }
         break;
       }
+      case "sections": {
+        const { states, names } = this.sections();
+        const n = states?.length ?? names.length;
+        if (matchesKey(data, Key.escape) || data === "q") this.mode = "composition";
+        else if (matchesKey(data, Key.up) || data === "k")
+          this.sectionSelected = clampSel(this.sectionSelected - 1, n);
+        else if (matchesKey(data, Key.down) || data === "j")
+          this.sectionSelected = clampSel(this.sectionSelected + 1, n);
+        else if (/^[1-9]$/.test(data) && Number(data) <= n) this.sectionSelected = Number(data) - 1;
+        else if (matchesKey(data, Key.enter) && states) {
+          const s = states[this.sectionSelected];
+          if (this.busy())
+            this.busyNote =
+              "cannot change the context while running · Esc in the transcript stops the turn";
+          else if (s) this.deps.onSection?.(s.name);
+        }
+        break;
+      }
+      case "covered":
+        if (matchesKey(data, Key.escape) || data === "q") {
+          this.mode = "composition";
+          this.scroll = 0;
+        } else scrollKeys();
+        break;
       case "compactions":
         if (matchesKey(data, Key.escape) || data === "q") this.deps.onClose();
         else if (tab) this.showComposition();
@@ -405,6 +583,47 @@ export class RequestInspector implements Component {
         break;
     }
     this.deps.requestRender();
+  }
+
+  /** 工作台里按 Enter:按行的种类分派。 */
+  private enterRow(row: WorkbenchRow): void {
+    switch (row.kind) {
+      case "message":
+        if (this.busy()) {
+          this.busyNote =
+            "cannot change the context while running · Esc in the transcript stops the turn";
+          return;
+        }
+        if (row.row.stages.some((s) => s.startsWith("summary"))) {
+          const comps = this.compactions();
+          const k = comps.findIndex((cmp) => cmp.index === row.row.event);
+          if (k >= 0) {
+            this.compactionSelected = k;
+            this.compactionSection = 1;
+            this.mode = "compaction";
+            this.scroll = 0;
+            return;
+          }
+        }
+        this.mode = "actions";
+        this.actionSelected = 0;
+        return;
+      case "system":
+        this.mode = "sections";
+        this.sectionSelected = 0;
+        this.busyNote = undefined;
+        return;
+      case "tools":
+        this.deps.onTools?.();
+        return;
+      case "covered":
+        this.mode = "covered";
+        this.scroll = 0;
+        return;
+      case "dropped":
+      case "cache":
+        return;
+    }
   }
 
   private switchSection(step: number): void {
@@ -471,6 +690,16 @@ export class RequestInspector implements Component {
     return `${items.join("   ")}   ${c.faint("s switch session")}`;
   }
 
+  /** 页签行:[1 name] 2 name 3 name。 */
+  private tabs(names: readonly string[], current: number): string {
+    return names
+      .map((name, i) => {
+        const n = i + 1;
+        return n === current ? c.bold(c.ink(`[${n} ${name}]`)) : c.soft(` ${n} ${name} `);
+      })
+      .join(" ");
+  }
+
   render(width: number): string[] {
     const w = Math.max(20, width);
     const inner = w - 2;
@@ -514,35 +743,66 @@ export class RequestInspector implements Component {
     }
 
     if (this.mode === "events") {
-      const title = `${c.bold(c.ink("Events"))}  ${c.soft(`${events.length} events`)}  ${c.faint("this array is the whole kernel state; the screen, the requests and what the model sees are projections of it")}`;
-      const columns = c.faint("  #     time      type                  size   visibility  state");
+      const idx = filteredIndices(events, this.eventFilter);
+      const title = `${c.bold(c.ink("Events"))}  ${c.soft(`${events.length} events · this array is the whole kernel state`)}   ${this.tabs(EVENT_FILTERS, this.eventFilter)}`;
+      const columns = c.faint(
+        "   #     time      type             what                                                   ≈tok  model sees",
+      );
       const head = withSession([pad(title), pad(columns), pad(rule)]);
       const foot = [
         pad(rule),
-        pad(c.faint("↑↓ select · Enter raw JSON · Tab compactions · s session · Esc close")),
+        pad(
+          c.faint(
+            "↑↓ move · Enter details · 1–5 filter · Ctrl+↑↓ request · PgUp/PgDn · Tab compactions · s session · Esc close",
+          ),
+        ),
       ];
       const viewport = rows - head.length - foot.length;
       this.lastViewport = viewport;
-      const start = windowStart(this.eventSelected, events.length, viewport);
-      const body = this.cached(cacheKey(`events:${start}:${this.eventSelected}`), () =>
-        events
+      // 请求前空一行:条目里 undefined 就是空行。
+      const entries: (number | undefined)[] = [];
+      for (const i of idx) {
+        if (events[i]?.type === "request" && entries.length > 0) entries.push(undefined);
+        entries.push(i);
+      }
+      let body: string[];
+      if (entries.length === 0) body = [pad(c.faint("no events match this filter"))];
+      else {
+        const selPos = Math.max(0, entries.indexOf(this.eventSelected));
+        const start = windowStart(selPos, entries.length, viewport);
+        body = entries
           .slice(start, start + viewport)
-          .map((_, i) => pad(eventRow(events, start + i, start + i === this.eventSelected))),
-      ).slice();
+          .map((i) =>
+            i === undefined
+              ? pad("")
+              : pad(eventLine(events, i, { selected: i === this.eventSelected, width: inner })),
+          );
+      }
       return [...head, ...fill(body, viewport), ...foot];
     }
 
     if (this.mode === "event") {
       const e = events[this.eventSelected];
-      const title = `${c.bold(c.ink(`Event #${this.eventSelected}`))}  ${c.ink(e?.type ?? "")}  ${c.faint(e ? clock(e.at) : "")}  ${c.faint(`(${this.eventSelected + 1}/${events.length})`)}`;
+      const idx = filteredIndices(events, this.eventFilter);
+      const pos = idx.indexOf(this.eventSelected);
+      const title = `${c.bold(c.ink(`Event #${this.eventSelected}`))}  ${c.ink(e?.type ?? "")}  ${c.faint(e ? clock(e.at) : "")}  ${c.faint(`(${pos + 1}/${idx.length})`)}   ${this.tabs(EVENT_SECTIONS, this.eventSection)}`;
       const head = [pad(title), pad(rule)];
-      const content = this.cached(cacheKey(`event:${this.eventSelected}`), () =>
-        eventLines(events, this.eventSelected).flatMap((l) => wrapTextWithAnsi(l, inner)),
+      const content = this.cached(
+        cacheKey(`event:${this.eventSelected}:${this.eventSection}`),
+        () => {
+          const lines =
+            this.eventSection === 1
+              ? eventViewLines(events, this.eventSelected)
+              : this.eventSection === 2
+                ? eventLines(events, this.eventSelected)
+                : projectionLines(events, this.eventSelected, this.deps.currentProvider?.());
+          return lines.flatMap((l) => wrapTextWithAnsi(l, inner));
+        },
       );
       return this.scrollable(
         head,
         content,
-        "↑↓ scroll · PgUp/PgDn page · [ ] prev/next · Esc back",
+        "↑↓ scroll · PgUp/PgDn page · 1–3 section · [ ] prev/next event · Esc back",
         rows,
         pad,
         rule,
@@ -581,53 +841,82 @@ export class RequestInspector implements Component {
     }
 
     if (this.mode === "composition") {
-      const { rows: crows, omitted } = this.composition();
-      const total = crows.reduce((s, r) => s + messageTokens(r.message), 0);
-      const title = `${c.bold(c.ink("Context"))}  ${c.soft(`${crows.length} messages · ≈${total} tok`)}  ${c.faint("what the model sees on the next request · event # is what /edit and /drop take · Tab: requests")}`;
+      const wb = this.workbench();
+      const window = this.deps.contextWindow?.();
+      const size = `≈${fmtTok(wb.total)}${window ? ` of ${fmtTok(window)} · ${pctOf(wb.total, window)}` : " tok"}`;
+      const cacheNote =
+        wb.cached === undefined
+          ? c.faint("nothing sent yet")
+          : wb.broken
+            ? c.jin(`cached ≈${fmtTok(wb.cached)} · prefix recomputed`)
+            : c.faint(`cached ≈${fmtTok(wb.cached)} on the last request`);
+      const title = `${c.bold(c.ink("Context"))}  ${c.soft("what the model sees on the next request")}   ${c.soft(size)}   ${cacheNote}`;
       const columns = c.faint(
-        "    #  event wire  role            tokens  stages                 preview",
+        "   #     what                                                              tok  share",
       );
-      const om =
-        omitted.length > 0
-          ? c.faint(
-              `  omitted: ${omitted.filter((o) => o.reason === "covered").length} covered by the summary · ${omitted.filter((o) => o.reason === "dropped").length} dropped`,
-            )
-          : c.faint("  nothing omitted");
       const head = withSession([pad(title), pad(columns), pad(rule)]);
+      const row = this.selectedRow();
+      const maxTok = wb.rows.reduce(
+        (m, r) =>
+          r.kind === "message" || r.kind === "system" || r.kind === "tools"
+            ? Math.max(m, r.tok)
+            : m,
+        1,
+      );
+      const preview = row
+        ? previewLines(events, wb, row, {
+            width: inner,
+            lines: PREVIEW_LINES - 1,
+            busy: this.busyNote,
+          })
+        : [];
+      const previewBox = fill(preview.map(pad), PREVIEW_LINES);
       const foot = [
         pad(rule),
-        pad(om),
-        pad(c.faint("↑↓ select · Enter actions · Tab requests · s session · Esc close")),
+        ...previewBox.slice(0, PREVIEW_LINES),
+        pad(rule),
+        pad(
+          c.faint(
+            "↑↓ move · Enter actions · PgUp/PgDn page · Tab requests · s session · Esc close",
+          ),
+        ),
       ];
-      const viewport = rows - head.length - foot.length;
+      const viewport = Math.max(3, rows - head.length - foot.length);
       this.lastViewport = viewport;
       let body: string[];
-      if (crows.length === 0) body = [pad(c.faint("no messages yet"))];
+      if (wb.rows.length === 0) body = [pad(c.faint("no messages yet"))];
       else {
-        const start = windowStart(this.messageSelected, crows.length, viewport);
-        body = crows
-          .slice(start, start + viewport)
-          .map((r, i) => pad(compositionRow(r, start + i === this.messageSelected)));
+        const start = windowStart(this.messageSelected, wb.rows.length, viewport);
+        body = wb.rows.slice(start, start + viewport).map((r, i) =>
+          pad(
+            workbenchLine(events, r, {
+              selected: start + i === this.messageSelected,
+              width: inner,
+              maxTok,
+            }),
+          ),
+        );
       }
       return [...head, ...fill(body, viewport), ...foot];
     }
 
     if (this.mode === "actions") {
-      const { rows: crows } = this.composition();
-      const r = crows[this.messageSelected];
+      const row = this.selectedRow();
+      const r = row?.kind === "message" || row?.kind === "system" ? row.row : undefined;
       if (!r) {
         this.mode = "composition";
         return this.render(width);
       }
+      const crows = this.composition().rows;
       const items = actionsFor(events, r, crows.length);
       const sel = Math.min(this.actionSelected, items.length - 1);
       const m = r.message;
-      const title = `${c.bold(c.ink(`Message #${r.i}`))}  ${c.ink(roleLabel(m))}  ${c.soft(`event #${r.event} · ≈${messageTokens(m)} tok${m.edited ? " · edited" : ""}`)}`;
+      const title = `${c.bold(c.ink(`#${r.event} ${roleLabel(m)}`))}  ${c.soft(`≈${messageTokens(m)} tok${m.edited ? ` · ${c.jin("edited")}` : ""}`)}`;
       const head = [pad(title), pad(rule)];
       const previewSrc = m.content
         ? m.content.split("\n").slice(0, 6)
         : m.role === "assistant" && m.toolCalls.length > 0
-          ? m.toolCalls.map((t) => `» ${t.name} ${JSON.stringify(t.args)}`)
+          ? m.toolCalls.map((t) => `${G.call} ${t.name} ${JSON.stringify(t.args)}`)
           : ["(empty)"];
       const chosen = items[sel] as ActionItem;
       const body = [
@@ -637,8 +926,8 @@ export class RequestInspector implements Component {
         ...items.map((it, i) =>
           pad(
             i === sel
-              ? `  ${c.ink("▸")} ${c.bold(c.ink(it.label.padEnd(24)))} ${c.faint(it.hint)}`
-              : `    ${c.soft(it.label.padEnd(24))} ${c.faint(it.hint)}`,
+              ? `  ${c.zhu(G.cursor)} ${c.bold(c.ink(`${i + 1}  ${it.label.padEnd(24)}`))} ${c.faint(it.hint)}`
+              : `    ${c.soft(`${i + 1}  ${it.label.padEnd(24)}`)} ${c.faint(it.hint)}`,
           ),
         ),
         pad(""),
@@ -648,20 +937,21 @@ export class RequestInspector implements Component {
           inner,
         ).map(pad),
       ];
-      const foot = [pad(rule), pad(c.faint("↑↓ move · Enter choose · Esc back"))];
+      const foot = [pad(rule), pad(c.faint("↑↓ or 1–9 choose · Enter do it · Esc back"))];
       const viewport = rows - head.length - foot.length;
       this.lastViewport = viewport;
       return [...head, ...fill(body.slice(0, viewport), viewport), ...foot];
     }
 
     if (this.mode === "message") {
-      const { rows: crows } = this.composition();
-      const r = crows[this.messageSelected];
+      const row = this.selectedRow();
+      const r = row?.kind === "message" || row?.kind === "system" ? row.row : undefined;
       if (!r) {
         this.mode = "composition";
         return this.render(width);
       }
-      const title = `${c.bold(c.ink(`Message #${r.i}`))}  ${c.ink(roleLabel(r.message))}  ${c.faint(`event #${r.event}`)}  ${c.faint(`(${this.messageSelected + 1}/${crows.length})`)}`;
+      const crows = this.composition().rows;
+      const title = `${c.bold(c.ink(`#${r.event} ${roleLabel(r.message)}`))}  ${c.faint(`message ${r.i} of ${crows.length}`)}`;
       const head = [pad(title), pad(rule)];
       const content = this.cached(cacheKey(`message:${r.event}:${r.i}`), () =>
         compositionLines(events, r).flatMap((l) => wrapTextWithAnsi(l, inner)),
@@ -676,6 +966,76 @@ export class RequestInspector implements Component {
       );
     }
 
+    if (this.mode === "sections") {
+      const { states, names } = this.sections();
+      const start = events.find((e) => e.type === "session/start");
+      const metas = start?.type === "session/start" ? (start.sections ?? []) : [];
+      const total = metas.reduce((n, s) => n + Math.ceil(s.chars / 4), 0);
+      const title = `${c.bold(c.ink("System prompt"))}  ${c.soft(`${metas.length} sections · ≈${total} tok`)}   ${c.faint(states ? "Enter flips a section for this session" : "section texts cannot be recovered from this log: read-only")}`;
+      const head = [pad(title), pad(rule)];
+      const list =
+        states ?? names.map((name) => ({ name, on: true, text: "", chars: 0, source: undefined }));
+      const body: string[] = [];
+      list.forEach((s, i) => {
+        const meta = metas[i];
+        const tok = Math.ceil((meta?.chars ?? s.chars) / 4);
+        const first =
+          s.text
+            .split("\n")
+            .find((l) => l.trim())
+            ?.trim() ??
+          meta?.source ??
+          "";
+        const state = states ? (s.on ? "on " : "off") : "   ";
+        const line = `${i + 1}  ${s.name.padEnd(22)} ${state}  ${`≈${tok}`.padStart(6)}   ${truncateToWidth(first, Math.max(10, inner - 44), "…")}`;
+        body.push(
+          pad(
+            i === this.sectionSelected
+              ? `  ${c.zhu(G.cursor)} ${c.bold(c.ink(line))}`
+              : `    ${s.on ? c.soft(line) : c.faint(line)}`,
+          ),
+        );
+      });
+      if (list.length === 0) body.push(pad(c.faint("no section metadata in this session")));
+      body.push(pad(""));
+      if (this.busyNote) body.push(pad(c.zhu(`  ${this.busyNote}`)));
+      else if (states)
+        body.push(
+          ...wrapTextWithAnsi(
+            `${c.soft("If you do this")}  ${c.faint("the system prompt changes for this session (recorded as an edit of event #0) · cache miss from the top on the next request · /settings prompt.sections makes it stick")}`,
+            inner,
+          ).map(pad),
+        );
+      const foot = [
+        pad(rule),
+        pad(c.faint(states ? "↑↓ or 1–9 choose · Enter flip · Esc back" : "Esc back")),
+      ];
+      const viewport = rows - head.length - foot.length;
+      this.lastViewport = viewport;
+      return [...head, ...fill(body.slice(0, viewport), viewport), ...foot];
+    }
+
+    if (this.mode === "covered") {
+      const row = this.selectedRow();
+      if (row?.kind !== "covered") {
+        this.mode = "composition";
+        return this.render(width);
+      }
+      const title = `${c.bold(c.ink(`Covered #${row.from}–#${row.upTo - 1}`))}  ${c.soft(`${row.count} messages · ≈${fmtTok(row.tok)} tok`)}  ${c.faint(`replaced by the summary #${row.summary}`)}`;
+      const head = [pad(title), pad(rule)];
+      const content = this.cached(cacheKey(`covered:${row.from}:${row.upTo}`), () =>
+        coveredLines(events, row).flatMap((l) => wrapTextWithAnsi(l, inner)),
+      );
+      return this.scrollable(
+        head,
+        content,
+        "↑↓ scroll · PgUp/PgDn page · Esc back",
+        rows,
+        pad,
+        rule,
+      );
+    }
+
     if (this.mode === "compaction") {
       const comps = this.compactions();
       const rec = comps[this.compactionSelected];
@@ -683,12 +1043,7 @@ export class RequestInspector implements Component {
         this.mode = "compactions";
         return this.render(width);
       }
-      const tabs = COMPACTION_SECTIONS.map((name, i) => {
-        const n = i + 1;
-        return n === this.compactionSection
-          ? c.bold(c.ink(`[${n} ${name}]`))
-          : c.soft(` ${n} ${name} `);
-      }).join(" ");
+      const tabs = this.tabs(COMPACTION_SECTIONS, this.compactionSection);
       const title = `${c.bold(c.ink(`Compaction #${rec.n}`))}  ${c.ink(rec.event.strategy ?? "")}  ${c.faint(clock(rec.event.at))}  ${c.faint(`(${this.compactionSelected + 1}/${comps.length})`)}`;
       const head = [pad(title), pad(tabs), pad(rule)];
       const content = this.cached(
@@ -714,10 +1069,7 @@ export class RequestInspector implements Component {
       this.mode = "list";
       return this.render(width);
     }
-    const tabs = SECTIONS.map((name, i) => {
-      const n = i + 1;
-      return n === this.section ? c.bold(c.ink(`[${n} ${name}]`)) : c.soft(` ${n} ${name} `);
-    }).join(" ");
+    const tabs = this.tabs(SECTIONS, this.section);
     const title = `${c.bold(c.ink(`Request #${rec.n}`))}  ${c.ink(rec.request.model)}  ${c.faint(clock(rec.request.at))}  ${c.faint(`(${this.selected + 1}/${recs.length})`)}`;
     const head = [pad(title), pad(tabs), pad(rule)];
     const content = this.cached(
