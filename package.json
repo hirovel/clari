@@ -28,7 +28,8 @@
     "once": "tsx cli/run.ts",
     "models:update": "tsx scripts/update-models.ts",
     "demo": "node scripts/demo.mjs",
-    "coverage": "vitest run --coverage --coverage.include=src/** --coverage.include=cli/** --coverage.reporter=text-summary --coverage.reporter=html"
+    "coverage": "vitest run --coverage --coverage.include=src/** --coverage.include=cli/** --coverage.reporter=text-summary --coverage.reporter=html",
+    "checkup": "tsx scripts/checkup.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.0.0",

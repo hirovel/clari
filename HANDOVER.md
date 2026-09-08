@@ -85,7 +85,7 @@
 ## 6 待办(按用户提过的优先级)
 
 1. **发布**:等用户一句话,`bash scripts/publish-public.sh origin main`;发布前把 CHANGELOG 的 Unreleased 升版本。
-2. **真实供应商测试(C 层)**:用户带 key 跑长会话,重点看自动压缩触发、摘要质量、缓存命中率与预计的偏差、Responses 协议(从未联调)。写一个用户自己跑的验证脚本,输出用事件文件对比,不要在脚本里处理 key。
+2. **真实供应商测试(C 层)**:计划与判据在 `docs/architecture.html` 的 6.10 节,八轮,每轮写了怎么跑、看什么、通过判据、不过改哪里。工具是 `pnpm checkup sessions/<文件>.jsonl`:离线只读一份会话文件,把发请求前的预测与供应商的实测摆成一张表,再跑八条判据(最要紧的是 A 前缀不变量)。用户自己带 key 在 `pnpm tui` 里跑,跑完把 checkup 的输出贴回来;脚本不碰 key,输出里也没有 key。
 3. **LICENSE**:用户定。
 4. **plan 缺省**:现在缺省开;建议缺省关、`long` 预设开。用户未定。
 5. **技能**:三档(name、brief、full)与 `/skills probe`;兼容 Claude Code 格式的技能(`references/`、`scripts/`、`/skills install <github>`)。

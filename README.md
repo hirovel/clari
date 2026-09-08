@@ -137,6 +137,8 @@ Every replaceable point is a plain function type: compaction strategy, preservat
 
 ## Development
 
+`pnpm checkup sessions/<file>.jsonl` reads a finished session offline and puts what the kernel predicted before each request next to what the provider reported back, then runs nine checks over it (prefix invariant, log-rebuilds-the-request, estimate stability, cache hits, compaction, failure recovery, tool errors, thinking round-trip, raw-stream coverage). It reads no credentials and prints no key.
+
 `AGENTS.md` holds the working rules for anyone, human or agent, changing this repository; `HANDOVER.md` holds the current state, a module map, the invariants, the open work and the traps.
 
 ```bash

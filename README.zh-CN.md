@@ -118,6 +118,8 @@ pnpm replay sessions/<文件>.jsonl --compaction 1 --json
 
 ## 交接
 
+`pnpm checkup sessions/<文件>.jsonl` 读一份跑完的会话,把内核发请求前的预测与供应商回来的实测摆成一张表,再跑九条判据(前缀不变量、日志能不能重建当时发的请求、估算稳定性、缓存命中、压缩、失败恢复、工具错误率、思考回传、原始流覆盖)。它不读凭据,输出里没有 key。
+
 `AGENTS.md` 是改这个仓库的人与 agent 都要守的规则;`HANDOVER.md` 是现状、模块地图、不变量、待办与坑。
 
 ## 结构
