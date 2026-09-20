@@ -1,6 +1,8 @@
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
 import { fmtMs, fmtTok, RequestInspector } from "../cli/inspector.js";
+import { cacheUsageLines } from "../cli/inspector-format.js";
+import { messagesFor } from "../cli/inspector-requests.js";
 import type { RequestRecording } from "../cli/session-records.js";
 import type { AgentEvent } from "../src/events.js";
 import { EventLog } from "../src/log.js";
@@ -111,6 +113,18 @@ describe("请求检视器", () => {
     expect(fmtTok(undefined)).toBe("—");
     expect(fmtMs(80)).toBe("80ms");
     expect(fmtMs(2340)).toBe("2.3s");
+    expect(
+      cacheUsageLines({ inputTokens: 1200, outputTokens: 5000, cacheReadTokens: 800 })[0],
+    ).toContain("66.7%");
+    expect(
+      cacheUsageLines({ inputTokens: 1200, outputTokens: 0, cacheReadTokens: 0 })[0],
+    ).toContain("0.0%");
+    expect(cacheUsageLines({ inputTokens: 1200, outputTokens: 0 })).toEqual([
+      "Cache hit: not reported",
+    ]);
+    expect(
+      cacheUsageLines({ inputTokens: 100, outputTokens: 0, cacheReadTokens: 101 })[0],
+    ).toContain("unavailable");
   });
 
   it("列表:一行一请求,含规模、实测、缓存、停止原因;行数恰为终端高度", async () => {
@@ -154,6 +168,8 @@ describe("请求检视器", () => {
     insp.handleInput("3");
     doc = text();
     expect(doc).toContain("[3 sent]");
+    expect(doc).toContain("Cache hit: 66.7%");
+    expect(doc).toContain("exact text spans not reported");
     expect(doc).toContain("1. system");
     expect(doc).toContain("2. user");
     expect(doc).toContain("reconstructed from events");
@@ -394,5 +410,63 @@ describe("请求检视器", () => {
     expect(damaged).toContain("Recording unavailable or damaged");
     expect(damaged).toContain("Missing or unreadable recording");
     expect(damaged).toContain("reconstructed from events");
+
+    // 历史工具同名也可能改了定义;只比较实录,不借当前工具集猜测。
+    const records = build(log, bare).insp.records();
+    const recorded = new RequestInspector({
+      events: () => log.events,
+      providerFor: () => undefined,
+      sessions: () => [
+        {
+          name: "main",
+          events: log.events,
+          recordingFor: (i) => {
+            const rec = records.find((r) => r.index === i);
+            return rec
+              ? {
+                  bodies: [],
+                  input: {
+                    messages: messagesFor(log.events, rec),
+                    tools: [
+                      { name: "echo", parameters: {}, description: rec.n === 1 ? "old" : "new" },
+                    ],
+                  },
+                }
+              : undefined;
+          },
+        },
+      ],
+      tools: () => [],
+      rows: () => 40,
+      onClose() {},
+      requestRender() {},
+    });
+    recorded.showRequest(2, 3);
+    const compared = recorded.render(100).map(stripAnsi).join("\n");
+    expect(compared).toContain("Tool definitions: changed");
+    expect(compared).toContain("Same message prefix");
+    expect(compared).toContain("Added since previous input");
+    expect(compared).toContain("Cache hit: not reported");
+    log.append({
+      type: "context/edit",
+      at: "t",
+      target: 1,
+      field: "content",
+      value: "changed question",
+    });
+    log.append({
+      type: "request",
+      at: "t",
+      model: "fake",
+      messages: 5,
+      tools: [],
+      estimatedTokens: 50,
+      reason: "turn",
+    });
+    recorded.showRequest(3, 3);
+    const edited = recorded.render(100).map(stripAnsi).join("\n");
+    expect(edited).toContain("Changed tail from here");
+    expect(edited).not.toContain("Added since previous input");
+    expect(edited).toContain("context/edit");
   });
 });

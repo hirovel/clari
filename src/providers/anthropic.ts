@@ -8,18 +8,14 @@ import {
   clampEffort,
   type EffortLevel,
   type FieldTable,
-  fetchModelIds,
-  linkedAbort,
-  mergeRetry,
   type Provider,
-  stallToError,
   type ToolDef,
   type WireOptions,
 } from "../provider.js";
 import { ProviderError, parseRetryAfter } from "./errors.js";
-import { recordedFetch } from "./http.js";
-import { type RetryOptions, withRetry } from "./retry.js";
-import { sseEvents } from "./sse.js";
+import { fetchModelIds, linkedAbort, recordedFetch } from "./http.js";
+import { mergeRetry, type RetryOptions, withRetry } from "./retry.js";
+import { sseEvents, stallToError } from "./sse.js";
 
 /** 流式事件的最小类型,只声明用到的字段。 */
 export type AnthropicEvent =

@@ -9,6 +9,8 @@ type Renderer = (e: Extract<AgentEvent, { type: "ext/event" }>) => ExtLine | und
 
 const renderers: Record<string, Renderer> = {
   recording: () => undefined,
+  skills: (event) =>
+    event.kind === "load-error" ? { tone: "zhu", text: String(event.payload.message) } : undefined,
   mcp: renderMcpEvent,
   setup: (event) =>
     event.kind === "snapshot" ? undefined : { tone: "faint", text: `· setup/${event.kind}` },

@@ -14,6 +14,7 @@ import { type Provider, parseEffort, type ToolDef } from "../src/provider.js";
 import { unchangedPrefix } from "./cards.js";
 import { renderExtEvent } from "./ext-events.js";
 import {
+  cacheUsageLines,
   clock,
   firstLine,
   fmtMs,
@@ -174,6 +175,7 @@ export function exchangeLines(
     c.soft(
       `After response: ${results.length} tool results · ${unknown} unknown · ${next < 0 ? "no next request recorded" : `next input is #${rec.n + 1}`}`,
     ),
+    ...cacheUsageLines(rec.response?.usage ?? rec.compaction?.usage).map(c.soft),
     c.faint(
       `HTTP body: ${recording?.bodies.length ? `${recording.bodies.length} attempt(s) captured before dispatch` : "not captured; 5 shows reconstruction when possible"}`,
     ),

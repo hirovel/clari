@@ -16,6 +16,7 @@ import {
   type SettingDef,
   setSetting,
 } from "../src/settings.js";
+import { SETUP_SECTIONS } from "../src/setup.js";
 import { type SessionSetup, WORK_SETTINGS } from "./session-setup.js";
 import { c, editorTheme } from "./theme.js";
 import type { TuiContext } from "./tui-context.js";
@@ -236,6 +237,8 @@ export class PendingInputsView implements Component {
   }
 }
 
+const SETUP_FIELD_ORDER = SETUP_SECTIONS.flatMap((section) => section.keys);
+
 export class SessionSetupReview implements Component {
   private setup: SessionSetup;
   private index = 0;
@@ -244,7 +247,15 @@ export class SessionSetupReview implements Component {
   private page = 1;
   private readonly edited = new Set<string>();
   private readonly fields: SettingDef[] = [
-    ...WORK_SETTINGS,
+    // 展示顺序归界面;恢复所需字段独立来自设置登记表。
+    ...[...WORK_SETTINGS].sort((a, b) => {
+      const left = SETUP_FIELD_ORDER.indexOf(a.key);
+      const right = SETUP_FIELD_ORDER.indexOf(b.key);
+      return (
+        (left < 0 ? SETUP_FIELD_ORDER.length : left) -
+        (right < 0 ? SETUP_FIELD_ORDER.length : right)
+      );
+    }),
     {
       key: "extensions",
       group: "tools",
@@ -355,47 +366,6 @@ export class SessionSetupReview implements Component {
     }
     this.change();
   }
-}
-
-export function sessionChoice(
-  title: string,
-  choices: { label: string; note?: string }[],
-  rows: () => number,
-  done: (label?: string) => void,
-  change: () => void,
-): Component {
-  let index = 0;
-  return {
-    invalidate() {},
-    render(width) {
-      const inner = Math.max(1, width - 4);
-      const page = Math.max(1, rows() - 7);
-      const start = Math.max(0, index - page + 1);
-      return [
-        ` ${truncateToWidth(c.bold(title), inner)}`,
-        "",
-        ...choices
-          .slice(start, start + page)
-          .map(
-            (choice, i) =>
-              ` ${truncateToWidth(`${start + i === index ? "›" : " "} ${start + i + 1}. ${choice.label}`, inner)}`,
-          ),
-        "",
-        ...wrapTextWithAnsi(choices[index]?.note ?? "", inner)
-          .slice(0, 2)
-          .map((line) => ` ${c.faint(line)}`),
-        ` ${c.faint("↑↓ choose · Enter select · Esc back")}`,
-      ];
-    },
-    handleInput(data) {
-      if (matchesKey(data, Key.escape)) done();
-      else if (matchesKey(data, Key.enter)) done(choices[index]?.label);
-      else if (matchesKey(data, Key.up)) index = Math.max(0, index - 1);
-      else if (matchesKey(data, Key.down)) index = Math.min(choices.length - 1, index + 1);
-      else if (/^[1-9]$/.test(data) && Number(data) <= choices.length) index = Number(data) - 1;
-      change();
-    },
-  };
 }
 
 export function textReview(

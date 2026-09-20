@@ -1,4 +1,6 @@
 // 会话与子任务共用资源装配;只共享连接,不共享工具闭包和日志包装。
+
+import { now } from "../src/events.js";
 import type { EventLog } from "../src/log.js";
 import { maxSteps, queueToTurnEnd, type TurnDeps } from "../src/loop.js";
 import type { Provider } from "../src/provider.js";
@@ -17,8 +19,9 @@ import {
 import { connectMcpServers, type McpBridge } from "./mcp/bridge.js";
 import { loadMcpServers, mcpConfigOf } from "./mcp/config.js";
 import { McpConnections } from "./mcp/connections.js";
-import { discoverSkills } from "./prompt.js";
+import { automaticSkills, discoverSkills } from "./prompt.js";
 import { applyToolPrompts } from "./tool-prompts.js";
+import { createSkillTool, skillCatalog } from "./tools/skill.js";
 
 export async function prepareSessionRuntime(options: {
   boot: ReturnType<typeof bootstrap>;
@@ -42,7 +45,16 @@ export async function prepareSessionRuntime(options: {
   );
   if (args.preservation) compaction.preservation = parsePreservation(args.preservation).policy;
   const memory = args.memory ? memoryFiles() : undefined;
-  const skills = discoverSkills(process.cwd());
+  const skills = discoverSkills(process.cwd(), {
+    onError: (error) =>
+      log.append({
+        type: "ext/event",
+        at: now(),
+        source: "skills",
+        kind: "load-error",
+        payload: { message: error.message },
+      }),
+  });
   const toolPrompts = resolveToolPrompts(args, boot.config);
   if (options.descriptions) toolPrompts.descriptions = options.descriptions;
   const connections = options.connections ?? new McpConnections();
@@ -65,7 +77,12 @@ export async function prepareSessionRuntime(options: {
     try {
       const base = buildTools({
         ...(memory && { memory }),
-        ...(args.skillsLoad === "tool" && { skills }),
+        ...(args.skillsLoad === "tool" && {
+          skills: automaticSkills(skills, {
+            ...(args.skillsMode && { mode: args.skillsMode }),
+            ...(args.skillsInclude !== undefined && { include: args.skillsInclude }),
+          }),
+        }),
         ...(boot.config.fetch && { fetchConfig: boot.config.fetch }),
         toolPrompts,
         plan: args.plan ?? true,
@@ -110,11 +127,17 @@ export async function prepareSessionRuntime(options: {
         provider: () => current().provider,
         tools: (childLog) => {
           // 初始化前固定名称与描述;执行闭包由 assemble 重新创建。
-          const selected = new Map(current().tools.map((t) => [t.name, t.description]));
+          const enabled = current().tools;
+          const selected = new Map(enabled.map((t) => [t.name, t.description]));
+          const selectedSkill = enabled.find((t) => t.name === "skill");
+          const catalog = selectedSkill && skillCatalog(selectedSkill);
           const fork = async (target: EventLog): Promise<ChildTools> => {
             const resources = await assemble(target);
+            // 目录也随派发固定;不能用父会话启动时的旧范围重新装配。
+            const tools = resources.tools.filter((t) => !skillCatalog(t));
+            if (catalog) tools.push(createSkillTool([...catalog]));
             return {
-              tools: resources.tools
+              tools: tools
                 .filter((t) => selected.has(t.name))
                 .map((t) => ({
                   ...t,

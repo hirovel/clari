@@ -6,8 +6,8 @@ import { EventLog } from "../src/log.js";
 import { runTurn } from "../src/loop.js";
 import { composeContext, deriveMessages } from "../src/messages.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
-import { openaiCompat } from "../src/provider.js";
 import { anthropic } from "../src/providers/anthropic.js";
+import { openaiCompat } from "../src/providers/openai-chat.js";
 import { openaiResponses } from "../src/providers/openai-responses.js";
 import { recordUnresolvedCalls } from "../src/recovery.js";
 

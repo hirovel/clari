@@ -9,8 +9,8 @@ import { editTool, readTool } from "../cli/tools/fs.js";
 import { grepTool } from "../cli/tools/search.js";
 import { costOf, fmtCost, usageTotals } from "../src/cost.js";
 import type { AgentEvent } from "../src/events.js";
-import { feedChunk, finishAcc, newAcc } from "../src/provider.js";
 import { toAnthropicWire } from "../src/providers/anthropic.js";
+import { feedChunk, finishAcc, newAcc } from "../src/providers/openai-chat.js";
 import { StreamStall, sseEvents } from "../src/providers/sse.js";
 
 const enc = new TextEncoder();

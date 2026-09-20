@@ -12,6 +12,7 @@ import type { RecordedBody, RequestRecording } from "./session-records.js";
 import { c } from "./theme.js";
 
 export type BodyBlock = {
+  divider?: string;
   id: string;
   title: string;
   meta: string;
@@ -87,6 +88,18 @@ export function inputBlocks(
   const total = messages.reduce((n, m) => n + messageTokens(m), 0);
   const keep = unchangedPrefix(previous, messages);
   return messages.map((message, i) => ({
+    ...(i === 0 && {
+      divider: previous
+        ? keep > 0
+          ? "Same message prefix"
+          : "Changed input from here"
+        : "First input",
+    }),
+    ...(previous &&
+      keep > 0 &&
+      i === keep && {
+        divider: keep === previous.length ? "Added since previous input" : "Changed tail from here",
+      }),
     id: `message-${i}`,
     version: message,
     title: `${i + 1}. ${roleLabel(message)}`,
@@ -272,6 +285,8 @@ export class BodyBrowser {
       const selected = i === this.selected;
       const open = this.expanded.has(block.id);
       if (selected) focus = lines.length;
+      if (block.divider)
+        lines.push(c.faint(truncateToWidth(`── ${block.divider} ${"─".repeat(width)}`, width, "")));
       const title = `${selected ? "›" : " "} [${open ? "−" : "+"}] ${block.title}`;
       lines.push(
         selected

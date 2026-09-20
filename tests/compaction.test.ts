@@ -183,7 +183,23 @@ describe("llmSummarize", () => {
     expect(capture.messages?.at(-1)?.content).toContain("重点保留报错");
   });
 
-  it("安全阀:摘要不比被覆盖内容小,返回 null", async () => {
+  it("安全阀:未完整结束拒绝应用;摘要不比被覆盖内容小,返回 null", async () => {
+    for (const stopReason of ["length", "tool", "aborted"] as const) {
+      await expect(
+        llmSummarize()({
+          events: BASE,
+          window: 100000,
+          targetTokens: 50000,
+          provider: {
+            model: "fake",
+            async complete() {
+              return { text: "残缺摘要", toolCalls: [], stopReason };
+            },
+          },
+          preservation: () => 7,
+        }),
+      ).rejects.toThrow(`Summary did not finish (${stopReason})`);
+    }
     const p = await llmSummarize()({
       events: BASE,
       window: 100000,

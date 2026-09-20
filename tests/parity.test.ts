@@ -16,7 +16,7 @@ import type { AgentEvent } from "../src/events.js";
 import { EventLog } from "../src/log.js";
 import { runTurn } from "../src/loop.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
-import { openaiCompat } from "../src/provider.js";
+import { openaiCompat } from "../src/providers/openai-chat.js";
 import { defineTool } from "../src/tools.js";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -283,6 +283,7 @@ describe("技能段", () => {
     const built = buildSystemPrompt({
       base: "角色",
       cwd: proj,
+      skills: { mode: "auto" },
       discover: { home, root: proj },
       env: { git: false },
     });
@@ -293,6 +294,7 @@ describe("技能段", () => {
     const without = buildSystemPrompt({
       base: "角色",
       cwd: proj,
+      skills: { mode: "auto" },
       discover: { home, root: proj },
       env: { git: false },
       sections: ["role", "env"],

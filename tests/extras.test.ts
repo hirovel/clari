@@ -5,12 +5,12 @@ import { parseCommonArgs } from "../cli/bootstrap.js";
 import { createTuiApp } from "../cli/tui-app.js";
 import { EventLog } from "../src/log.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
-import { feedChunk, finishAcc, newAcc } from "../src/provider.js";
 import {
   feedAnthropicEvent,
   finishAnthropicAcc,
   newAnthropicAcc,
 } from "../src/providers/anthropic.js";
+import { feedChunk, finishAcc, newAcc } from "../src/providers/openai-chat.js";
 import {
   feedResponsesEvent,
   finishResponsesAcc,

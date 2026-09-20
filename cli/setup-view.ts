@@ -31,13 +31,15 @@ import { printableInput } from "./tui-format.js";
 import { type SettingChange, settingTiming, setupRead, sourceOf } from "./tui-settings.js";
 
 type Choice = { label: string; value: unknown; note?: string };
-type Mode =
+type BrowsingMode =
   | { kind: "browse" }
   | { kind: "choices"; def: SettingDef; items: Choice[] }
-  | { kind: "members"; def: SettingDef; names: string[] }
+  | { kind: "members"; def: SettingDef; names: string[] };
+type Mode =
+  | BrowsingMode
   | { kind: "text"; def?: SettingDef; text: string; purpose: "value" | "save" }
   | { kind: "restore"; def: SettingDef }
-  | { kind: "info"; def: SettingDef; offset: number }
+  | { kind: "info"; def: SettingDef; offset: number; from: BrowsingMode; index: number }
   | { kind: "presets" }
   | { kind: "presetReview"; name: string; values: Preset; offset: number };
 
@@ -76,6 +78,14 @@ export class SetupView implements Component {
   private read(def: SettingDef): unknown {
     return setupRead(this.deps.ctx, def, this.scope);
   }
+
+  private skillNote(name: string): string {
+    if (!name) return "New installations join automatically on the next start.";
+    const skill = this.deps.ctx.skills.find((s) => s.name === name);
+    return skill
+      ? `${skill.description || "No description"}\n${skill.path}${skill.disableModelInvocation ? "\nMarked disable-model-invocation by the skill author." : ""}`
+      : "Not discovered. The saved name is kept for future starts.";
+  }
   private value(def: SettingDef): string {
     if (def.key === "tools.disable") {
       const disabled = (this.read(def) as string[] | undefined) ?? [];
@@ -111,7 +121,9 @@ export class SetupView implements Component {
       return m.items.map((item) => ({
         title: item.label,
         value: sameSetting(item.value, this.read(m.def))
-          ? "Current"
+          ? this.scope === "session"
+            ? "Current"
+            : "Saved"
           : sameSetting(item.value, m.def.builtin)
             ? "Recommended"
             : "",
@@ -122,18 +134,41 @@ export class SetupView implements Component {
       }));
     if (m.kind === "members") {
       const current = this.read(m.def);
+      const skillRange = m.def.key === "prompt.skills.include";
       return m.names.map((name) => {
-        const listed = ((current as string[] | undefined) ?? []).includes?.(name) ?? false;
+        const skill = skillRange ? ctx.skills.find((s) => s.name === name) : undefined;
+        const manualOnly = skill?.disableModelInvocation;
+        const all = skillRange && name === "";
+        const listed =
+          (skillRange && current === "all") || (Array.isArray(current) && current.includes(name));
         const enabled = m.def.key === "tools.disable" ? !listed : listed;
         return {
-          title: name,
+          title: all ? "All (including new skills)" : name,
           value:
             m.def.type === "map"
               ? ((current as Record<string, string> | undefined)?.[name] ?? "head")
-              : enabled
-                ? "Enabled"
-                : "Disabled",
+              : manualOnly
+                ? "Manual only"
+                : all
+                  ? current === "all"
+                    ? "[x]"
+                    : "[ ]"
+                  : enabled
+                    ? "Enabled [x]"
+                    : "Disabled [ ]",
+          ...(skillRange && { note: this.skillNote(name) }),
           run: () => {
+            if (manualOnly) {
+              this.notice = {
+                ok: false,
+                message: "This skill is marked manual-only. Use /name to invoke it.",
+              };
+              return;
+            }
+            if (all) {
+              void this.commit(m.def, current === "all" ? [] : "all", false);
+              return;
+            }
             if (m.def.type === "map") {
               const values = m.def.values?.map((v) => v.label) ?? [];
               const old = (current as Record<string, string> | undefined)?.[name] ?? "head";
@@ -146,7 +181,10 @@ export class SetupView implements Component {
                 false,
               );
             } else {
-              const old = (current as string[] | undefined) ?? [];
+              const old =
+                skillRange && current === "all"
+                  ? ctx.skills.filter((s) => !s.disableModelInvocation).map((s) => s.name)
+                  : ((current as string[] | undefined) ?? []);
               const next = listed ? old.filter((v) => v !== name) : [...old, name];
               // 保持用户既有的段顺序;重新启用的段追加到尾部。空列表就是空列表,不能恢复成缺省全开。
               void this.commit(m.def, next, false);
@@ -260,25 +298,29 @@ export class SetupView implements Component {
       const configured =
         def.type === "map"
           ? Object.keys((this.read(def) ?? {}) as object)
-          : ((this.read(def) as string[] | undefined) ?? []);
+          : Array.isArray(this.read(def))
+            ? (this.read(def) as string[])
+            : [];
       const names =
-        def.key === "mcpReconnect"
-          ? [
-              ...new Set([
-                ...(this.deps.ctx.deps.mcp?.statuses().map((server) => server.name) ?? []),
-                ...configured,
-              ]),
-            ]
-          : def.items
-            ? [...def.items]
-            : [
+        def.key === "prompt.skills.include"
+          ? ["", ...new Set([...this.deps.ctx.skills.map((s) => s.name), ...configured])]
+          : def.key === "mcpReconnect"
+            ? [
                 ...new Set([
-                  ...this.deps.ctx.tools
-                    .filter((t) => def.key !== "tools.disable" || t.name !== "plan")
-                    .map((t) => t.name),
+                  ...(this.deps.ctx.deps.mcp?.statuses().map((server) => server.name) ?? []),
                   ...configured,
                 ]),
-              ];
+              ]
+            : def.items
+              ? [...def.items]
+              : [
+                  ...new Set([
+                    ...this.deps.ctx.tools
+                      .filter((t) => def.key !== "tools.disable" || t.name !== "plan")
+                      .map((t) => t.name),
+                    ...configured,
+                  ]),
+                ];
       this.mode = { kind: "members", def, names };
       return;
     }
@@ -390,7 +432,10 @@ export class SetupView implements Component {
     const m = this.mode;
     if (matchesKey(data, Key.escape)) {
       this.notice = undefined;
-      if (m.kind !== "browse") {
+      if (m.kind === "info") {
+        this.mode = m.from;
+        this.index = m.index;
+      } else if (m.kind !== "browse") {
         this.mode = { kind: "browse" };
         this.index = this.returnIndex;
       } else if (this.searching || this.query) {
@@ -470,7 +515,7 @@ export class SetupView implements Component {
       const def = "def" in m ? m.def : this.rows()[this.index]?.def;
       if (def) {
         this.returnIndex = m.kind === "browse" ? this.index : this.returnIndex;
-        this.mode = { kind: "info", def, offset: 0 };
+        this.mode = { kind: "info", def, offset: 0, from: m, index: this.index };
       }
     } else if (
       (data === "r" || data === "R") &&
@@ -496,27 +541,80 @@ export class SetupView implements Component {
     this.deps.onChange();
   }
 
-  private detail(row: Row | undefined): string[] {
+  private detail(row: Row | undefined, compact = false): string[] {
     const m = this.mode;
     const { ctx } = this.deps;
     const def = "def" in m ? m.def : row?.def;
     if (def) {
       const guide = setupGuide(def);
-      const current = this.read(def);
-      const source = this.scope === "session" ? sourceOf(ctx, def, current) : "saved defaults";
+      const current = setupRead(ctx, def, "session");
+      const saved = setupRead(ctx, def, "defaults");
+      const browsing = m.kind === "info" ? m.from : m;
+      const index = m.kind === "info" ? m.index : this.index;
+      const choice = browsing.kind === "choices" ? browsing.items[index] : undefined;
+      const memberName = browsing.kind === "members" ? browsing.names[index] : undefined;
+      const member = memberName === "" ? "All (including new skills)" : memberName;
+      const memberNote =
+        memberName !== undefined && def.key === "prompt.skills.include"
+          ? this.skillNote(memberName)
+          : undefined;
+      const valueText = (value: unknown) => {
+        const label = setupValue(def, value);
+        const raw = formatSetting(def, value);
+        return compact || label === raw ? label : `${label} (${raw})`;
+      };
+      const state = [
+        c.soft(`Current: ${valueText(current)}`),
+        c.soft(`Saved default: ${valueText(saved)}`),
+      ];
+      const skillPlacement = !def.key.startsWith("prompt.skills.")
+        ? []
+        : setupRead(ctx, settingDef("prompt.skills.mode") as SettingDef, this.scope) !== "auto"
+          ? [
+              "Manual mode: no catalog added; range inactive.",
+              "/name sends instructions + request as a user message.",
+            ]
+          : setupRead(ctx, settingDef("prompt.skills.load") as SettingDef, this.scope) === "tool"
+            ? [
+                "Catalog target: skill tool definition, not system.",
+                "Names + descriptions; instructions arrive in its result.",
+              ]
+            : [
+                "Catalog target: system prompt / Skills section.",
+                "Names + descriptions + paths; instructions arrive in a read result.",
+              ];
+      // 完整说明与紧凑预览使用同一候选;进入详情只保存临时导航位置。
       return [
-        c.bold(c.ink(guide.title)),
-        c.faint(def.key),
-        "",
-        ...(m.kind === "choices" && row ? [c.ink(`Choice: ${row.title}`), ""] : []),
-        c.soft(guide.effect),
-        "",
-        c.soft(`Selected: ${formatSetting(def, current)} · ${source}`),
-        c.soft(`Recommended: ${setupValue(def, def.builtin)}`),
-        c.faint(guide.reason),
-        "",
-        c.jin(settingTiming(ctx, def, this.scope)),
-        ...(m.kind === "choices" && row?.note ? ["", c.soft(row.note)] : []),
+        ...(choice
+          ? [
+              c.bold(c.jin("Highlighted choice")),
+              c.ink(choice.label),
+              c.soft(choice.note ?? guide.effect),
+            ]
+          : member
+            ? [c.bold(c.jin("Highlighted item")), c.ink(member)]
+            : [c.bold(c.ink(guide.title))]),
+        ...(!choice && !member ? state : []),
+        ...skillPlacement.map((line) => c.jin(line)),
+        ...(memberNote ? [c.soft(memberNote)] : []),
+        c.jin(`Applies: ${settingTiming(ctx, def, this.scope)}`),
+        ...(choice || member ? [c.faint("── Current state ──"), ...state] : []),
+        ...(!compact
+          ? [
+              "",
+              c.faint(`Current value: ${sourceOf(ctx, def, current)}`),
+              c.faint(`Key: ${def.key}`),
+              "",
+              c.bold(c.ink("Effect & tradeoff")),
+              c.soft(guide.effect),
+              "",
+              c.soft(`Recommended: ${setupValue(def, def.builtin)}`),
+              c.faint(guide.reason),
+              ...(guide.example ? ["", c.bold(c.ink("Example")), c.soft(guide.example)] : []),
+            ]
+          : choice
+            ? []
+            : ["", c.soft(guide.effect)]),
       ];
     }
     if (m.kind === "presetReview") {
@@ -619,7 +717,9 @@ export class SetupView implements Component {
       ? "Search"
       : m.kind === "presets" || m.kind === "presetReview"
         ? "Presets"
-        : section?.title;
+        : "def" in m && m.def
+          ? setupGuide(m.def).title
+          : section?.title;
     const head = [
       pad(
         `${c.bold(c.ink("Agent setup"))}${trail ? c.soft(` / ${trail}`) : c.faint("  /settings")}`,
@@ -676,22 +776,10 @@ export class SetupView implements Component {
       return [...head, ...info.slice(m.offset, m.offset + room).map(pad), ...footer];
     }
     const wide = width >= 100 && m.kind !== "text";
-    const listWidth = wide ? Math.floor(inner * 0.54) : inner;
+    const listWidth = wide ? Math.floor(inner * 0.45) : inner;
     const activeDef = "def" in m ? m.def : rows[this.index]?.def;
-    const compactDetail =
-      !wide && activeDef
-        ? [
-            c.bold(c.ink(setupGuide(activeDef).title)),
-            c.soft(
-              `Selected: ${setupValue(activeDef, this.read(activeDef))} · recommended: ${setupValue(activeDef, activeDef.builtin)}`,
-            ),
-            c.jin(settingTiming(ctx, activeDef, this.scope)),
-            "",
-            c.soft(setupGuide(activeDef).effect),
-          ]
-        : undefined;
     const details = wrap(
-      compactDetail ?? this.detail(rows[this.index]),
+      this.detail(rows[this.index], !wide),
       wide ? inner - listWidth - 3 : inner,
     );
     if (m.kind === "presetReview") {
@@ -703,7 +791,10 @@ export class SetupView implements Component {
       ? room
       : m.kind === "text"
         ? 0
-        : Math.min(Math.max(3, Math.floor(room * 0.55)), Math.max(rows.length, 1));
+        : Math.min(
+            Math.max(1, Math.floor(room * (activeDef ? 0.3 : 0.55))),
+            Math.max(rows.length, 1),
+          );
     const visible = Math.max(1, capacity - (rows.length > capacity ? 1 : 0));
     const start = Math.max(
       0,
@@ -726,13 +817,29 @@ export class SetupView implements Component {
         ),
       );
     const body: string[] = [];
+    const clippedDetails = (available: number) => {
+      const lines = details.slice(0, available);
+      if (activeDef && details.length > available && available > 0)
+        lines[available - 1] = c.faint("… I: full details");
+      return lines;
+    };
     if (wide) {
+      const shown = clippedDetails(room);
       for (let i = 0; i < room; i++)
         body.push(
-          pad(`${truncateToWidth(list[i] ?? "", listWidth, "", true)}   ${details[i] ?? ""}`),
+          pad(
+            `${truncateToWidth(list[i] ?? "", listWidth, "", true)} ${c.faint("│")} ${shown[i] ?? ""}`,
+          ),
         );
     } else {
-      const content = m.kind === "text" ? details : [...list, "", ...details];
+      const content =
+        m.kind === "text"
+          ? details
+          : [
+              ...list,
+              c.faint("─".repeat(inner)),
+              ...clippedDetails(Math.max(0, room - list.length - 1)),
+            ];
       for (let i = 0; i < room; i++) body.push(pad(content[i] ?? ""));
     }
     return [...head, ...body, ...footer].slice(0, height);

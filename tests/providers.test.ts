@@ -8,7 +8,7 @@ import {
 } from "../src/config.js";
 import type { AgentEvent } from "../src/events.js";
 import { deriveMessages, type Message } from "../src/messages.js";
-import { clampEffort, openaiCompat, openaiEffortParams, parseEffort } from "../src/provider.js";
+import { clampEffort, parseEffort } from "../src/provider.js";
 import {
   type AnthropicEvent,
   anthropicEffortParams,
@@ -18,6 +18,7 @@ import {
   thinkingText,
   toAnthropicWire,
 } from "../src/providers/anthropic.js";
+import { openaiCompat, openaiEffortParams } from "../src/providers/openai-chat.js";
 
 describe("Anthropic 流式累积", () => {
   it("文本 + 工具调用分块累积,usage 来自 message_start 与 message_delta", () => {

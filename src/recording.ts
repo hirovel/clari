@@ -237,6 +237,10 @@ export class Recording {
   }
 
   read(ref: ContentRef): string {
+    return this.readBytes(ref).toString("utf8");
+  }
+
+  private readBytes(ref: ContentRef): Buffer {
     if (!/^[a-f0-9-]+\.body$/.test(ref.file)) throw new Error("Invalid recording reference");
     const file = join(this.directory, ref.file);
     const pending = this.queue.filter((op) => op.file === file);
@@ -266,17 +270,29 @@ export class Recording {
       throw new Error(
         `Recording size mismatch: ${ref.file}, expected ${expected}, found ${bytes.length}`,
       );
-    return bytes.toString("utf8");
+    return bytes;
+  }
+
+  /** 新分叉只复制继承事件引用的正文;不读取无关文件,不改事件中的引用或下标。 */
+  copyAttachments(events: readonly AgentEvent[], source?: Recording): void {
+    const refs = new Map<string, ContentRef>();
+    for (const event of events) {
+      if (event.type !== "ext/event" || event.source !== "recording") continue;
+      for (const key of ["input", "sent", "received", "output"]) {
+        const ref = event.payload[key] as ContentRef | undefined;
+        if (ref) refs.set(ref.file, ref);
+      }
+    }
+    if (refs.size && !source)
+      throw new Error("Forking recorded history requires its source recording");
+    for (const ref of refs.values()) source?.copy(ref, this);
+    this.flush();
+    if (this.error) throw new Error(this.error);
   }
 
   copy(ref: ContentRef, target: Recording): void {
-    if (!/^[a-f0-9-]+\.body$/.test(ref.file)) throw new Error("Invalid recording reference");
-    const data = readFileSync(join(this.directory, ref.file));
-    if (
-      (ref.missingFrom ?? ref.bytes) !== undefined &&
-      data.length !== (ref.missingFrom ?? ref.bytes)
-    )
-      throw new Error(`Recording size mismatch: ${ref.file}`);
+    // 活跃会话写盘失败时仍可复制已收到的内存字节,不等待原目录恢复。
+    const data = this.readBytes(ref);
     const file = join(target.directory, ref.file);
     if (!data.length) target.append(file, data);
     // 复制健康磁盘上的大正文不应撞上故障缓冲上限;写不进去时明确失败。

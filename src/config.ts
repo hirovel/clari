@@ -6,9 +6,9 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ApprovalConfig } from "./approval.js";
 import type { CompactionTrigger } from "./loop.js";
-import type { EffortLevel, OpenAIDialect, Provider } from "./provider.js";
-import { openaiCompat } from "./provider.js";
+import type { EffortLevel, Provider } from "./provider.js";
 import { anthropic, type ThinkingMode } from "./providers/anthropic.js";
+import { type OpenAIDialect, openaiCompat } from "./providers/openai-chat.js";
 import { openaiResponses } from "./providers/openai-responses.js";
 import { defaultPreset } from "./settings.js";
 import type { SubagentApproval, SubagentType } from "./subagent.js";
@@ -81,6 +81,13 @@ export type ToolPromptsConfig = {
 /** 系统提示词的段名:哪几段、什么顺序由配置或预设决定。 */
 export type PromptSectionName = "role" | "env" | "instructions" | "memory" | "skills" | "append";
 
+export type SkillsConfig = {
+  mode?: "manual" | "auto";
+  /** all 随发现目录增长;数组固定到具体名称,空数组不提供任何技能。 */
+  include?: "all" | string[];
+  load?: "read" | "tool";
+};
+
 export type PromptConfig = {
   /** 要哪几段、什么顺序;缺省 role, env, instructions, memory, skills, append。 */
   sections?: PromptSectionName[];
@@ -88,12 +95,8 @@ export type PromptConfig = {
   instructionsAs?: "system" | "user";
   /** 跨会话记忆:缺省关。开了才读 AGENTS.md 里的记忆节并装上 remember 工具。 */
   memory?: boolean;
-  /**
-   * 技能两个旋钮。list:清单放系统提示词(缺省 system)还是不放(none,只许用户 /名 触发)。
-   * load:模型触发时怎么拿正文,read = 自己用 read 读 SKILL.md(缺省),tool = 装一个 skill 工具,正文作为工具结果返回。
-   * 用户触发固定为一条 user 消息。
-   */
-  skills?: { list?: "system" | "none"; load?: "read" | "tool" };
+  /** 默认手动 /名 调用;自动模式仅提供所选目录,不限制已有的文件读取能力。 */
+  skills?: SkillsConfig;
 };
 
 /**

@@ -30,6 +30,7 @@ export function choose(
         resolve(undefined);
       },
       () => ctx.tui.requestRender(),
+      () => ctx.deps.terminal.rows,
     );
     ctx.dialog.open(picker);
   });

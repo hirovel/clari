@@ -1,7 +1,7 @@
 {
   "name": "clari",
   "version": "0.1.0",
-  "description": "A from-scratch agent kernel and TUI: one append-only event log; every request, decision and edit inspectable.",
+  "description": "A terminal coding agent with inspectable requests and configurable tools and context.",
   "private": true,
   "type": "module",
   "bin": {
@@ -15,11 +15,11 @@
     "CHANGELOG.md"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22.19.0"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
-    "prepare": "tsc -p tsconfig.build.json",
+    "build": "node scripts/build.mjs",
+    "prepare": "node scripts/build.mjs",
     "test": "vitest run",
     "lint": "biome check . --error-on-warnings",
     "check": "tsc --noEmit && biome check . --error-on-warnings && vitest run",
@@ -43,6 +43,7 @@
   },
   "dependencies": {
     "@earendil-works/pi-tui": "^0.84.4",
-    "@sinclair/typebox": "^0.34.52"
+    "@sinclair/typebox": "^0.34.52",
+    "yaml": "^2.9.1"
   }
 }

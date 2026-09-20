@@ -1,5 +1,9 @@
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
+import { readRequestRecording } from "../cli/session-records.js";
 import type { AgentEvent } from "../src/events.js";
 import { EventLog } from "../src/log.js";
 import { runTurn } from "../src/loop.js";
@@ -157,7 +161,10 @@ describe("createTaskTool", () => {
   });
 
   it("scope 参数由父模型选择:fork 让子看到父历史", async () => {
-    const parent = parentLog();
+    const dir = mkdtempSync(join(tmpdir(), "clari-fork-records-"));
+    const parent = new EventLog(join(dir, "parent.jsonl"));
+    for (const event of parentLog().events) parent.append(event);
+    let childLog: EventLog | undefined;
     let childSaw = 0;
     const childProvider: Provider = {
       model: "fake",
@@ -166,21 +173,57 @@ describe("createTaskTool", () => {
         return { text: "ok", toolCalls: [], stopReason: "end" };
       },
     };
-    const task = createTaskTool({ parent, provider: childProvider, tools: [] });
-    await runTurn({
-      log: parent,
-      provider: scripted([
-        {
-          text: "",
-          toolCalls: [{ id: "c9", name: "task", args: { task: "总结", scope: "fork" } }],
-          stopReason: "tool",
-        },
-        { text: "完成", toolCalls: [], stopReason: "end" },
-      ]),
-      tools: [task],
+    const task = createTaskTool({
+      parent,
+      provider: childProvider,
+      tools: [],
+      onChild: (child) => {
+        childLog = child.log;
+      },
     });
-    // fork 复制了父的 5 条事件(投影 5 条消息)+ 任务 1 条 = 6
-    expect(childSaw).toBe(6);
+    try {
+      await runTurn({
+        log: parent,
+        provider: scripted([
+          {
+            text: "",
+            toolCalls: [{ id: "c9", name: "task", args: { task: "总结", scope: "fork" } }],
+            stopReason: "tool",
+          },
+          { text: "完成", toolCalls: [], stopReason: "end" },
+        ]),
+        tools: [task],
+      });
+      // fork 复制了父的 5 条事件(投影 5 条消息)+ 任务 1 条 = 6
+      expect(childSaw).toBe(6);
+      if (!childLog?.path || !parent.path || !parent.recording)
+        throw new Error("missing recorded child");
+      const request = parent.events.findIndex((event) => event.type === "request");
+      const expected = readRequestRecording(parent.path, parent.events, request, "input");
+      expect(expected?.input?.messages).toHaveLength(5);
+      parent.recording.dispose();
+      rmSync(parent.recording.directory, { recursive: true });
+      const restored = EventLog.load(childLog.path);
+      const inherited = readRequestRecording(childLog.path, restored.events, request, "input");
+      expect(inherited?.error).toBeUndefined();
+      expect(inherited?.input).toEqual(expected?.input);
+      // 原附件已经删除时,新分叉明确失败并清理候选目录,不发布残缺子会话。
+      await expect(
+        task.execute(
+          { task: "another fork", scope: "fork" },
+          {
+            signal: new AbortController().signal,
+            callId: "missing-records",
+          },
+        ),
+      ).rejects.toThrow("ENOENT");
+      expect(existsSync(join(dir, "parent-sub-2.jsonl"))).toBe(false);
+      expect(existsSync(join(dir, "parent-sub-2.records"))).toBe(false);
+    } finally {
+      parent.recording?.dispose();
+      childLog?.recording?.dispose();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("scope 枚举来自注册表;未知值被参数校验拦下", async () => {

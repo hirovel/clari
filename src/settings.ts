@@ -204,28 +204,39 @@ export const SETTINGS: readonly SettingDef[] = [
     scope: "next start",
   },
   {
-    key: "prompt.skills.list",
+    key: "prompt.skills.mode",
     group: "context",
     type: "enum",
     values: [
-      { label: "system", note: "skills listed by name in the system prompt" },
-      { label: "none", note: "only you can run a skill, with /name" },
+      { label: "manual", note: "invoke /name yourself; no skill catalog in requests" },
+      { label: "auto", note: "the model can choose from the offered catalog; adds context" },
     ],
-    note: "whether the model sees the skill list",
-    builtin: "system",
-    scope: "next start",
+    note: "who chooses when to load a skill",
+    builtin: "manual",
+    scope: "now",
+  },
+  {
+    key: "prompt.skills.include",
+    group: "context",
+    type: "list",
+    note: "automatic skill range: all includes future discoveries; a list fixes the names",
+    builtin: "all",
+    scope: "now",
   },
   {
     key: "prompt.skills.load",
     group: "context",
     type: "enum",
     values: [
-      { label: "read", note: "the model reads SKILL.md with the read tool" },
-      { label: "tool", note: "a skill tool returns the text" },
+      { label: "read", note: "catalog in system prompt; instructions arrive in a read result" },
+      {
+        label: "tool",
+        note: "catalog in skill tool definition; instructions arrive in its result",
+      },
     ],
     note: "how the model loads a skill it picked",
     builtin: "read",
-    scope: "next start",
+    scope: "now",
   },
   // ---------- tools ----------
   {
@@ -294,9 +305,18 @@ export const SETTINGS: readonly SettingDef[] = [
     group: "strategy",
     type: "text",
     values: [
-      { label: "llm", note: "the model summarises the older part" },
-      { label: "clear", note: "drop old tool results" },
-      { label: "pipeline", note: "clear, then summarise" },
+      {
+        label: "llm",
+        note: "Summarize older history with a model call; keep recent history verbatim.",
+      },
+      {
+        label: "clear",
+        note: "Remove old tool output from context; keep the original history. No model call.",
+      },
+      {
+        label: "pipeline",
+        note: "Clear old tool output first; summarize if the context is still above the target.",
+      },
     ],
     note: "compaction strategy at start",
     builtin: "llm",
@@ -459,6 +479,10 @@ export function parseSetting(def: SettingDef, text: string): unknown {
       if (/^(none|unset|-)$/i.test(t)) return undefined;
       return t;
     case "list": {
+      if (def.key === "prompt.skills.include") {
+        if (t === "all") return "all";
+        if (t === "[]" || t === "none") return [];
+      }
       if (/^(none|unset|-)$/i.test(t)) return undefined;
       const items = t.split(/[\s,]+/).filter(Boolean);
       if (def.items) {
@@ -493,6 +517,7 @@ export function formatSetting(def: SettingDef, value: unknown): string {
     case "bool":
       return value ? "on" : "off";
     case "list":
+      if (value === "all" && def.key === "prompt.skills.include") return "all";
       return Array.isArray(value) && value.length > 0 ? value.join(" · ") : "none";
     case "map": {
       const entries = Object.entries(value as Record<string, string>);

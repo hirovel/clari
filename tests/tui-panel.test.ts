@@ -153,7 +153,7 @@ describe("上下文面板的动作与后果", () => {
     } as unknown as Provider;
     const edit = consequenceOf("edit", asst, rows, events, anthropic);
     expect(edit).toContain("2 messages after #2 recomputed");
-    expect(edit).toContain("cache miss from #2 on");
+    expect(edit).toContain("input changes from #2 on; cache impact unconfirmed");
     expect(edit).toContain("Anthropic drops 1 thinking block");
     expect(consequenceOf("drop", asst, rows, events)).toContain("with its 1 tool result");
     expect(consequenceOf("rewind", tool, rows, events)).toContain(

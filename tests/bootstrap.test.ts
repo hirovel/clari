@@ -209,7 +209,7 @@ describe("配置里的可选项:命令行 > 预设 > defaults > 内置缺省", (
         prompt: {
           memory: true,
           instructionsAs: "user" as const,
-          skills: { list: "none" as const },
+          skills: { mode: "manual" as const },
         },
       },
       presets: {
@@ -234,7 +234,7 @@ describe("配置里的可选项:命令行 > 预设 > defaults > 内置缺省", (
       subagent: true,
       memory: true,
       instructionsAs: "user",
-      skillsList: "none",
+      skillsMode: "manual",
     });
     const byPreset = applyPreset(parseCommonArgs(["--preset", "fast"]), config);
     expect(byPreset).toMatchObject({

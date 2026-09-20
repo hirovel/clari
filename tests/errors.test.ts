@@ -4,8 +4,8 @@ import { describe, expect, it } from "vitest";
 import { createTuiApp } from "../cli/tui-app.js";
 import { EventLog } from "../src/log.js";
 import { runTurn } from "../src/loop.js";
-import { openaiCompat } from "../src/provider.js";
 import { classifyError, hintFor, ProviderError, providerMessage } from "../src/providers/errors.js";
+import { openaiCompat } from "../src/providers/openai-chat.js";
 import { StreamStall } from "../src/providers/sse.js";
 import { VirtualTerminal } from "./helpers/virtual-terminal.js";
 

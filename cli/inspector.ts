@@ -50,7 +50,14 @@ import {
   filteredIndices,
   projectionLines,
 } from "./inspector-events.js";
-import { clock, fmtTok, messageTokens, pctOf, roleLabel } from "./inspector-format.js";
+import {
+  cacheUsageLines,
+  clock,
+  fmtTok,
+  messageTokens,
+  pctOf,
+  roleLabel,
+} from "./inspector-format.js";
 import {
   collectRequests,
   decisionLines,
@@ -369,11 +376,24 @@ export class RequestInspector implements Component {
           : "reconstructed from events"
         : "response and tool evidence";
     const prior = this.records()[rec.n - 2];
+    const priorInput =
+      prior && this.section === 3
+        ? this.sessions()[this.sessionIndex]?.recordingFor?.(prior.index, "input")?.input
+        : undefined;
     const previous =
       prior && this.section === 3
-        ? (this.sessions()[this.sessionIndex]?.recordingFor?.(prior.index, "input")?.input
-            ?.messages ?? messagesFor(events, prior))
+        ? (priorInput?.messages ?? messagesFor(events, prior))
         : undefined;
+    if (this.section === 3) {
+      const toolChange = !prior
+        ? "first request"
+        : saved?.input && priorInput
+          ? JSON.stringify(saved.input.tools) === JSON.stringify(priorInput.tools)
+            ? "unchanged"
+            : "changed"
+          : "comparison unavailable (definitions not recorded)";
+      this.bodyEvidence += `\nTool definitions: ${toolChange}`;
+    }
     const blocks =
       this.section === 3
         ? inputBlocks(
@@ -382,6 +402,13 @@ export class RequestInspector implements Component {
             previous,
           )
         : receivedBlocks(rec, saved);
+    if (this.section === 3 && blocks[0]) {
+      const changed = rec.before.filter(
+        (e) => e.type === "context/edit" || e.type === "context/drop" || e.type === "compaction",
+      );
+      if (changed.length)
+        blocks[0].meta += ` · ${[...new Set(changed.map((e) => e.type))].join(", ")} before this request; 2 decisions`;
+    }
     if (this.section === 3 && saved?.error) blocks.unshift(recordingErrorBlock(saved.error));
     this.bodies.set(`${this.sessionIndex}:${rec.index}:${this.section}`, blocks);
     return true;
@@ -670,7 +697,7 @@ export class RequestInspector implements Component {
         this.scroll = 0;
         return;
       case "dropped":
-      case "cache":
+      case "prefix":
         return;
     }
   }
@@ -701,7 +728,10 @@ export class RequestInspector implements Component {
       recording?.input?.tools ?? rec.request.tools.flatMap((name) => available.get(name) ?? []);
     const missing = rec.request.tools.filter((name) => !defs.some((d) => d.name === name));
     const previous = this.records()[rec.n - 2];
-    const prior = previous ? messagesFor(events, previous) : undefined;
+    const prior = previous
+      ? (this.sessions()[this.sessionIndex]?.recordingFor?.(previous.index, "input")?.input
+          ?.messages ?? messagesFor(events, previous))
+      : undefined;
     switch (section) {
       case 1:
         return [
@@ -926,16 +956,28 @@ export class RequestInspector implements Component {
       const window = this.deps.contextWindow?.();
       const size = `≈${fmtTok(wb.total)}${window ? ` of ${fmtTok(window)} · ${pctOf(wb.total, window)}` : " tok"}`;
       const cacheNote =
-        wb.cached === undefined
+        wb.prefixTokens === undefined
           ? c.faint("nothing sent yet")
           : wb.broken
-            ? c.jin(`cached ≈${fmtTok(wb.cached)} · prefix recomputed`)
-            : c.faint(`cached ≈${fmtTok(wb.cached)} on the last request`);
+            ? c.jin(`same prefix ≈${fmtTok(wb.prefixTokens)} · changed tail`)
+            : c.faint(`same prefix ≈${fmtTok(wb.prefixTokens)}`);
       const title = `${c.bold(c.ink("Context"))}  ${c.soft("what the model sees on the next request")}   ${c.soft(size)}   ${cacheNote}`;
       const columns = c.faint(
         "   #     what                                                              tok  share",
       );
       const head = withSession([pad(title), pad(columns), pad(rule)]);
+      const last = this.records().at(-1);
+      if (last)
+        head.splice(
+          1,
+          0,
+          ...[
+            `Last request #${last.n}`,
+            ...cacheUsageLines(last.response?.usage ?? last.compaction?.usage, inner),
+          ]
+            .flatMap((line) => wrapTextWithAnsi(c.soft(line), inner))
+            .map(pad),
+        );
       const row = this.selectedRow();
       const maxTok = wb.rows.reduce(
         (m, r) =>
@@ -1083,7 +1125,7 @@ export class RequestInspector implements Component {
       else if (states)
         body.push(
           ...wrapTextWithAnsi(
-            `${c.soft("If you do this")}  ${c.faint("the system prompt changes for this session (recorded as an edit of event #0) · cache miss from the top on the next request · /settings prompt.sections makes it stick")}`,
+            `${c.soft("If you do this")}  ${c.faint("the system prompt changes for this session (recorded as an edit of event #0) · input changes from the top on the next request · /settings prompt.sections makes it stick")}`,
             inner,
           ).map(pad),
         );
@@ -1157,7 +1199,12 @@ export class RequestInspector implements Component {
       const body = this.bodies.render(inner);
       const bodyHead = [
         ...head.slice(0, -1),
-        pad(c.soft(`${body.position} · ${this.bodyEvidence}`)),
+        ...wrapTextWithAnsi(c.soft(`${body.position} · ${this.bodyEvidence}`), inner).map(pad),
+        ...(this.section === 3
+          ? cacheUsageLines(rec.response?.usage ?? rec.compaction?.usage, inner)
+              .flatMap((line) => wrapTextWithAnsi(c.soft(line), inner))
+              .map(pad)
+          : []),
         pad(
           c.ink(
             `Selected · ${body.selected} · ${body.action === "collapse" ? "expanded" : "collapsed"}`,

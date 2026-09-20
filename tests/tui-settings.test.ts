@@ -158,6 +158,7 @@ describe("Agent setup", () => {
   it("保存默认值不改当前会话;重新打开仍区分实际值与保存值", async () => {
     const { app, menu, saved } = boot();
     await app.command("/settings foldSteps");
+    expect(menu()).toContain("matches config");
     app.dialogInput(TAB);
     app.dialogInput(ENTER);
     app.dialogInput("5");
@@ -171,6 +172,8 @@ describe("Agent setup", () => {
     app.dialogInput(ESC);
     await app.command("/settings foldSteps");
     expect(menu()).toMatch(/Expanded recent steps\s+5/);
+    expect(menu()).toContain("Current: 5");
+    expect(menu()).toContain("Saved default: 10");
     app.stop();
   });
 
@@ -315,7 +318,7 @@ describe("Agent setup", () => {
       ...echo,
       name: `tool_${String(i).padStart(2, "0")}`,
     }));
-    const { app, menu, term } = boot({ tools }, [60, 24]);
+    const { app, menu, term, saved } = boot({ tools }, [60, 24]);
     await app.command("/settings tools.disable");
     app.dialogInput(ENTER);
     app.dialogInput("\x1b[F");
@@ -330,6 +333,26 @@ describe("Agent setup", () => {
     app.tui.requestRender();
     await tick();
     expect((await term.screen()).slice(-24).join("\n")).toContain("Esc back");
+    // 选项详情不能丢掉光标候选,返回时仍可确认同一项;阅读本身不修改设置。
+    await app.command("/settings compaction");
+    app.dialogInput(ENTER);
+    app.dialogInput(DOWN);
+    expect(menu()).toContain("No model call.");
+    expect(menu()).toContain("Current: Model summary");
+    expect(menu()).toContain("Saved default: Model summary");
+    app.dialogInput("i");
+    expect(menu()).toContain("Clear tool results");
+    expect(menu()).toContain("No model call.");
+    app.dialogInput("\x1b[6~");
+    app.dialogInput(ESC);
+    expect(menu()).toMatch(/▸\s+Clear tool results/);
+    expect(menu()).toContain("Current: Model summary");
+    expect(saved).toEqual([]);
+    app.dialogInput(ENTER);
+    await tick();
+    app.dialogInput("i");
+    expect(menu()).toContain("Current: Clear tool results (clear)");
+    expect(menu()).toContain("Saved default: Model summary (llm)");
     app.stop();
   });
 

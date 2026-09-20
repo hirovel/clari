@@ -246,14 +246,14 @@ export function approveValue(a: ApprovalState): string {
 
 // ---------- 槽的当前形态与切换 ----------
 
-/** /slots 首屏的每个槽的名字:来自启动参数,之后由 recordSlot 更新。 */
+/** 槽的原始配置值;展示说明不参与保存和恢复。 */
 export function initialSlotState(
   deps: TuiAppDeps,
   approval: ApprovalState,
 ): Record<string, string> {
   return {
-    compaction: `${deps.compactionName ?? "llm"} · trigger ${deps.compaction.trigger ?? "threshold"}`,
-    preservation: deps.preservationName ?? "keepRecentTokens (min(20000, window/4))",
+    compaction: deps.compactionName ?? "llm",
+    preservation: deps.preservationSpec ?? "",
     execution: deps.slots?.execution ?? "sequential",
     steering:
       deps.slots?.steering === queueToTurnEnd ? "turn" : deps.slots?.steering ? "custom" : "step",
@@ -263,14 +263,22 @@ export function initialSlotState(
 }
 
 export function recordSlot(ctx: TuiContext, slot: string, value: string): void {
-  ctx.slots.state[slot] = value;
+  // 触发时机由 compaction.trigger 持有,不另存一份运行值。
+  if (slot !== "compactionTrigger") ctx.slots.state[slot] = value;
   ctx.log.append({ type: "session/slot", at: now(), slot, value });
+}
+
+function slotDescription(ctx: TuiContext, slot: string, value: string): string {
+  if (slot === "compaction") return `${value} · trigger ${ctx.compaction.trigger ?? "threshold"}`;
+  if (slot === "preservation")
+    return value ? parsePreservation(value).label : "keepRecentTokens (min(20000, window/4))";
+  return value;
 }
 
 /** /slots:当前每个槽的实现。全部是可切换的;切换记事件。 */
 export function slotsList(ctx: TuiContext): string {
   const rows = Object.entries(ctx.slots.state).map(
-    ([k, val]) => `  ${c.ink(k.padEnd(13))} ${c.ink(val)}`,
+    ([k, val]) => `  ${c.ink(k.padEnd(13))} ${c.ink(slotDescription(ctx, k, val))}`,
   );
   return [
     `${c.soft("Slots")}  ${c.faint("switch with /compaction /preservation /execution /steering /approve /toolprompts; each switch is a session/slot event")}`,
@@ -284,15 +292,13 @@ const done = (slot: string, value: string, when = "takes effect from the next tu
 
 async function compactionSlot(ctx: TuiContext, v: string): Promise<string> {
   const { compaction } = ctx;
-  const label = (strategy: string) => `${strategy} · trigger ${compaction.trigger ?? "threshold"}`;
   if (!v)
     return c.faint(
       `compaction is ${ctx.slots.state.compaction}. Usage: /compaction llm|clear|pipeline|./strategy.mjs (strategy) · /compaction threshold|manual|remind (trigger)`,
     );
   if (isCompactionTrigger(v)) {
     compaction.trigger = v;
-    const strategy = ctx.slots.state.compaction?.split(" · ")[0] ?? "llm";
-    recordSlot(ctx, "compaction", label(strategy));
+    recordSlot(ctx, "compactionTrigger", v);
     return done(
       "compaction",
       `trigger ${v}`,
@@ -308,7 +314,7 @@ async function compactionSlot(ctx: TuiContext, v: string): Promise<string> {
   } catch (err) {
     return c.zhu(`✗ ${(err as Error).message}`);
   }
-  recordSlot(ctx, "compaction", label(v));
+  recordSlot(ctx, "compaction", v);
   return done("compaction", v, "used by the next auto or manual compaction");
 }
 
@@ -327,7 +333,7 @@ function preservationSlot(ctx: TuiContext, v: string): string {
       : c.zhu(msg.replace(/^preservation /, ""));
   }
   ctx.compaction.preservation = parsed.policy;
-  recordSlot(ctx, "preservation", parsed.label);
+  recordSlot(ctx, "preservation", v);
   return done("preservation", v, "used by the next compaction");
 }
 

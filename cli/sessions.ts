@@ -7,7 +7,7 @@ import { join } from "node:path";
 import type { KernelConfig } from "../src/config.js";
 import type { AgentEvent } from "../src/events.js";
 import { EventLog } from "../src/log.js";
-import { type ContentRef, Recording } from "../src/recording.js";
+import { Recording } from "../src/recording.js";
 import { recordUnresolvedCalls } from "../src/recovery.js";
 import type { CommonArgs } from "./args.js";
 
@@ -244,24 +244,10 @@ export function forkSession(
   const n = Math.max(1, Math.min(upTo, events.length));
   const file = newSessionPath(dir, "-fork");
   const log = new EventLog(file);
-  const refs = new Map<string, ContentRef>();
-  for (const e of events.slice(0, n)) {
-    if (e.type !== "ext/event" || e.source !== "recording") continue;
-    for (const key of ["input", "sent", "received", "output"]) {
-      const ref = e.payload[key] as ContentRef | undefined;
-      if (ref) refs.set(ref.file, ref);
-    }
-  }
-  if (refs.size && !sourceFile)
-    throw new Error("Forking recorded history requires its source session file");
+  const prefix = events.slice(0, n);
   try {
-    if (sourceFile && log.recording) {
-      const source = new Recording(sourceFile);
-      for (const ref of refs.values()) source.copy(ref, log.recording);
-      log.recording.flush();
-      if (log.recording.error) throw new Error(log.recording.error);
-    }
-    for (const e of events.slice(0, n)) log.append(e);
+    log.recording?.copyAttachments(prefix, sourceFile ? new Recording(sourceFile) : undefined);
+    for (const e of prefix) log.append(e);
     log.recording?.flush();
     if (log.recording?.error) throw new Error(log.recording.error);
     return { file, events: n };

@@ -111,7 +111,7 @@ export function estimateAfter(
   return deriveMessages(view).reduce((n, m) => n + messageTokens(m), 0);
 }
 
-// ---------- 策略一:清除旧工具结果(无损,零 LLM 调用) ----------
+// ---------- 策略一:清除旧工具结果(请求内容有损,本地原文保留,零 LLM 调用) ----------
 
 /**
  * 把保留窗之外的旧工具结果换成占位文本。清除量不足 clearAtLeast 时不动手 ——
@@ -207,7 +207,9 @@ export function llmSummarize(
     const turn = await provider.complete(messages, [], {
       ...(input.signal && { signal: input.signal }),
     });
-    if (turn.stopReason === "aborted" || !turn.text.trim()) return null;
+    if (turn.stopReason !== "end")
+      throw new Error(`Summary did not finish (${turn.stopReason}); original context retained.`);
+    if (!turn.text.trim()) return null;
 
     const summary = turn.text.trim() + fileTrailer(events, from, cut);
     const covered = events.slice(from, cut).reduce((n, e) => n + eventTokens(e), 0);

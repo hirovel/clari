@@ -11,13 +11,18 @@ import { createProvider, loadConfig } from "../src/config.js";
 import { EventLog } from "../src/log.js";
 import { runTurn } from "../src/loop.js";
 import { deriveMessages } from "../src/messages.js";
-import { feedChunk, finishAcc, newAcc, OPENAI_COMPAT_FIELDS } from "../src/provider.js";
 import {
   ANTHROPIC_FIELDS,
   feedAnthropicEvent,
   finishAnthropicAcc,
   newAnthropicAcc,
 } from "../src/providers/anthropic.js";
+import {
+  feedChunk,
+  finishAcc,
+  newAcc,
+  OPENAI_COMPAT_FIELDS,
+} from "../src/providers/openai-chat.js";
 import {
   feedResponsesEvent,
   finishResponsesAcc,

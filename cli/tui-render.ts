@@ -545,8 +545,7 @@ export function render(ctx: TuiContext, e: AgentEvent, index: number): void {
       ctx.note(c.soft(`· model switched to ${e.model}`));
       break;
     case "session/slot":
-      // 恢复会话时把历史切换也画出来;当前会话里 slotCommand 已经打过确认行,这里只补状态。
-      ctx.slots.state[e.slot] = e.value;
+      // 配置由宿主恢复,切换由命令应用;回放历史不能覆盖当前选定的组合。
       break;
     case "session/recovered":
       ctx.note(

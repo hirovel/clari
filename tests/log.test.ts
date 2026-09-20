@@ -86,6 +86,20 @@ describe("EventLog", () => {
       expect(requests).toBe(2);
       expect(executions).toBe(1);
       expect(agent.running).toBe(false);
+      const bufferedCopy = new Recording(join(dir, "buffered-copy.jsonl"));
+      try {
+        bufferedCopy.copyAttachments(log.events, store);
+        const request = log.events.findIndex((event) => event.type === "request");
+        expect(
+          readRequestRecording(bufferedCopy.journal, log.events, request)?.outputs?.[0],
+        ).toMatchObject({
+          original: "original text that the model does not receive",
+          model: "short result",
+        });
+        expect(store.error).toBeTruthy();
+      } finally {
+        bufferedCopy.dispose();
+      }
       rmSync(store.directory);
       rmSync(file, { recursive: true });
       renameSync(backup, file);

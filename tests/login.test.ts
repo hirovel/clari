@@ -1,8 +1,9 @@
 // 登录对话框:没有 key 也进界面,选供应商、贴 key(遮罩)、验证、选模型;/login 与 /model 的列表选择。
 import { describe, expect, it } from "vitest";
 import { noProviderChoice } from "../cli/bootstrap.js";
-import { createTuiApp, type TuiApp, type TuiSettings } from "../cli/tui-app.js";
-import { type LoginDeps, LoginDialog, type ProviderSummary } from "../cli/tui-login.js";
+import type { ModelSettings, ProviderSummary } from "../cli/model-settings.js";
+import { createTuiApp, type TuiApp } from "../cli/tui-app.js";
+import { type LoginDeps, LoginDialog } from "../cli/tui-login.js";
 import { EventLog } from "../src/log.js";
 import type { Provider } from "../src/provider.js";
 import { stripAnsi, VirtualTerminal } from "./helpers/virtual-terminal.js";
@@ -110,7 +111,7 @@ describe("LoginDialog", () => {
 });
 
 describe("没有 key 的界面", () => {
-  function boot(settings: TuiSettings, unavailable?: string) {
+  function boot(settings: ModelSettings, unavailable?: string) {
     const log = new EventLog();
     const none = noProviderChoice();
     const app = createTuiApp({
@@ -138,7 +139,7 @@ describe("没有 key 的界面", () => {
         return { text: "hello from the real model", toolCalls: [], stopReason: "end" };
       },
     };
-    const settings: TuiSettings = {
+    const settings: ModelSettings = {
       listModels: () => ["deepseek/deepseek-v4-pro"],
       switchModel: (name) => {
         calls.push(`switch:${name}`);
@@ -182,7 +183,7 @@ describe("没有 key 的界面", () => {
   });
 
   it("/login anthropic 直接进该供应商的输入步;占位 provider 的请求失败并指向 /login", async () => {
-    const settings: TuiSettings = {
+    const settings: ModelSettings = {
       listModels: () => [],
       switchModel: () => {
         throw new Error("n/a");

@@ -5,7 +5,35 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ## [Unreleased]
 
+### Changed
+
+- Label where skill catalogs enter requests: system prompt for read loading, tool definition for skill loading, and no catalog for manual invocation. Distinguish catalogs from loaded instructions.
+
+- Default skills to manual invocation. Add live automatic selection and a shared checkbox range, saved in defaults and presets. `include: "all"` includes future discoveries; arrays keep specific names. Replace `prompt.skills.list` with `mode` and `include`; the old key reports an error. Dedicated skill tools carry the selected catalog without repeating it in the system prompt.
+
+- Keep skill instructions literal and append invocation arguments as a separate request. Skills no longer substitute `$1`, `$@` or `$ARGUMENTS`; prompt templates still do.
+
+- Shorten both READMEs to setup, usage, configuration, sessions and development. Correct outdated defaults and dependency claims.
+
 ### Fixed
+
+- Parse skill metadata with the `yaml` library, including quoted names and multiline descriptions. Skip invalid skills individually and show their path and error in the session or CLI.
+
+- Apply the selected preservation policy to manual `/compact`, matching automatic compaction. Original history and the retained message tail remain intact.
+- Reject summaries that end at an output limit, request tools or are interrupted. Keep the existing context and show the failure instead of applying an incomplete summary.
+
+- Show reported cache hit rates and token-share bars separately from unchanged message prefixes. Mark additions and changed tails in request input, compare recorded tool definitions, and add practical examples to setup details.
+
+- Separate highlighted choices, current values and saved defaults in setup. Keep choice details and selection when returning, label inferred value matches accurately, and clarify that input saving is separate from request recording.
+
+- Keep picker selection and controls visible in long lists. Show full selected values and notes with paged details; session choices share the same component and preserve the draft on return.
+
+- Keep compaction paths and preservation values intact when saving or restoring a setup. History rendering no longer overwrites the selected runtime configuration.
+
+- Require Node.js 22.19 or newer to match the terminal dependency. Build and package preparation now clear old compiled files before compiling.
+
+- Child-agent forks now copy the recorded bodies referenced by inherited events, using the same recording operation as ordinary session forks. Buffered source bytes remain readable during saving failures; failed child copies clean up their candidate files. Existing tests cover independent child history and failure cleanup.
+- Separate the provider contract from the Chat Completions adapter, place shared HTTP/retry/SSE helpers with their implementations, and move model settings contracts out of TUI assembly. Session recovery uses the settings registry; UI capture and display order stay in the terminal layer. No new persistent state or compatibility exports.
 
 - Context edit/drop notices now come from recorded events, so live sessions and restored history show the same action and current-context shortcut without duplicate command notices.
 - Restored request steps now use their own event positions for summaries and comparisons. Folded tool paths are shortened as plain text, preserving clickable links in full tool rows without emitting broken terminal sequences.

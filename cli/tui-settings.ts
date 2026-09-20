@@ -1,25 +1,45 @@
+import type { SessionSetup } from "./session-setup.js";
 // 设置的读写语义与终端布局分离。运行值来自现有状态;保存值来自配置;变化进入事件日志。
 
 import { keepRecentTokens } from "../src/compaction.js";
-import type { Preset, ResultView } from "../src/config.js";
+import type { Preset, ResultView, SkillsConfig } from "../src/config.js";
 import { now } from "../src/events.js";
 import { DEFAULT_PLAN_REMINDER } from "../src/plan.js";
 import {
   formatSetting,
   getSetting,
   parseSetting,
+  SETTINGS,
   type SettingDef,
   type SettingLayers,
   settingDef,
   settingSource,
 } from "../src/settings.js";
-import { configuredValue, type SetupScope, sameSetting } from "../src/setup.js";
+import { configuredValue, type SetupScope, sameSetting, setupSnapshot } from "../src/setup.js";
 import { parsePreservation } from "./args.js";
 import { DEFAULT_RESULT_VIEWS } from "./cards.js";
+import { automaticSkills, skillsSection } from "./prompt.js";
+import { replaceSystemSection } from "./prompt-sections.js";
+import { applyToolPrompts } from "./tool-prompts.js";
+import { createSkillTool, skillCatalog } from "./tools/skill.js";
 import type { TuiContext } from "./tui-context.js";
 
 export function effectiveSetting(ctx: TuiContext, def: SettingDef): unknown {
   const initial = () => getSetting(ctx.setupInitial, def.key) ?? def.builtin;
+  if (def.key.startsWith("prompt.skills.")) {
+    for (let i = ctx.log.events.length - 1; i >= 0; i--) {
+      const e = ctx.log.events[i];
+      if (
+        e?.type === "ext/event" &&
+        e.source === "setup" &&
+        e.kind === "setting" &&
+        e.payload.scope === "session" &&
+        e.payload.key === def.key
+      )
+        return e.payload.value;
+    }
+    return initial();
+  }
   switch (def.key) {
     case "saveInputs":
       return ctx.deps.inputs?.saving ?? ctx.deps.saveInputs ?? true;
@@ -60,17 +80,11 @@ export function effectiveSetting(ctx: TuiContext, def: SettingDef): unknown {
     case "approve":
       return ctx.approval.mode;
     case "compaction":
-      return ctx.slots.state.compaction?.split(" · ")[0] ?? initial();
+      return ctx.slots.state.compaction ?? initial();
     case "compactionTrigger":
       return ctx.compaction.trigger ?? "threshold";
-    case "preservation": {
-      const label = ctx.slots.state.preservation ?? "";
-      const tokens = label.match(/^keepRecentTokens\(([\d.]+)\)$/);
-      const ratio = label.match(/^keepRatio\(([\d.]+)\)$/);
-      if (tokens) return `tokens ${tokens[1]}`;
-      if (ratio) return `ratio ${ratio[1]}`;
-      return label.startsWith("keepRecentTokens (min") ? undefined : initial();
-    }
+    case "preservation":
+      return ctx.slots.state.preservation || undefined;
     case "execution":
       return ctx.agent.slots.execution ?? "sequential";
     case "steering":
@@ -92,13 +106,14 @@ export function sourceOf(ctx: TuiContext, def: SettingDef, effective: unknown): 
       e.payload.key === def.key &&
       e.payload.scope === "session"
     ) {
-      if (sameSetting(e.payload.value, effective)) return "this session";
+      if (sameSetting(e.payload.value, effective)) return "recorded change in this session";
       break;
     }
   }
   const layers: SettingLayers = ctx.deps.settings?.settingLayers?.() ?? {};
   const source = settingSource(def, effective, layers);
-  return source === "flag" ? "runtime" : source === "built-in" ? "built-in" : source;
+  // 值相同不证明来源:显式参数也可能恰好等于默认值。
+  return source === "flag" ? "runtime value; source not recorded" : `matches ${source}`;
 }
 
 export function setupRead(ctx: TuiContext, def: SettingDef, scope: SetupScope): unknown {
@@ -137,6 +152,8 @@ export function settingTiming(ctx: TuiContext, def: SettingDef, scope: SetupScop
     return "This strategy cannot change mid-turn. Wait, or close setup and press Esc to interrupt.";
   if (DISPLAY_SETTINGS.has(def.key)) return "Changes the interface immediately.";
   if (def.key === "effort") return "Used by the next model request.";
+  if (def.key.startsWith("prompt.skills."))
+    return "Used by the next request. Loaded instructions stay in history. New files are discovered at session startup.";
   if (["compaction", "compactionTrigger", "compactionReserve", "preservation"].includes(def.key))
     return "Used by the next compaction check; existing history stays unchanged.";
   return "Used by the next turn. An in-flight request keeps its current settings.";
@@ -151,6 +168,38 @@ export async function applySettingNow(
 ): Promise<string | undefined> {
   const { view } = ctx;
   switch (def.key) {
+    case "prompt.skills.mode":
+    case "prompt.skills.include":
+    case "prompt.skills.load": {
+      const read = (key: string) =>
+        key === def.key ? value : effectiveSetting(ctx, settingDef(key) as SettingDef);
+      const config: SkillsConfig = {
+        mode: read("prompt.skills.mode") as "manual" | "auto",
+        include: read("prompt.skills.include") as "all" | string[],
+        load: read("prompt.skills.load") as "read" | "tool",
+      };
+      const catalog = automaticSkills(ctx.skills, config);
+      const existing = ctx.tools.find((t) => t.name === "skill");
+      if (config.load === "tool" && catalog.length && existing && !skillCatalog(existing))
+        throw new Error(
+          "An extension owns the skill tool. Choose read loading or remove that extension first.",
+        );
+      const tools = ctx.tools.filter((t) => !skillCatalog(t));
+      if (config.load === "tool" && catalog.length) {
+        const tool = createSkillTool(catalog);
+        applyToolPrompts([tool], ctx.slots.toolPrompts);
+        tools.push(tool);
+      }
+      const edit = replaceSystemSection(
+        ctx.log.events,
+        "Skills",
+        skillsSection(ctx.skills, config),
+      );
+      if (edit) ctx.log.append(edit);
+      ctx.tools.splice(0, ctx.tools.length, ...tools);
+      ctx.applyTools?.();
+      return;
+    }
     case "saveInputs":
       ctx.deps.inputs?.configure(value as boolean);
       ctx.deps.saveInputs = value as boolean;
@@ -222,7 +271,7 @@ export async function applySettingNow(
     case "preservation":
       if (value === undefined) {
         ctx.compaction.preservation = keepRecentTokens(Math.min(20000, ctx.compaction.window / 4));
-        ctx.slots.state.preservation = "keepRecentTokens (min(20000, window/4))";
+        ctx.slots.state.preservation = "";
         return;
       }
       parsePreservation(String(value));
@@ -241,6 +290,12 @@ export async function applySettingNow(
 export type SettingChange = { ok: boolean; message: string };
 
 function validate(def: SettingDef, value: unknown): void {
+  if (
+    def.key === "prompt.skills.include" &&
+    value !== "all" &&
+    (!Array.isArray(value) || value.some((name) => typeof name !== "string" || !name.trim()))
+  )
+    throw new Error("prompt.skills.include takes all or a list of skill names.");
   if (value === undefined) {
     if (def.builtin !== undefined)
       throw new Error(`${def.key} needs a value; choose its recommended value to reset it.`);
@@ -351,3 +406,18 @@ export function describeChange(
 }
 
 export type { Preset };
+
+export function captureSessionSetup(ctx: TuiContext): SessionSetup {
+  const values = setupSnapshot(SETTINGS, (def) => effectiveSetting(ctx, def));
+  values.extensions = [...(ctx.setupInitial.extensions ?? [])];
+  values.approval = structuredClone(ctx.approval.cfg);
+  if (ctx.setupInitial.systemPromptFile)
+    values.systemPromptFile = ctx.setupInitial.systemPromptFile;
+  if (ctx.setupInitial.appendSystemPromptFile)
+    values.appendSystemPromptFile = ctx.setupInitial.appendSystemPromptFile;
+  return {
+    values,
+    tools: ctx.defs().map((tool) => tool.name),
+    descriptions: structuredClone(ctx.slots.toolPrompts.descriptions ?? {}),
+  };
+}

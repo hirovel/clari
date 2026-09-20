@@ -11,7 +11,7 @@ import { now } from "../src/events.js";
 import { recordingProvider } from "../src/loop.js";
 import { EFFORT_LEVELS, parseEffort } from "../src/provider.js";
 import { unresolvedCalls } from "../src/recovery.js";
-import { SETTINGS, type SettingDef } from "../src/settings.js";
+import { SETTINGS, type SettingDef, settingDef } from "../src/settings.js";
 import { setupGuide } from "../src/setup.js";
 import { expandFileRefs } from "./attachments.js";
 import { SESSIONS_DIR } from "./bootstrap.js";
@@ -40,7 +40,7 @@ import { pct } from "./tui-format.js";
 import { LoginDialog, type PickRow } from "./tui-login.js";
 import { choose, confirm, title, valueRows } from "./tui-menu.js";
 import { Palette, type PaletteItem } from "./tui-palette.js";
-import { changeSetting, parseTyped } from "./tui-settings.js";
+import { changeSetting, effectiveSetting, parseTyped } from "./tui-settings.js";
 import { slotCommand, slotsList } from "./tui-slots.js";
 import { openShortcutHelp } from "./tui-status.js";
 
@@ -231,6 +231,8 @@ function toolsList(ctx: TuiContext): string {
 
 function skillsList(ctx: TuiContext): string {
   const { skills } = ctx;
+  const mode = effectiveSetting(ctx, settingDef("prompt.skills.mode") as SettingDef);
+  const include = effectiveSetting(ctx, settingDef("prompt.skills.include") as SettingDef);
   if (skills.length === 0) {
     return c.faint(
       "No skills. Put <name>/SKILL.md under ~/.clari/skills, ~/.claude/skills, <repo>/.agents/skills or <repo>/.claude/skills.",
@@ -240,14 +242,19 @@ function skillsList(ctx: TuiContext): string {
     const desc = Math.ceil(s.description.length / 4);
     const body = Math.ceil(s.body.length / 4);
     const flags = [
-      s.disableModelInvocation ? "user-only" : "model + user",
+      s.disableModelInvocation
+        ? "user-only"
+        : mode === "auto" &&
+            (include === "all" || (Array.isArray(include) && include.includes(s.name)))
+          ? "in automatic range + manual"
+          : "manual invocation",
       ...(s.allowedTools.length ? [`allowed-tools: ${s.allowedTools.join(" ")}`] : []),
       ...(s.argumentHint ? [`args: ${s.argumentHint}`] : []),
     ].join(" · ");
     return `  ${c.ink(`/${s.name}`.padEnd(16))} ${c.ink(s.description || "(no description)")}\n${" ".repeat(19)}${c.faint(`${s.path} · listing ${desc} tok · body ${body} tok · ${flags}`)}`;
   });
   return [
-    `${c.soft("Skills")} ${c.ink(`${skills.length}`)}  ${c.faint("/<name> args to run one now; the model picks from the system prompt list (or the skill tool when skills.load = tool)")}`,
+    `${c.soft("Skills")} ${c.ink(`${skills.length}`)}  ${c.faint(`Mode: ${mode} · /<name> args to run one now; /settings to change the automatic range`)}`,
     ...rows,
   ].join("\n");
 }
@@ -603,11 +610,11 @@ function slotCurrent(ctx: TuiContext, slot: SlotName): string {
     case "approve":
       return ctx.approval.mode;
     case "compaction":
-      return st.compaction?.split(" · ")[0] ?? "llm";
+      return st.compaction ?? "llm";
     case "trigger":
       return ctx.compaction.trigger ?? "threshold";
     case "preservation":
-      return st.preservation ?? "";
+      return st.preservation || "auto";
     case "execution":
       return st.execution ?? "sequential";
     case "steering":
@@ -1401,6 +1408,7 @@ async function manualCompact(ctx: TuiContext, instructions: string): Promise<voi
       provider: recordingProvider(log, agent.provider, {
         threshold: ctx.threshold(),
       }),
+      ...(compaction.preservation && { preservation: compaction.preservation }),
       ...(instructions && { instructions }),
     });
     if (!payload) ctx.note(c.faint("compaction skipped: nothing to do or not enough progress"));

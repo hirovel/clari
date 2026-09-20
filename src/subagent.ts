@@ -1,6 +1,6 @@
 // subagent:可选装能力。内核任何模块都不引用本文件;组装者按需 import 并挂成一个工具。
 // 子 agent = 同一内核的递归实例化:独立事件日志、独立会话文件,replay 与构成投影零改动可用。
-import { existsSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { type TSchema, Type } from "@sinclair/typebox";
 import { Agent } from "./agent.js";
 import { outsideCwd, ruleMatches } from "./approval.js";
@@ -427,7 +427,15 @@ export function createTaskTool(opts: TaskToolOptions): TaskTool {
               : e,
           );
         log = new EventLog(path);
-        for (const e of start) log.append(e);
+        try {
+          log.recording?.copyAttachments(start, opts.parent.recording);
+          for (const e of start) log.append(e);
+        } catch (error) {
+          log.recording?.dispose();
+          if (path) rmSync(path, { force: true });
+          if (log.recording) rmSync(log.recording.directory, { recursive: true, force: true });
+          throw error;
+        }
       }
 
       const lastModel = [...log.events]

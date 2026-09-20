@@ -185,7 +185,7 @@ export function consequenceOf(
     after.length > 0
       ? `${plural(after.length, "message")} after #${r.event} recomputed (${fmtTok(afterTok)} tok)`
       : `nothing after #${r.event} to recompute`,
-    `cache miss from #${r.event} on`,
+    `input changes from #${r.event} on; cache impact unconfirmed`,
     ...(anthropic && thinking > 0 ? [`Anthropic drops ${plural(thinking, "thinking block")}`] : []),
   ];
   switch (action) {

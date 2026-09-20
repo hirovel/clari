@@ -9,18 +9,14 @@ import {
   clampEffort,
   type EffortLevel,
   type FieldTable,
-  fetchModelIds,
-  linkedAbort,
-  mergeRetry,
   type Provider,
-  stallToError,
   type ToolDef,
   type WireOptions,
 } from "../provider.js";
 import { ProviderError, parseRetryAfter } from "./errors.js";
-import { recordedFetch } from "./http.js";
-import { type RetryOptions, withRetry } from "./retry.js";
-import { sseEvents } from "./sse.js";
+import { fetchModelIds, linkedAbort, recordedFetch } from "./http.js";
+import { mergeRetry, type RetryOptions, withRetry } from "./retry.js";
+import { sseEvents, stallToError } from "./sse.js";
 
 /** 回传的推理项。id 与 encrypted_content 都原样带回;summary 只是给人看的。 */
 export type ReasoningItem = {

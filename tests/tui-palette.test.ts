@@ -1,6 +1,7 @@
 // 命令面板:Ctrl+K 打开,模糊过滤,Enter 跑命令或填输入框,模型条目切模型,Esc 关。
 import { describe, expect, it } from "vitest";
-import { createTuiApp, type TuiSettings } from "../cli/tui-app.js";
+import type { ModelSettings } from "../cli/model-settings.js";
+import { createTuiApp } from "../cli/tui-app.js";
 import { Palette, type PaletteItem } from "../cli/tui-palette.js";
 import { EventLog } from "../src/log.js";
 import type { Provider } from "../src/provider.js";
@@ -53,7 +54,7 @@ describe("Ctrl+K", () => {
       },
     };
     const switched: string[] = [];
-    const settings: TuiSettings = {
+    const settings: ModelSettings = {
       listModels: () => ["fake/fake-model", "other/big-model"],
       switchModel: (name) => {
         switched.push(name);

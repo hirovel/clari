@@ -1,7 +1,14 @@
 // 登录对话框与列表选择器:没有 key 也能进界面,在界面里选供应商、贴 key、验证、选模型。
 // 两个组件都不画框线;↑↓ 选,Enter 定,Esc 退。key 输入遮罩,只露尾四位,从不上屏、不进日志。
-import { type Component, Key, matchesKey } from "@earendil-works/pi-tui";
+import {
+  type Component,
+  Key,
+  matchesKey,
+  truncateToWidth,
+  wrapTextWithAnsi,
+} from "@earendil-works/pi-tui";
 import type { ModelConfig } from "../src/config.js";
+import type { ProviderSummary } from "./model-settings.js";
 import { describeInferred, type Inferred } from "./registry.js";
 import { c } from "./theme.js";
 
@@ -59,6 +66,9 @@ function nextIndex(rows: PickRow[], from: number, step: 1 | -1): number {
  */
 export class ListPicker implements Component {
   private index: number;
+  private detailOffset = 0;
+  private detailPage = 1;
+  private detailTotal = 0;
 
   constructor(
     private readonly title: string,
@@ -67,6 +77,7 @@ export class ListPicker implements Component {
     private readonly onPick: (row: PickRow, key: "enter" | "d") => void,
     private readonly onCancel: () => void,
     private readonly onChange: () => void = () => {},
+    private readonly height: () => number = () => 24,
   ) {
     const current = rows.findIndex((r) => r.current && !r.disabled);
     const first = rows.findIndex((r) => !r.disabled);
@@ -75,15 +86,66 @@ export class ListPicker implements Component {
 
   invalidate(): void {}
 
-  render(): string[] {
-    return [this.title, ...renderRows(this.rows, this.index), c.faint(`  ${this.hint}`)];
+  render(width = 80): string[] {
+    const inner = Math.max(1, width - 2);
+    const height = Math.max(1, this.height() - 2);
+    const selected = this.rows[this.index];
+    const wrap = (text: string) =>
+      text.split("\n").flatMap((line) => wrapTextWithAnsi(line, inner));
+    if (height < 6)
+      return [selected?.label ?? "No options", "Enter select · Esc back"]
+        .slice(0, height)
+        .map((line) => truncateToWidth(line, width));
+    const details = wrap(
+      [selected?.label ?? "No options", selected?.note].filter(Boolean).join("\n"),
+    );
+    this.detailTotal = details.length;
+    const hints = wrap(height < 10 ? "↑↓ choose · Enter select · Esc back" : this.hint);
+    const pager = (end: number) => `PgUp/PgDn details · ${end}/${this.detailTotal}`;
+    const footerHeight = hints.length + wrap(pager(this.detailTotal)).length;
+    const bodyHeight = Math.max(2, height - 2 - footerHeight);
+    const listPage = Math.min(this.rows.length, Math.max(1, Math.floor(bodyHeight / 2)));
+    this.detailPage = Math.max(1, bodyHeight - listPage);
+    this.detailOffset = Math.min(this.detailOffset, Math.max(0, details.length - this.detailPage));
+    const start = Math.min(
+      Math.max(0, this.index - Math.floor(listPage / 2)),
+      Math.max(0, this.rows.length - listPage),
+    );
+    const visible = details.slice(this.detailOffset, this.detailOffset + this.detailPage);
+    // 列表只负责定位,原值在详情中完整换行;分页不改变选项或确认行为。
+    return [
+      truncateToWidth(this.title, width),
+      ...renderRows(this.rows, this.index)
+        .slice(start, start + listPage)
+        .map((line) => truncateToWidth(line, width)),
+      c.faint(
+        truncateToWidth(
+          `Selected ${this.rows.length ? this.index + 1 : 0}/${this.rows.length}`,
+          width,
+        ),
+      ),
+      ...visible.map((line) => ` ${line}`),
+      ...Array<string>(this.detailPage - visible.length).fill(""),
+      ...hints.map((line) => c.faint(` ${line}`)),
+      ...wrap(pager(Math.min(details.length, this.detailOffset + this.detailPage))).map((line) =>
+        c.faint(` ${line}`),
+      ),
+    ];
   }
 
   handleInput(data: string): void {
+    const previous = this.index;
     const numbered = numberedIndex(this.rows, data);
     if (isUp(data)) this.index = nextIndex(this.rows, this.index, -1);
     else if (isDown(data)) this.index = nextIndex(this.rows, this.index, 1);
     else if (numbered !== undefined) this.index = numbered;
+    else if (matchesKey(data, Key.pageUp))
+      this.detailOffset = Math.max(0, this.detailOffset - this.detailPage);
+    else if (matchesKey(data, Key.pageDown))
+      this.detailOffset = Math.min(
+        Math.max(0, this.detailTotal - this.detailPage),
+        this.detailOffset + this.detailPage,
+      );
     else if (matchesKey(data, Key.enter) || data === "d") {
       const row = this.rows[this.index];
       if (row && !row.disabled) this.onPick(row, data === "d" ? "d" : "enter");
@@ -92,20 +154,10 @@ export class ListPicker implements Component {
       this.onCancel();
       return;
     }
+    if (previous !== this.index) this.detailOffset = 0;
     this.onChange();
   }
 }
-
-export type ProviderSummary = {
-  name: string;
-  protocol: string;
-  /** 存放 key 的环境变量名(配置里给了才有)。 */
-  env?: string;
-  /** key 现在从哪来;没有就是缺。 */
-  keySource?: "env" | "credentials" | "config";
-  /** 配置里列出的模型名。 */
-  models: string[];
-};
 
 export type LoginDeps = {
   providers(): ProviderSummary[];

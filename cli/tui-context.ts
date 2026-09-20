@@ -130,7 +130,7 @@ export type ApprovalState = {
   prompt: ApprovalPrompt | undefined;
 };
 
-/** 策略槽的当前形态,/slots 显示;每次切换记 session/slot。 */
+/** 策略槽的当前配置;显示说明派生,每次切换记 session/slot。 */
 export type SlotState = {
   state: Record<string, string>;
   /** 工具描述风格的当前形态:风格加逐工具覆盖。 */

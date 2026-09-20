@@ -58,6 +58,16 @@ function fixture() {
 describe("setup data and persistence", () => {
   it("子任务使用派发时的模型和工具,扩展与 MCP 归属子日志,续聊重建资源且不串 cwd", async () => {
     const dir = mkdtempSync(join(tmpdir(), "clari-child-tools-"));
+    vi.stubEnv("CLARI_HOME", join(dir, "home"));
+    const skillDir = join(dir, "home", "skills", "proof");
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(
+      join(skillDir, "SKILL.md"),
+      "---\nname: proof\ndescription: Verify facts\n---\nRecord supporting evidence.",
+    );
+    const badSkill = join(dir, "home", "skills", "broken", "SKILL.md");
+    mkdirSync(dirname(badSkill), { recursive: true });
+    writeFileSync(badSkill, "---\nname: [broken\n---\nbody");
     const extension = join(dir, "extension.mjs");
     writeFileSync(
       extension,
@@ -122,6 +132,9 @@ describe("setup data and persistence", () => {
             text: "",
             stopReason: "tool",
             toolCalls: [
+              ...(tools.some((t) => t.name === "skill")
+                ? [{ id: "skill", name: "skill", args: { name: "proof" } }]
+                : []),
               ...(tools.some((t) => t.name === "read")
                 ? [{ id: "read", name: "read", args: {} }]
                 : []),
@@ -157,21 +170,35 @@ describe("setup data and persistence", () => {
         onExit() {},
       });
       host = running;
+      expect(running.app().lines(110).join("\n")).toContain("Skipped skill");
+      expect(
+        EventLog.load(running.file()).events.some(
+          (e) =>
+            e.type === "ext/event" &&
+            e.source === "skills" &&
+            String(e.payload.message).includes(badSkill),
+        ),
+      ).toBe(true);
       const task = running.app().agent.tools.find((t) => t.name === "task");
       const bash = running.app().agent.tools.find((t) => t.name === "bash");
       if (!task || !bash) throw new Error("missing runtime tools");
       await bash.execute({ command: "cd .." }, ctx);
       await running.app().command("/model p/new");
       await running.app().command("/tools off write");
+      await running.app().command("/settings prompt.skills.mode auto");
+      await running.app().command("/settings prompt.skills.load tool");
+      await running.app().command("/settings prompt.skills.include proof");
       duringRequest = async () => {
         await running.app().command("/tools off read");
         await running.app().command("/model p/old");
+        await running.app().command("/settings prompt.skills.mode manual");
       };
       await task.execute({ task: "first" }, ctx);
       expect(control.active).toBe(1);
       expect(seen.slice(0, 2).map((r) => r.model)).toEqual(["new", "new"]);
       for (const request of seen) {
         expect(request.tools).toContain("read");
+        expect(request.tools).toContain("skill");
         expect(request.tools).toContain("mcp__fixture__echo");
         expect(request.tools).not.toContain("write");
       }
@@ -179,9 +206,13 @@ describe("setup data and persistence", () => {
       await task.execute({ task: "resume", resume: "sub-1" }, ctx);
       expect(seen[2]?.model).toBe("old");
       expect(seen[2]?.tools).not.toContain("read");
+      expect(seen[2]?.tools).not.toContain("skill");
       const childFile = running.file().replace(/\.jsonl$/, "-sub-1.jsonl");
       const child = EventLog.load(childFile);
       const results = child.events.filter((e) => e.type === "tool/result");
+      expect(results.find((e) => e.callId === "skill")?.content).toContain(
+        "Record supporting evidence.",
+      );
       expect(results.find((e) => e.callId === "read")?.content).toBe(`${childFile}:1`);
       expect(results.filter((e) => e.callId === "rpc").map((e) => e.content)).toEqual([
         "echo: child",

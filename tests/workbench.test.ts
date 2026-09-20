@@ -8,7 +8,7 @@ import { Type } from "@sinclair/typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { systemPromptFor } from "../cli/bootstrap.js";
 import { workbench, workbenchLine } from "../cli/inspector-workbench.js";
-import { sectionStates, systemWithSections } from "../cli/prompt-sections.js";
+import { replaceSystemSection, sectionStates, systemWithSections } from "../cli/prompt-sections.js";
 import { createTuiApp } from "../cli/tui-app.js";
 import type { AgentEvent } from "../src/events.js";
 import { EventLog } from "../src/log.js";
@@ -82,18 +82,18 @@ describe("工作台的行", () => {
       "message",
       "message",
       "message",
-      "cache",
+      "prefix",
       "message",
       "message",
     ]);
     const cache = wb.rows[5];
-    expect(cache).toMatchObject({ kind: "cache", through: 4, broken: false });
-    expect(wb.cached).toBeGreaterThan(0);
-    expect(wb.total).toBeGreaterThan(wb.cached ?? 0);
+    expect(cache).toMatchObject({ kind: "prefix", through: 4, broken: false });
+    expect(wb.prefixTokens).toBeGreaterThan(0);
+    expect(wb.total).toBeGreaterThan(wb.prefixTokens ?? 0);
     expect(wb.lastRequest).toBe(5);
     const none = workbench({ events, tools: [] });
-    expect(none.rows.some((r) => r.kind === "cache")).toBe(false);
-    expect(none.cached).toBeUndefined();
+    expect(none.rows.some((r) => r.kind === "prefix")).toBe(false);
+    expect(none.prefixTokens).toBeUndefined();
   });
 
   it("宽字符不把右边的列顶歪:中文预览的行与英文行,token 与占比尺同一列", () => {
@@ -138,9 +138,9 @@ describe("工作台的行", () => {
     ];
     const lastSent = deriveMessages(sample().slice(0, 7));
     const wb = workbench({ events, tools: [], lastSent });
-    const cache = wb.rows.find((r) => r.kind === "cache");
+    const cache = wb.rows.find((r) => r.kind === "prefix");
     expect(cache).toMatchObject({
-      kind: "cache",
+      kind: "prefix",
       through: 1,
       broken: true,
       reason: "the edit at #3",
@@ -209,10 +209,10 @@ describe("工作台的界面", () => {
     let s = ins();
     expect(s).toContain("what the model sees on the next request");
     expect(s).toMatch(/≈\d+ of 100k/);
-    expect(s).toContain("cached ≈");
+    expect(s).toContain("same prefix ≈");
     expect(s).toMatch(/#0\s+system\s+role · env/);
     expect(s).toMatch(/tools\s+1 definition\s+echo/);
-    expect(s).toContain("cached through #");
+    expect(s).toContain("same prefix through #");
     // 光标在最后一条:助手回复,预览写来历
     expect(s).toMatch(/▸\s+#\d+\s+assistant\s+reply/);
     expect(s).toContain("from event assistant/message");
@@ -258,11 +258,22 @@ describe("工作台的界面", () => {
     app.inspector.key("\x1b");
     s = ins();
     expect(s).toMatch(/✎\s+#0\s+system/);
-    expect(s).toContain("cached through nothing");
+    expect(s).toContain("same prefix through nothing");
     const states = sectionStates(log.events);
     expect(states?.map((x) => x.on)).toEqual([true, false]);
     expect(systemWithSections(states ?? [], "Environment")).toBe(
       log.events[0]?.type === "session/start" ? log.events[0].system : "",
+    );
+    const skillsEdit = replaceSystemSection(log.events, "Skills", {
+      name: "Skills",
+      text: "# Skills\n- review",
+    });
+    if (!skillsEdit) throw new Error("missing catalog edit");
+    log.append(skillsEdit);
+    const after = sectionStates(log.events);
+    expect(after?.find((s) => s.name === "Environment")?.on).toBe(false);
+    expect(systemWithSections(after ?? [], "Environment")).toContain(
+      states?.find((s) => s.name === "Environment")?.text,
     );
     // 旧日志:段长度对不上全文 → 只读
     const old = new EventLog();

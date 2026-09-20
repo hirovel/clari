@@ -5,10 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ModelSettings } from "../cli/model-settings.js";
 import { appendMemory } from "../cli/tools/memory.js";
-import { createTuiApp, type TuiApp, type TuiAppDeps, type TuiSettings } from "../cli/tui-app.js";
+import { createTuiApp, type TuiApp, type TuiAppDeps } from "../cli/tui-app.js";
+import { llmSummarize } from "../src/compaction.js";
 import { DEFAULT_CONFIG_PATH } from "../src/config.js";
 import { EventLog } from "../src/log.js";
+import { deriveMessages } from "../src/messages.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
 import { defineTool } from "../src/tools.js";
 import { testImage } from "./helpers/image.js";
@@ -38,7 +41,7 @@ const echo = defineTool({
 
 function boot(
   provider: Provider,
-  settings?: TuiSettings,
+  settings?: ModelSettings,
 ): { app: TuiApp; term: VirtualTerminal; log: EventLog } {
   const term = new VirtualTerminal(100, 40);
   const log = new EventLog();
@@ -114,7 +117,7 @@ function bootB(provider: Provider, over: Partial<TuiAppDeps> = {}, log = new Eve
 describe("命令:帮助、设置、检视器入口、强度、模型、审批", () => {
   it("/model:列表选择器、按名切换、default 落盘", async () => {
     const calls: string[] = [];
-    const settings: TuiSettings = {
+    const settings: ModelSettings = {
       listModels: () => ["fake/fake-model", "other/big-model"],
       switchModel: (name) => {
         calls.push(`switch:${name}`);
@@ -258,7 +261,7 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
       },
       listModels: async () => ["fake-model", "fresh-model"],
     };
-    const settings: TuiSettings = {
+    const settings: ModelSettings = {
       listModels: () => ["fake/fake-model", "fake/retired-model", "other/big-model"],
       switchModel: () => {
         throw new Error("n/a");
@@ -668,15 +671,54 @@ describe("命令的分支", () => {
 
 describe("槽命令的分支", () => {
   it("/preservation 三种输入;/approve 的 allow/deny/forget/outside 与用法;运行中拒绝", async () => {
-    const { app, log } = bootB(scriptedB([]));
-    await app.command("/set preservation tokens 5000");
-    expect(doc(app)).toContain("preservation → tokens 5000");
+    const { app, log } = bootB(
+      scriptedB([
+        { text: "Incomplete summary", toolCalls: [], stopReason: "length" },
+        { text: "Earlier findings summarized.", toolCalls: [], stopReason: "end" },
+      ]),
+      { compaction: { strategy: llmSummarize(), window: 100000, reserveTokens: 1000 } },
+    );
+    await app.command("/set preservation tokens 500");
+    expect(doc(app)).toContain("preservation → tokens 500");
     expect(log.events.at(-1)).toMatchObject({
       slot: "preservation",
-      value: "keepRecentTokens(5000)",
+      value: "tokens 500",
     });
+    log.append({ type: "user/message", at: "", text: "Keep the original task." });
+    log.append({
+      type: "assistant/message",
+      at: "",
+      text: "Older findings. ".repeat(500),
+      toolCalls: [],
+      stopReason: "end",
+    });
+    log.append({ type: "user/message", at: "", text: "Continue investigating." });
+    log.append({
+      type: "assistant/message",
+      at: "",
+      text: "More old findings. ".repeat(500),
+      toolCalls: [],
+      stopReason: "end",
+    });
+    log.append({ type: "user/message", at: "", text: "Keep this recent request verbatim." });
+    const before = deriveMessages(log.events);
+    await app.command("/compact");
+    expect(doc(app)).toContain("compaction failed: Summary did not finish (length)");
+    expect(deriveMessages(log.events)).toEqual(before);
+    expect(log.events.some((e) => e.type === "compaction")).toBe(false);
+    expect(log.events.filter((e) => e.type === "request")).toHaveLength(1);
+    await app.command("/compact");
+    const messages = deriveMessages(log.events);
+    expect(messages.some((m) => m.content.includes("Earlier findings summarized."))).toBe(true);
+    expect(messages.some((m) => m.content === "Keep this recent request verbatim.")).toBe(true);
+    expect(messages.some((m) => m.content.includes("More old findings."))).toBe(false);
+    expect(
+      log.events.some(
+        (e) => e.type === "assistant/message" && e.text.includes("More old findings."),
+      ),
+    ).toBe(true);
     await app.command("/set preservation ratio 0.3");
-    expect(log.events.at(-1)).toMatchObject({ value: "keepRatio(0.3)" });
+    expect(log.events.at(-1)).toMatchObject({ value: "ratio 0.3" });
     await app.command("/set preservation ratio 3");
     expect(doc(app)).toContain("ratio must be between 0 and 1");
     await app.command("/set preservation lots");

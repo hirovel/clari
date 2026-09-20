@@ -1,3 +1,5 @@
+import { ProviderError } from "./errors.js";
+
 // 记录发生在协议解析之前。三个适配器共用,正文错误与流中断也留下实际收到的部分。
 export type HttpRecord = {
   response(status: number, contentType: string): void;
@@ -84,4 +86,33 @@ export async function recordedFetch(
     await saved;
     throw error;
   }
+}
+
+/** 所有适配器共用的 GET /models:返回 data[].id。 */
+export async function fetchModelIds(
+  url: string,
+  headers: Record<string, string>,
+): Promise<string[]> {
+  const res = await fetch(url, { headers });
+  if (!res.ok) {
+    throw new ProviderError(`provider ${res.status}: ${await res.text()}`, { status: res.status });
+  }
+  const body = (await res.json()) as { data?: { id?: string }[] };
+  return (body.data ?? [])
+    .map((m) => m.id)
+    .filter((id): id is string => typeof id === "string")
+    .sort();
+}
+
+/**
+ * 请求级中止控制:用户的 signal 之外,停滞超时也要能撤销底层 fetch。
+ * 返回的 signal 给 fetch;abort() 只由停滞调用,不会被误判成用户打断(调用方看的仍是用户的 signal)。
+ */
+export function linkedAbort(signal?: AbortSignal): AbortController {
+  const ac = new AbortController();
+  if (signal) {
+    if (signal.aborted) ac.abort();
+    else signal.addEventListener("abort", () => ac.abort(), { once: true });
+  }
+  return ac;
 }

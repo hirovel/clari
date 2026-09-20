@@ -1,4 +1,5 @@
 import { eventTokens, messageTokens as tokensOf } from "../src/context.js";
+import type { Usage } from "../src/events.js";
 import type { Message } from "../src/messages.js";
 
 // ---------- 纯格式化 ----------
@@ -42,6 +43,22 @@ export function roleLabel(m: Message): string {
 
 export function pctOf(part: number, total: number): string {
   return total > 0 ? `${Math.round((part / total) * 100)}%` : "0%";
+}
+
+/** API 只报告总量,比例尺不代表具体消息或文本位置。缺失不是零命中。 */
+export function cacheUsageLines(usage: Usage | undefined, width = 60): string[] {
+  const hit = usage?.cacheReadTokens;
+  if (hit === undefined) return ["Cache hit: not reported"];
+  const total = usage?.inputTokens ?? 0;
+  if (!Number.isFinite(hit) || !Number.isFinite(total) || hit < 0 || total <= 0 || hit > total)
+    return ["Cache hit: unavailable (inconsistent or empty usage)"];
+  const cells = Math.max(4, Math.min(24, width - 12));
+  const filled = Math.round((hit / total) * cells);
+  return [
+    `Cache hit: ${((hit / total) * 100).toFixed(1)}% · ${hit}/${total} input tok`,
+    `hit ${"━".repeat(filled)}${"┄".repeat(cells - filled)} other`,
+    "API token share; exact text spans not reported.",
+  ];
 }
 
 export function indent(s: string, pad = "    "): string[] {

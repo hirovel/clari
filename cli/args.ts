@@ -79,8 +79,9 @@ export type CommonArgs = {
   promptSections?: PromptSectionName[];
   /** 项目指令与记忆放 system 还是首条 user 消息。 */
   instructionsAs?: "system" | "user";
-  /** 技能两个旋钮,来自配置或预设:清单放 system 还是不放;模型触发时 read 还是 skill 工具。 */
-  skillsList?: "system" | "none";
+  /** 技能调用方式、自动范围与加载方式。 */
+  skillsMode?: "manual" | "auto";
+  skillsInclude?: "all" | string[];
   skillsLoad?: "read" | "tool";
   /** 执行槽:sequential 缺省;parallel = 并行安全的相邻只读调用同时跑。 */
   execution?: ExecutionPolicy;
@@ -110,7 +111,8 @@ export function settingsFromArgs(args: CommonArgs): Preset {
     "prompt.sections": args.promptSections,
     "prompt.instructionsAs": args.instructionsAs,
     "prompt.memory": args.memory,
-    "prompt.skills.list": args.skillsList,
+    "prompt.skills.mode": args.skillsMode,
+    "prompt.skills.include": args.skillsInclude,
     "prompt.skills.load": args.skillsLoad,
   };
   let snapshot: Preset = {};
@@ -491,7 +493,10 @@ export function applyPreset(args: CommonArgs, config: KernelConfig): CommonArgs 
     ...config.defaults?.prompt?.skills,
     ...preset?.prompt?.skills,
   };
-  if (skills.list) out.skillsList = skills.list;
+  if ("list" in skills)
+    throw new Error("prompt.skills.list was removed; use prompt.skills.mode: manual or auto.");
+  if (skills.mode) out.skillsMode = skills.mode;
+  if (skills.include !== undefined) out.skillsInclude = skills.include;
   if (skills.load) out.skillsLoad = skills.load;
   return out;
 }

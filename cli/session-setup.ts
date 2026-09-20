@@ -3,9 +3,6 @@ import type { Preset } from "../src/config.js";
 import { type AgentEvent, now } from "../src/events.js";
 import type { EventLog } from "../src/log.js";
 import { getSetting, SETTINGS, setSetting } from "../src/settings.js";
-import { SETUP_SECTIONS, setupSnapshot } from "../src/setup.js";
-import type { TuiContext } from "./tui-context.js";
-import { effectiveSetting } from "./tui-settings.js";
 
 export const DISPLAY_KEYS = new Set([
   "saveInputs",
@@ -16,32 +13,12 @@ export const DISPLAY_KEYS = new Set([
   "results",
   "notify",
 ]);
-export const WORK_SETTINGS = SETUP_SECTIONS.flatMap((section) =>
-  section.keys.flatMap((key) => {
-    const def = SETTINGS.find((item) => item.key === key);
-    return def && !DISPLAY_KEYS.has(key) ? [def] : [];
-  }),
-);
+export const WORK_SETTINGS = SETTINGS.filter((def) => !DISPLAY_KEYS.has(def.key));
 export type SessionSetup = {
   values: Preset;
   tools: string[];
   descriptions?: Record<string, string>;
 };
-
-export function captureSessionSetup(ctx: TuiContext): SessionSetup {
-  const values = setupSnapshot(SETTINGS, (def) => effectiveSetting(ctx, def));
-  values.extensions = [...(ctx.setupInitial.extensions ?? [])];
-  values.approval = structuredClone(ctx.approval.cfg);
-  if (ctx.setupInitial.systemPromptFile)
-    values.systemPromptFile = ctx.setupInitial.systemPromptFile;
-  if (ctx.setupInitial.appendSystemPromptFile)
-    values.appendSystemPromptFile = ctx.setupInitial.appendSystemPromptFile;
-  return {
-    values,
-    tools: ctx.defs().map((tool) => tool.name),
-    descriptions: structuredClone(ctx.slots.toolPrompts.descriptions ?? {}),
-  };
-}
 
 export function recordSessionSetup(log: EventLog, setup: SessionSetup): void {
   let values: Preset = { ...setup.values };
@@ -84,25 +61,16 @@ export function restoreSessionSetup(
     } else if (event.type === "session/slot") {
       const { slot, value } = event;
       if (slot === "execution" || slot === "steering") values = setSetting(values, slot, value);
-      else if (slot === "compaction") {
-        const [strategy, trigger] = value.split(" · trigger ");
-        values = setSetting(values, "compaction", strategy);
-        if (trigger) values = setSetting(values, "compactionTrigger", trigger);
-      } else if (slot === "tools")
+      else if (slot === "compaction" || slot === "compactionTrigger")
+        values = setSetting(values, slot, value);
+      else if (slot === "tools")
         values = setSetting(
           values,
           "tools.disable",
           value === "all" ? [] : value.replace(/^off: /, "").split(" "),
         );
-      else if (slot === "preservation") {
-        const match = value.match(/^(keepRecentTokens|keepRatio)\(([\d.]+)\)$/);
-        if (match)
-          values = setSetting(
-            values,
-            slot,
-            `${match[1] === "keepRatio" ? "ratio" : "tokens"} ${match[2]}`,
-          );
-      } else if (slot === "approve" && (value === "all" || value === "ask"))
+      else if (slot === "preservation") values = setSetting(values, slot, value || null);
+      else if (slot === "approve" && (value === "all" || value === "ask"))
         values = setSetting(values, slot, value);
     }
   }

@@ -1,5 +1,7 @@
 // 命令的选单:次级选项不打字,选。每个命令无参数时弹选单,选中即落地;Esc 回去;
 // 打字形态仍然认;帮助只列十四个命令;未知命令给去处。/tools 的开关真的改随请求发出的工具集。
+
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
 import { createTuiApp, type TuiAppDeps } from "../cli/tui-app.js";
@@ -137,7 +139,47 @@ describe("命令选单", () => {
     app.dialogInput("\r");
     await tick();
     expect(doc()).toContain("type the rule after the command");
+    // 使用真正的覆盖层与输入路由:长列表、长值分页不能改写选项或草稿。
     app.stop();
+    const narrow = new VirtualTerminal(60, 18);
+    const next = boot({ terminal: narrow });
+    const rows = Array.from({ length: 40 }, (_, i) => ({
+      label: `model-${i + 1}`,
+      note: `${"项目路径/".repeat(80)}END-${i + 1}`,
+    }));
+    next.app.setDraft("未发送的草稿");
+    const chosen = next.app.choose("Choose a model", rows);
+    let completed = false;
+    void chosen.then(() => {
+      completed = true;
+    });
+    narrow.feed("d");
+    await tick();
+    expect(completed).toBe(false);
+    for (let i = 0; i < 30; i++) narrow.feed("\x1b[B");
+    const lines = next.app.dialogLines();
+    expect(lines.length).toBeLessThanOrEqual(18);
+    expect(lines.every((line) => visibleWidth(line) <= 60)).toBe(true);
+    next.app.tui.renderNow(true);
+    expect((await narrow.screen()).join("\n")).toContain("model-31");
+    expect((await narrow.screen()).join("\n")).toContain("Esc back");
+    for (let i = 0; i < 40; i++) {
+      narrow.feed("\x1b[6~");
+      next.app.tui.renderNow(true);
+    }
+    expect((await narrow.screen()).join("\n")).toContain("END-31");
+    narrow.feed("\x1b[A");
+    next.app.tui.renderNow(true);
+    expect((await narrow.screen()).join("\n")).toContain("model-30");
+    narrow.feed("\r");
+    expect(await chosen).toBe("model-30");
+    expect(next.app.draft()).toBe("未发送的草稿");
+    const cancelled = next.app.choose("Choose again", rows);
+    narrow.feed("\x1b");
+    expect(await cancelled).toBeUndefined();
+    narrow.feed("继续输入");
+    expect(next.app.draft()).toBe("未发送的草稿继续输入");
+    next.app.stop();
   });
 
   it("/tools 选单里 Enter 翻开关:关掉的不随请求发出,/inspect tools 标 off,记 session/slot;打字 only 一次选集", async () => {

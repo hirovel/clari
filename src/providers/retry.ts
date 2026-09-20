@@ -1,3 +1,4 @@
+import type { CompleteOptions } from "../provider.js";
 import { isContextOverflow, isRetryable, ProviderError } from "./errors.js";
 
 export type RetryOptions = {
@@ -34,4 +35,16 @@ export async function withRetry<T>(fn: () => Promise<T>, opts: RetryOptions = {}
       await sleep(delayMs);
     }
   }
+}
+
+/** 把 CompleteOptions 里的 onRetry 并进适配器自己的重试配置,两边都收到通知。 */
+export function mergeRetry(
+  base: RetryOptions | undefined,
+  opts: Pick<CompleteOptions, "signal" | "onRetry">,
+): RetryOptions {
+  const onRetry: RetryOptions["onRetry"] = (info) => {
+    base?.onRetry?.(info);
+    opts.onRetry?.(info);
+  };
+  return { ...base, onRetry, ...(opts.signal && { signal: opts.signal }) };
 }

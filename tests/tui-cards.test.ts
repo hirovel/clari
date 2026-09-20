@@ -4,7 +4,8 @@ import { rmSync } from "node:fs";
 import { Type } from "@sinclair/typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { cacheNote, changeNote, firstRunLines, messageMarks, thinkingLines } from "../cli/cards.js";
-import { createTuiApp, type TuiApp, type TuiAppDeps, type TuiSettings } from "../cli/tui-app.js";
+import type { ModelSettings } from "../cli/model-settings.js";
+import { createTuiApp, type TuiApp, type TuiAppDeps } from "../cli/tui-app.js";
 import { brief, formatArgs, toolCallDetail } from "../cli/tui-format.js";
 import { now } from "../src/events.js";
 import { EventLog } from "../src/log.js";
@@ -35,7 +36,10 @@ const echo = defineTool({
   },
 });
 
-function boot(provider: Provider, settings?: TuiSettings): { app: TuiApp; term: VirtualTerminal } {
+function boot(
+  provider: Provider,
+  settings?: ModelSettings,
+): { app: TuiApp; term: VirtualTerminal } {
   const term = new VirtualTerminal(100, 40);
   const app = createTuiApp({
     terminal: term,

@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { feedChunk, finishAcc, newAcc, toWire } from "../src/provider.js";
 import {
   feedAnthropicEvent,
   finishAnthropicAcc,
   newAnthropicAcc,
 } from "../src/providers/anthropic.js";
 import { isContextOverflow, isRetryable, ProviderError } from "../src/providers/errors.js";
+import { feedChunk, finishAcc, newAcc, toWire } from "../src/providers/openai-chat.js";
 import { withRetry } from "../src/providers/retry.js";
 
 describe("withRetry", () => {

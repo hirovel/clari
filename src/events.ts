@@ -116,7 +116,8 @@ export type AgentEvent =
   | { type: "session/model"; at: string; model: string }
   /**
    * 会话中切换了某个策略槽。只给人看:此后的步按新策略走。
-   * slot 是槽名(compaction / preservation / execution / steering / approve),value 是新实现的名字与参数。
+   * slot 是槽名(compaction / compactionTrigger / preservation / execution / steering / approve)。
+   * 压缩与保留策略保存原始配置值,显示说明不参与恢复。
    */
   | { type: "session/slot"; at: string; slot: string; value: string }
   /**

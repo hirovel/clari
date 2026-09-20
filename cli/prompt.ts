@@ -6,7 +6,8 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { release, type } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
-import { clariHome, type PromptSectionName } from "../src/config.js";
+import { parse } from "yaml";
+import { clariHome, type PromptSectionName, type SkillsConfig } from "../src/config.js";
 import { splitMemory } from "./tools/memory.js";
 
 export type PromptSection = {
@@ -36,7 +37,7 @@ export const SECTION_LABELS: Record<PromptSectionName, string> = {
 };
 
 /**
- * 技能:一个目录一个 SKILL.md。frontmatter 认四个字段:name、description、
+ * 技能:一个目录一个 SKILL.md。frontmatter 读取 name、description、
  * disable-model-invocation(只许用户 /名 触发,不进系统提示词)、allowed-tools(用户触发的那一 turn 里这些工具免审批)、
  * argument-hint(补全提示)。正文按需进入上下文,不预先占 token。
  */
@@ -57,28 +58,55 @@ export type Skill = {
 /** 解析 SKILL.md;没有 name 就用目录名。 */
 export function parseSkill(path: string, raw: string): Skill {
   const dir = dirname(path);
-  const m = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
-  const field = (k: string) => m?.[1]?.match(new RegExp(`^${k}:\\s*(.+)$`, "m"))?.[1]?.trim();
-  const body = (m ? raw.slice(m[0].length) : raw).trim();
-  const allowed = field("allowed-tools");
-  const hint = field("argument-hint");
-  return {
-    name: field("name") || basename(dir),
-    description: field("description") || "",
-    path,
-    dir,
-    body,
-    disableModelInvocation: /^(true|yes)$/i.test(field("disable-model-invocation") ?? ""),
-    allowedTools: allowed ? allowed.split(/[\s,]+/).filter(Boolean) : [],
-    ...(hint && { argumentHint: hint }),
-  };
+  try {
+    let body = raw;
+    let metadata: Record<string, unknown> = {};
+    // 正则只识别文件头边界;YAML 语法交给解析库,不改写 Markdown 正文。
+    const start = raw.match(/^\uFEFF?---[ \t]*\r?\n/);
+    if (start) {
+      const rest = raw.slice(start[0].length);
+      const end = rest.match(/^---[ \t]*(?:\r?\n|$)/m);
+      if (!end) throw new Error("Unclosed YAML frontmatter; expected a closing --- line.");
+      const parsed: unknown = parse(rest.slice(0, end.index));
+      if (parsed != null && (typeof parsed !== "object" || Array.isArray(parsed)))
+        throw new Error("YAML frontmatter must be a mapping.");
+      metadata = (parsed ?? {}) as Record<string, unknown>;
+      body = rest.slice((end.index ?? 0) + end[0].length);
+    }
+    const field = (key: string): string | undefined => {
+      const value = metadata[key];
+      if (value == null) return undefined;
+      if (typeof value !== "string") throw new Error(`${key} must be a string.`);
+      return value.trim();
+    };
+    const manual = metadata["disable-model-invocation"];
+    if (manual != null && typeof manual !== "boolean")
+      throw new Error("disable-model-invocation must be a YAML boolean (true or false).");
+    const allowed = field("allowed-tools");
+    const hint = field("argument-hint");
+    return {
+      name: field("name") || basename(dir),
+      description: field("description") || "",
+      path,
+      dir,
+      body: body.trim(),
+      disableModelInvocation: manual === true,
+      allowedTools: allowed ? allowed.split(/[\s,]+/).filter(Boolean) : [],
+      ...(hint && { argumentHint: hint }),
+    };
+  } catch (error) {
+    throw new Error(`Invalid skill ${path}: ${(error as Error).message}`, { cause: error });
+  }
 }
 
 /**
  * 技能发现:用户级 ~/.clari/skills 与 ~/.claude/skills,项目级 <git 根>/.agents/skills 与 <git 根>/.claude/skills;
  * 每个目录下 <名>/SKILL.md;同名以先发现的为准。读 .claude/skills 是为了与 Claude Code 互通。
  */
-export function discoverSkills(cwd: string, opts: { home?: string; root?: string } = {}): Skill[] {
+export function discoverSkills(
+  cwd: string,
+  opts: { home?: string; root?: string; onError?: (error: Error) => void } = {},
+): Skill[] {
   const home = opts.home ?? clariHome();
   const root = opts.root ?? findGitRoot(cwd) ?? resolve(cwd);
   // 用户级 .claude/skills 取 clari 用户目录的同级(~/.clari 与 ~/.claude 同在家目录);
@@ -96,16 +124,35 @@ export function discoverSkills(cwd: string, opts: { home?: string; root?: string
     for (const name of readdirSync(dir).sort()) {
       const file = join(dir, name, "SKILL.md");
       if (!existsSync(file) || !statSync(file).isFile()) continue;
-      const s = parseSkill(file, readFileSync(file, "utf8"));
-      if (!byName.has(s.name)) byName.set(s.name, s);
+      try {
+        const s = parseSkill(file, readFileSync(file, "utf8"));
+        if (!byName.has(s.name)) byName.set(s.name, s);
+      } catch (error) {
+        const warning = new Error(`Skipped skill: ${(error as Error).message}`);
+        if (opts.onError) opts.onError(warning);
+        else console.warn(warning.message);
+      }
     }
   }
   return [...byName.values()];
 }
 
 /** 系统提示词里的技能清单:只放名字、描述、路径;只许用户触发的技能不列。 */
-export function skillsSection(skills: Skill[]): PromptSection | undefined {
-  const listed = skills.filter((s) => !s.disableModelInvocation);
+export function automaticSkills(skills: readonly Skill[], config: SkillsConfig = {}): Skill[] {
+  if (config.mode !== "auto") return [];
+  const include = config.include ?? "all";
+  return skills.filter(
+    (s) => !s.disableModelInvocation && (include === "all" || include.includes(s.name)),
+  );
+}
+
+export function skillsSection(
+  skills: Skill[],
+  config: SkillsConfig = {},
+): PromptSection | undefined {
+  // 专用工具在自己的描述里列目录,避免两处重复占用上下文。
+  if (config.load === "tool") return undefined;
+  const listed = automaticSkills(skills, config);
   if (listed.length === 0) return undefined;
   const lines = listed.map((s) => `- ${s.name}: ${s.description || "(no description)"}  ${s.path}`);
   return {
@@ -116,17 +163,12 @@ export function skillsSection(skills: Skill[]): PromptSection | undefined {
 }
 
 /**
- * 用户触发技能:/名 参数 → 一条用户消息。正文里 $ARGUMENTS / $@ 是全部参数,$1..$9 是按空格切分的第 n 个。
- * 消息头一行说明来源与目录,模型据此解析相对路径;整条消息落盘上屏,与手打的一样。
+ * 技能正文与本次要求组成一条消息,正文不做模板替换,用户要求不依赖占位符。
+ * 消息头说明来源与目录;同一份文本用于用户触发和模型加载,落盘后可完整检视。
  */
 export function expandSkill(skill: Skill, argText: string): string {
-  const args = [...argText.matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)].map(
-    (m) => m[1] ?? m[2] ?? m[3] ?? "",
-  );
-  const body = skill.body
-    .replace(/\$ARGUMENTS|\$@/g, argText.trim())
-    .replace(/\$(\d)/g, (_, n: string) => args[Number(n) - 1] ?? "");
-  return `Skill "${skill.name}" (${skill.path}; relative paths are relative to ${skill.dir}):\n\n${body}`;
+  const instructions = `Skill "${skill.name}" (${skill.path}; relative paths are relative to ${skill.dir}):\n\n${skill.body}`;
+  return argText.trim() ? `${instructions}\n\nUser request:\n${argText}` : instructions;
 }
 
 /** 非空段以空行相接;段内文本原样。 */
@@ -315,6 +357,9 @@ export type BuildPromptOptions = {
   memory?: boolean;
   /** 项目指令与记忆放 system 还是首条 user 消息。缺省 system。 */
   instructionsAs?: "system" | "user";
+  skills?: SkillsConfig;
+  /** 正式入口统一由运行资源装配记录错误;独立调用时默认打印。 */
+  onSkillError?: (error: Error) => void;
   discover?: DiscoverOptions;
   env?: { now?: Date; env?: NodeJS.ProcessEnv; git?: boolean };
 };
@@ -343,7 +388,9 @@ export function buildSystemPrompt(opts: BuildPromptOptions): BuiltPrompt {
         discoverSkills(opts.cwd, {
           ...(opts.discover?.home && { home: opts.discover.home }),
           ...(opts.discover?.root && { root: opts.discover.root }),
+          ...(opts.onSkillError && { onError: opts.onSkillError }),
         }),
+        opts.skills,
       )
     : undefined;
   const available: Partial<Record<PromptSectionName, PromptSection>> = {

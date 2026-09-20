@@ -52,6 +52,10 @@ try {
 const { log, sessionFile } = beginSession(args, choice, process.cwd(), sessionsDir(boot.config));
 // 事件流输出(--events):每条事件一行 JSON,与会话文件逐字节相同;给外部程序订阅内核的全部状态变化。
 if (args.events) log.subscribe((e) => process.stdout.write(`${JSON.stringify(e)}\n`));
+log.subscribe((e) => {
+  if (e.type === "ext/event" && e.source === "skills" && e.kind === "load-error")
+    console.error(String(e.payload.message));
+});
 let runtime: Awaited<ReturnType<typeof prepareSessionRuntime>>;
 let agent: Agent;
 const recordingOffs: (() => void)[] = [];

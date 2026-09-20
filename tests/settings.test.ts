@@ -46,7 +46,8 @@ describe("开关登记表", () => {
       "prompt.sections": ["role", "env"],
       "prompt.instructionsAs": "user",
       "prompt.memory": true,
-      "prompt.skills.list": "none",
+      "prompt.skills.mode": "auto",
+      "prompt.skills.include": ["review"],
       "prompt.skills.load": "tool",
 
       "tools.disable": ["bash"],
@@ -84,7 +85,8 @@ describe("开关登记表", () => {
       "prompt.sections": args.promptSections,
       "prompt.instructionsAs": args.instructionsAs,
       "prompt.memory": args.memory,
-      "prompt.skills.list": args.skillsList,
+      "prompt.skills.mode": args.skillsMode,
+      "prompt.skills.include": args.skillsInclude,
       "prompt.skills.load": args.skillsLoad,
 
       "tools.disable": args.disabledTools,

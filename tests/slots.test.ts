@@ -1,6 +1,13 @@
 // 会话中切换策略槽:命令改变下一次 turn 的行为,每次切换记 session/slot,/slots 显示当前。
+
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
+import { parsePreservation } from "../cli/args.js";
+import { recordSessionSetup, restoreSessionSetup } from "../cli/session-setup.js";
+import { buildCompaction } from "../cli/strategies.js";
 import { createTuiApp } from "../cli/tui-app.js";
 import { EventLog } from "../src/log.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
@@ -128,7 +135,7 @@ describe("/slots 与切换命令", () => {
     expect(log.events.at(-1)).toMatchObject({
       type: "session/slot",
       slot: "compaction",
-      value: "clear · trigger threshold",
+      value: "clear",
     });
     await app.command("/compact");
     const comp = log.events.at(-1);
@@ -138,13 +145,90 @@ describe("/slots 与切换命令", () => {
     await app.command("/set compaction manual");
     expect(log.events.at(-1)).toMatchObject({
       type: "session/slot",
-      slot: "compaction",
-      value: "clear · trigger manual",
+      slot: "compactionTrigger",
+      value: "manual",
     });
     expect(text()).toContain("compaction → trigger manual");
 
     await app.command("/set compaction ./does-not-exist.mjs");
     expect(text()).toContain("✗");
-    app.stop();
+    const dir = mkdtempSync(join(tmpdir(), "clari-slot-values-"));
+    let restoredApp: ReturnType<typeof createTuiApp> | undefined;
+    try {
+      const path = join(dir, "keep · trigger recent.mjs");
+      writeFileSync(
+        path,
+        'export default async () => ({ cleared: [], strategy: "custom-loaded" });',
+      );
+      await app.command(`/set compaction ${path}`);
+      expect(app.setup().values.compaction).toBe(path);
+      await app.command("/set compaction manual");
+      await app.command("/set preservation ratio 0.00000001");
+      expect(app.setup().values.compaction).toBe(path);
+      expect(app.setup().values.preservation).toBe("ratio 0.00000001");
+      // 在快照之前也能从槽事件恢复,不靠解析显示文字补齐。
+      const slots = restoreSessionSetup(log.events, {}).setup;
+      expect(slots.values.compaction).toBe(path);
+      expect(slots.values.compactionTrigger).toBe("manual");
+      expect(slots.values.preservation).toBe("ratio 0.00000001");
+      recordSessionSetup(log, app.setup());
+      const file = join(dir, "session.jsonl");
+      const stored = new EventLog(file);
+      for (const event of log.events) stored.append(event);
+      await stored.checkpoint();
+      stored.recording?.dispose();
+      const reloaded = EventLog.load(file);
+      const saved = restoreSessionSetup(reloaded.events, {}).setup;
+      if (!saved.values.compaction || !saved.values.preservation)
+        throw new Error("Restored strategy values are missing");
+      const compaction = await buildCompaction(
+        saved.values.compaction,
+        100000,
+        1000,
+        saved.values.compactionTrigger,
+      );
+      compaction.preservation = parsePreservation(saved.values.preservation).policy;
+      restoredApp = createTuiApp({
+        terminal: new VirtualTerminal(80, 24),
+        log: reloaded,
+        provider: scripted([]),
+        tools: [],
+        compaction,
+        reserveTokens: 1000,
+        info: { model: "m", providerName: "p", sessionFile: "s" },
+        startupSettings: saved.values,
+        compactionName: saved.values.compaction,
+        preservationSpec: saved.values.preservation,
+        onExit() {},
+      });
+      await restoredApp.command("/compact");
+      expect(reloaded.events.at(-1)).toMatchObject({
+        type: "compaction",
+        strategy: "custom-loaded",
+      });
+      restoredApp.stop();
+      // 用户选择另一套组合时,历史渲染不能把旧值重新写进当前状态。
+      restoredApp = createTuiApp({
+        terminal: new VirtualTerminal(80, 24),
+        log: reloaded,
+        provider: scripted([]),
+        tools: [],
+        compaction: {
+          ...(await buildCompaction("clear", 100000, 1000)),
+          preservation: parsePreservation("tokens 3000").policy,
+        },
+        reserveTokens: 1000,
+        info: { model: "m", providerName: "p", sessionFile: "s" },
+        compactionName: "clear",
+        preservationSpec: "tokens 3000",
+        onExit() {},
+      });
+      expect(restoredApp.setup().values.compaction).toBe("clear");
+      expect(restoredApp.setup().values.preservation).toBe("tokens 3000");
+    } finally {
+      restoredApp?.stop();
+      app.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

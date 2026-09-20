@@ -87,3 +87,11 @@ async function nextChunk(
     if (timer) clearTimeout(timer);
   }
 }
+
+/** 停滞发生在已经吐字之后就不能重试(会重复输出);之前可以。 */
+export function stallToError(err: unknown, streamed: boolean): unknown {
+  if (err instanceof StreamStall && streamed) {
+    return new ProviderError(err.message, { retryable: false });
+  }
+  return err;
+}

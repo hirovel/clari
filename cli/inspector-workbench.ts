@@ -1,6 +1,6 @@
 // 上下文工作台(Ctrl+E)的行:屏上这一列就是下一次请求的正文,按发送顺序。
 // 系统提示词与工具定义是前两行;摘要后面折一行"被覆盖的消息";被丢弃的消息淡显在原位;
-// 上次请求缓存到哪一条,就在那条下面画一条线,改动发生在线上方时线上移变金。
+// 上次请求相同前缀到哪一条,就在那条下面画一条线,改动发生在线上方时线上移变金。
 // 全部是纯函数:输入是事件、上次发出的消息、工具定义;没有自己的状态,每次事件到达重画一遍。
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import { estimateTokens, eventTokens } from "../src/context.js";
@@ -20,8 +20,8 @@ export type WorkbenchRow =
   | { kind: "covered"; from: number; upTo: number; count: number; tok: number; summary: number }
   | { kind: "dropped"; event: number; tok: number; by: number | undefined; role: string }
   | {
-      kind: "cache";
-      /** 缓存到的最后一条消息的事件号;undefined = 一条都没缓存。 */
+      kind: "prefix";
+      /** 相同前缀的最后一条消息的事件号;undefined = 没有相同前缀。 */
       through: number | undefined;
       tok: number;
       /** 上次发过的前缀断了(编辑、丢弃、压缩)。 */
@@ -34,8 +34,8 @@ export type Workbench = {
   rows: WorkbenchRow[];
   /** 下一次请求的估算总量(消息加工具定义)。 */
   total: number;
-  /** 缓存到的 token(上次前缀里未变的部分)。 */
-  cached: number | undefined;
+  /** 相同前缀的估算 token(上次前缀里未变的部分)。 */
+  prefixTokens: number | undefined;
   /** 前缀断了。 */
   broken: boolean;
   /** 最新一次 request 事件的下标;之后的消息还没发过。 */
@@ -82,10 +82,10 @@ export function workbench(input: WorkbenchInput): Workbench {
     .sort((a, b) => a - b);
   const covered = omitted.filter((o) => o.reason === "covered");
   const rows: WorkbenchRow[] = [];
-  let cached = 0;
+  let prefixTokens = 0;
   let total = 0;
   let broken = false;
-  let cacheReason: string | undefined;
+  let changeReason: string | undefined;
   const pushDropped = (before: number) => {
     while (dropped.length > 0 && (dropped[0] as number) < before) {
       const event = dropped.shift() as number;
@@ -113,21 +113,21 @@ export function workbench(input: WorkbenchInput): Workbench {
           : next.stages.includes("cleared")
             ? "the cleared result"
             : "the change";
-      cacheReason = `${what} at #${next.event}`;
+      changeReason = `${what} at #${next.event}`;
     }
     rows.push({
-      kind: "cache",
+      kind: "prefix",
       through,
-      tok: cached,
+      tok: prefixTokens,
       broken,
-      ...(cacheReason && { reason: cacheReason }),
+      ...(changeReason && { reason: changeReason }),
     });
   };
   crows.forEach((r, k) => {
     pushDropped(r.event);
     const tok = messageTokens(r.message);
     total += tok;
-    if (keep !== undefined && k < keep) cached += tok;
+    if (keep !== undefined && k < keep) prefixTokens += tok;
     if (k === 0 && r.message.role === "system") {
       rows.push({
         kind: "system",
@@ -157,13 +157,19 @@ export function workbench(input: WorkbenchInput): Workbench {
     pushCache(k + 1);
   });
   pushDropped(Number.MAX_SAFE_INTEGER);
-  if (keep === 0) rows.unshift({ kind: "cache", through: undefined, tok: 0, broken: true });
-  return { rows, total, cached: keep === undefined ? undefined : cached, broken, lastRequest };
+  if (keep === 0) rows.unshift({ kind: "prefix", through: undefined, tok: 0, broken: true });
+  return {
+    rows,
+    total,
+    prefixTokens: keep === undefined ? undefined : prefixTokens,
+    broken,
+    lastRequest,
+  };
 }
 
 /** 光标能停的行。 */
 export function selectable(r: WorkbenchRow): boolean {
-  return r.kind !== "cache";
+  return r.kind !== "prefix";
 }
 
 function roleOf(m: Message): string {
@@ -214,7 +220,7 @@ function describe(
         text: `dropped${r.by !== undefined ? ` by #${r.by}` : ""} · was ${fmtTok(r.tok)} tok`,
         faint: true,
       };
-    case "cache":
+    case "prefix":
       return { sign: "", role: "", text: "", faint: true };
     case "message": {
       const m = r.row.message;
@@ -292,17 +298,17 @@ function summaryPreview(content: string): string {
   return line ? firstLine(line, 80) : firstLine(content, 80);
 }
 
-/** 一行:光标、记号、事件号、角色、预览、token、尺。cache 行是一条线。 */
+/** 一行:光标、记号、事件号、角色、预览、token、尺。prefix 行是一条线。 */
 export function workbenchLine(
   events: readonly AgentEvent[],
   r: WorkbenchRow,
   opts: { selected: boolean; width: number; maxTok: number },
 ): string {
   const { selected, width } = opts;
-  if (r.kind === "cache") {
+  if (r.kind === "prefix") {
     const text = r.broken
-      ? `cached through ${r.through === undefined ? "nothing" : `#${r.through}`} · ≈${fmtTok(r.tok)}${r.reason ? ` · ${r.reason} recomputes everything below` : ""}`
-      : `cached through #${r.through ?? 0} on the last request · ≈${fmtTok(r.tok)}`;
+      ? `same prefix through ${r.through === undefined ? "nothing" : `#${r.through}`} · ≈${fmtTok(r.tok)}${r.reason ? ` · ${r.reason} changes input below` : ""}`
+      : `same prefix through #${r.through ?? 0} vs previous input · ≈${fmtTok(r.tok)}`;
     const side = Math.max(2, Math.floor((width - text.length - 2) / 2));
     const line = `${"┈".repeat(side)} ${text} ${"┈".repeat(Math.max(2, width - side - text.length - 2))}`;
     return (r.broken ? c.jin : c.faint)(truncateToWidth(line, width, "…"));
@@ -436,7 +442,7 @@ export function previewLines(
         out.push(c.soft(`  ${G.call} ${m.toolCalls.map((t) => t.name).join("  ")}`));
       break;
     }
-    case "cache":
+    case "prefix":
       break;
   }
   if (opts.busy) out.splice(1, 0, c.zhu(`  ${opts.busy}`));

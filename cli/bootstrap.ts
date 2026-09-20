@@ -25,7 +25,8 @@ import { planTool } from "../src/plan.js";
 import { defaultPreset, setSetting } from "../src/settings.js";
 import { replaceSetup } from "../src/setup.js";
 import type { Tool } from "../src/tools.js";
-import { applyPreset, type CommonArgs, PROMPT_SECTION_NAMES, parseCommonArgs } from "./args.js";
+import { applyPreset, type CommonArgs, parseCommonArgs } from "./args.js";
+import type { ModelChoice, ModelSettings } from "./model-settings.js";
 import {
   buildSystemPrompt,
   type DiscoverOptions,
@@ -49,7 +50,6 @@ import { editTool, readTool, writeTool } from "./tools/fs.js";
 import { createRememberTool, type MemoryFiles } from "./tools/memory.js";
 import { globTool, grepTool } from "./tools/search.js";
 import { createSkillTool } from "./tools/skill.js";
-import type { ModelChoice, TuiSettings } from "./tui-app.js";
 
 export * from "./args.js";
 export * from "./extensions.js";
@@ -74,7 +74,7 @@ export type Bootstrap = {
   choose(name?: string): ModelChoice;
   /** 同 choose,但缺 key 时返回占位选择(unavailable 带原因)而不是抛错。 */
   chooseOrNone(name?: string): ModelChoice;
-  settings: TuiSettings;
+  settings: ModelSettings;
   /** 把预设与配置缺省并进参数:显式参数 > 预设 > 配置 prompt 缺省 > 内置缺省。 */
   resolve(args: CommonArgs): CommonArgs;
 };
@@ -131,7 +131,7 @@ export function bootstrap(): Bootstrap {
       return { ...noProviderChoice(), unavailable: message };
     }
   };
-  const settings: TuiSettings = {
+  const settings: ModelSettings = {
     defaultModel: () => config.default,
     priceFor: (model) => {
       try {
@@ -285,7 +285,9 @@ type PromptArgs = Pick<
   | "memory"
   | "promptSections"
   | "instructionsAs"
-  | "skillsList"
+  | "skillsMode"
+  | "skillsInclude"
+  | "skillsLoad"
 >;
 
 // chars 是修剪后的长度:composeSystemPrompt 修剪每段再以空行相接,所以各段长度加空行正好等于全文,
@@ -319,10 +321,13 @@ export function systemPromptFor(
     ...(args.promptSections && { sections: args.promptSections }),
     memory: args.memory ?? false,
     ...(args.instructionsAs && { instructionsAs: args.instructionsAs }),
-    // skills.list = none:技能清单不进系统提示词,只许用户 /名 触发。
-    ...(args.skillsList === "none" && {
-      sections: (args.promptSections ?? PROMPT_SECTION_NAMES).filter((s) => s !== "skills"),
-    }),
+    // prepareSessionRuntime 同样扫描技能,在那里只记一次完整诊断并上屏。
+    onSkillError: () => {},
+    skills: {
+      ...(args.skillsMode && { mode: args.skillsMode }),
+      ...(args.skillsInclude !== undefined && { include: args.skillsInclude }),
+      ...(args.skillsLoad && { load: args.skillsLoad }),
+    },
   });
   return {
     text: built.text,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { feedChunk, finishAcc, newAcc } from "../src/provider.js";
+import { feedChunk, finishAcc, newAcc } from "../src/providers/openai-chat.js";
 
 // SSE 累积是纯函数,不碰网络即可测:这是把流解析从 fetch 里拆出来的全部理由。
 describe("stream accumulation", () => {
