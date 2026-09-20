@@ -1,20 +1,31 @@
 // 视觉专项:脚本化 provider 驱动界面,每个场景一份 HTML,浏览器里逐张核对。
 // 用法:FORCE_COLOR=1 pnpm exec tsx scripts/visual-suite.ts [输出目录,缺省 .preview/visual]
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+import { pathToFileURL } from "node:url";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { noProviderChoice, systemPromptFor } from "../cli/bootstrap.js";
+import type { Bootstrap } from "../cli/bootstrap.js";
+import { applyPreset, parseCommonArgs } from "../cli/args.js";
+import { startTuiSession } from "../cli/tui-session.js";
+import type { KernelConfig } from "../src/config.js";
+import { setSetting } from "../src/settings.js";
 import { createTuiApp, type TuiApp, type TuiAppDeps } from "../cli/tui-app.js";
 import { llmSummarize } from "../src/compaction.js";
 import { EventLog } from "../src/log.js";
 import type { AssistantTurn, CompleteOptions, Provider } from "../src/provider.js";
+import type { Message } from "../src/messages.js";
 import { ProviderError } from "../src/providers/errors.js";
 import { createTaskTool } from "../src/subagent.js";
 import { defineTool, type Tool } from "../src/tools.js";
-import { bashTool } from "../cli/tools/bash.js";
+import { createBashTool } from "../cli/tools/bash.js";
 import { readTool } from "../cli/tools/fs.js";
 import { ansiToHtmlDocument } from "../tests/helpers/ansi-html.js";
-import { VirtualTerminal } from "../tests/helpers/virtual-terminal.js";
+import { stripAnsi, VirtualTerminal } from "../tests/helpers/virtual-terminal.js";
+import { createLogic } from "../tests/helpers/mcp-server.mjs";
 
 const outDir = process.argv[2] ?? join(".preview", "visual");
 mkdirSync(outDir, { recursive: true });
@@ -75,7 +86,7 @@ function emit(t: AssistantTurn, opts: CompleteOptions): AssistantTurn {
 
 // 真实的描述与参数,假的执行:描述档的对照才有意义。
 const bash: Tool = {
-  ...bashTool,
+  ...createBashTool(),
   async execute() {
     return " ✓ tests/loop.test.ts (10 tests) 9ms\n ✗ tests/agent.test.ts (3 tests | 1 failed) 12ms\n Test Files  1 failed | 9 passed (10)";
   },
@@ -353,7 +364,7 @@ scene = "6";
     { text: "Reading.", reasoning: "Need the file first.", reasoningKind: "full", toolCalls: [{ id: "c1", name: "read", args: { path: "src/loop.ts", limit: 2 } }], stopReason: "tool", usage: { inputTokens: 2000, outputTokens: 20 } },
     { text: "Here is the answer.", toolCalls: [], stopReason: "end", usage: { inputTokens: 2400, outputTokens: 40 } },
   ]);
-  const { app } = boot(provider, { trace: true });
+  const { app } = boot(provider, {});
   await app.submit("Explain runTurn.");
   const shots: string[] = [];
   app.inspector.open();
@@ -538,7 +549,7 @@ scene = "10";
   const p = systemPromptFor({}, process.cwd());
   log.append({ type: "session/start", at: new Date().toISOString(), model: "fake-agent", system: p.text, sections: p.sections });
   const { app } = boot(provider, {
-    trace: true,
+
     settings: {
       listModels: () => ["local-fake/fake-agent"],
       switchModel: () => { throw new Error("n/a"); },
@@ -576,16 +587,274 @@ scene = "10";
   app.inspector.key("\x1b");
   app.inspector.close();
   await app.command("/settings");
-  shots.push(...divider("/settings: every switch, current value, one line, source; Enter changes it and writes the config"), ...app.dialogLines());
-  app.dialogInput("\x1b[B");
-  app.dialogInput("\x1b[B");
-  app.dialogInput("\x1b[B");
+  shots.push(...divider("/settings: Agent setup; This session and Saved defaults are separate scopes"), ...app.dialogLines());
+  await app.command("/settings foldSteps");
   app.dialogInput("\r");
-  shots.push(...divider("foldSteps: common values, then type a value"), ...app.dialogLines());
+  shots.push(...divider("foldSteps: current value, recommendations, timing; E enters a custom value"), ...app.dialogLines());
   app.dialogInput("\x1b");
   app.dialogInput("\x1b");
   app.stop();
   save("10-workbench", "10 Context workbench, events and settings", shots);
+}
+
+// 固定运行区的真实终端缓冲区:小屏和宽屏走同一段有停顿、有审批、有错误的工作流。
+for (const [width, height] of [[60, 24], [120, 36]] as const) {
+  scene = `runtime-${width}`;
+  const term = new VirtualTerminal(width, height);
+  let release: (() => void) | undefined;
+  let fail = false;
+  let requests = 0;
+  const provider: Provider = {
+    model: "local-fake",
+    async complete(_messages, _tools, opts) {
+      if (fail) throw new ProviderError("The local fixture is unavailable.", { status: 503 });
+      if (++requests > 1) return { text: "The update is complete. The execution boundary is unchanged.", toolCalls: [], stopReason: "end", usage: { inputTokens: 1800, outputTokens: 32 } };
+      opts?.onReasoning?.("Reviewing the current execution boundary before proposing a change.");
+      opts?.onDelta?.("The runtime currently mixes task state, context usage and shortcut hints.\n\nI am checking the existing components before updating their layout.");
+      await new Promise<void>((resolve) => { release = resolve; });
+      return { text: "The proposed status component keeps actions visible at narrow widths.", toolCalls: [{ id: "preview-write", name: "write", args: { path: "cli/runtime.ts", content: Array.from({ length: 35 }, (_, n) => `// Proposed layout line ${n + 1}`).join("\n") } }], stopReason: "tool", usage: { inputTokens: 1600, outputTokens: 60 } };
+    },
+  };
+  const write = defineTool({ name: "write", description: "Local preview fixture; no file writes.", parameters: Type.Object({ path: Type.String(), content: Type.String() }), async execute() { return "Preview change accepted."; } });
+  const app = createTuiApp({ terminal: term, log: new EventLog(), provider, tools: [write], compaction: { strategy: async () => null, window: 128000, reserveTokens: 32000 }, reserveTokens: 32000, info: { model: "local-fake", providerName: "demo", sessionFile: "sessions/long-project-name/runtime-design-session.jsonl" }, systemPrompt: "Local visual fixture.", approve: "ask", onExit: () => {} });
+  const capture = async (state: string) => {
+    app.tui.renderNow(true);
+    const visible = await term.screen();
+    const candidates = [...app.lines(width), ...app.dialogLines(), ...app.approvalLines()];
+    // 位置取真实缓冲区,精确匹配的行沿用组件 ANSI 色彩;不重造终端布局。
+    const styled = visible.map((line) => candidates.find((candidate) => stripAnsi(candidate).trimEnd() === line) ?? line);
+    save(`11-runtime-${width}-${state}`, `Runtime · ${width} × ${height} · ${state}`, styled);
+  };
+  await capture("ready");
+  const work = app.submit("Clarify the runtime UI and keep the execution choices visible.");
+  await tick();
+  await capture("streaming");
+  term.feed("\x1b[5~");
+  await capture("history");
+  term.feed("\x1b");
+  release?.();
+  for (let n = 0; n < 40 && app.approvalLines().length === 0; n++) await tick();
+  await capture("approval");
+  term.feed("\x1b[6~");
+  await capture("approval-details");
+  term.feed("y");
+  await work;
+  await capture("complete");
+  fail = true;
+  await app.submit("Continue with the next task.");
+  await capture("error");
+  term.feed("?");
+  await capture("help");
+  app.stop();
+}
+
+// 新建、历史补全与失败恢复均走真实会话控制器,不手绘未来状态。
+for (const [width, height] of [[60, 24], [120, 36]] as const) {
+  scene = `session lifecycle ${width}`;
+  const dir = mkdtempSync(join(tmpdir(), "clari-session-visual-"));
+  const config: KernelConfig = { default: "demo/local-fake", providers: { demo: { protocol: "openai", baseUrl: "http://unused", models: ["local-fake"] } },
+    sessionsDir: dir, defaults: { prompt: { sections: [] }, execution: "sequential" } };
+  let hold = false;
+  let remoteMode: "timeout" | "cancel" | undefined;
+  let exitMode = false;
+  let remoteArrived = () => {};
+  const handleMcp = createLogic({ era: "modern", tools: 0 });
+  const remote = createServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk) => { body += chunk; });
+    req.on("end", () => {
+      const message = JSON.parse(body);
+      if (message.method === "tools/call") { remoteArrived(); return; }
+      const out = handleMcp(message);
+      res.writeHead(message.id === undefined ? 202 : 200, { "content-type": "application/json" });
+      res.end(message.id === undefined ? undefined : JSON.stringify(out[0]));
+    });
+  });
+  const choose = () => ({ model: "local-fake", providerName: "demo", contextWindow: 128000,
+    provider: { model: "local-fake", async complete(_messages: Message[], _tools: unknown, opts?: CompleteOptions) {
+      if (hold) { await new Promise<void>((resolve) => opts?.signal?.addEventListener("abort", () => resolve(), { once: true })); return { text: "", toolCalls: [], stopReason: "aborted" as const }; }
+      if (exitMode) return { text: "Waiting for the local demo extension.", toolCalls: [{ id: "release-check", name: "demo_wait", args: { task: "Review release preparation" } }], stopReason: "tool" as const };
+      if (remoteMode) {
+        if (_messages.at(-1)?.role === "tool") return { text: "The remote outcome is unknown. I will check its actual state before deciding whether another call is needed.", toolCalls: [], stopReason: "end" as const };
+        return { text: "Calling the local demo MCP server.", toolCalls: [{ id: remoteMode, name: "mcp__demo__echo", args: { text: "Check release preparation" } }], stopReason: "tool" as const };
+      }
+      return { text: "The current setup is ready. You can change the model, tools and strategies independently.", toolCalls: [], stopReason: "end" as const };
+    } } });
+  const boot: Bootstrap = { config, configCreated: false, choose, chooseOrNone: choose,
+    resolve: (args) => applyPreset(args, config), settings: { listModels: () => [config.default], switchModel: choose, setKey() {}, setDefault() {},
+      saveSetting(key, value) { config.defaults = setSetting(config.defaults, key, value); } } };
+  let term = new VirtualTerminal(width, height);
+  let host = await startTuiSession({ boot, args: boot.resolve(parseCommonArgs([])), terminal: () => { term = new VirtualTerminal(width, height); return term; }, onExit() {} });
+  const capture = async (state: string) => {
+    const app = host.app();
+    app.tui.renderNow(true);
+    const visible = await term.screen();
+    const candidates = [...app.lines(width), ...app.dialogLines()];
+    save(`12-session-${width}-${state}`, `Local session runtime · ${width} × ${height} · ${state}`,
+      visible.map((line) => candidates.find((candidate) => stripAnsi(candidate).trimEnd() === line) ?? line));
+  };
+  try {
+    await host.app().submit("Inspect the current agent setup.");
+    await host.app().command("/session");
+    await capture("menu");
+    host.app().dialogInput("\x1b");
+    await host.switchSession({ kind: "new" });
+    await capture("new");
+    const legacyFile = join(dir, "old-work.jsonl");
+    const legacy = new EventLog(legacyFile);
+    legacy.append({ type: "session/start", at: "", model: "demo/local-fake", system: "Continue the existing work." });
+    legacy.append({ type: "user/message", at: "", text: "Review the session architecture and preserve my choices." });
+    const restoring = host.switchSession({ kind: "resume", file: legacyFile });
+    await tick();
+    await capture("restore-review");
+    host.app().dialogInput("\r");
+    host.app().dialogInput("\x15");
+    host.app().dialogInput("\x1b[200~demo/local-fake\x1b[201~");
+    await capture("restore-edit");
+    host.app().dialogInput("\r");
+    host.app().dialogInput("c");
+    await restoring;
+    await capture("restored");
+    config.defaults = { ...config.defaults, extensions: [join(dir, "missing-extension.mjs")] };
+    host.app().setDraft("Keep this draft while I repair the setup.");
+    const failing = host.switchSession({ kind: "new", source: "defaults" });
+    for (let n = 0; n < 60 && !host.app().dialogLines().join("\n").includes("preparation failed"); n++) await tick();
+    await capture("failure");
+    host.app().dialogInput("\x1b");
+    await failing;
+    await capture("draft-preserved");
+    config.defaults = { ...config.defaults, extensions: [] };
+    hold = true;
+    const running = host.app().submit("Review the input recovery changes.");
+    await tick();
+    void host.app().agent.prompt("Check the recovery path before changing the execution policy.");
+    void host.app().agent.prompt("Then summarize the changes and verification evidence.", { deliverAs: "followUp" });
+    host.app().setDraft("Keep this unsent draft.\nDo not replay external actions.");
+    host.app().agent.interrupt();
+    await running;
+    hold = false;
+    const savedFile = host.file();
+    await host.switchSession({ kind: "new" });
+    await host.switchSession({ kind: "resume", file: savedFile });
+    await capture("inputs-recovered");
+    await host.app().command("/session inputs");
+    await capture("inputs-paused");
+    term.feed("\r");
+    term.feed("\x15");
+    term.feed("\x1b[200~Check recovery with a multiline input.\nKeep the delivery boundary visible.\x1b[201~");
+    await capture("inputs-edit");
+    term.feed("\r");
+    term.feed("c");
+    await host.app().agent.waitForIdle();
+    await host.app().command("/session inputs");
+    await capture("inputs-empty");
+    host.app().dialogInput("\x1b");
+    const snapshot = savedFile.replace(/\.jsonl$/, ".inputs.json");
+    rmSync(snapshot, { force: true });
+    mkdirSync(snapshot);
+    host.app().setDraft("Keep this draft until local saving works again.");
+    try { host.app().flushInputs(); } catch { /* 保存失败的本地磁盘夹具 */ }
+    await host.app().command("/session inputs");
+    await capture("inputs-save-error");
+    rmSync(snapshot, { recursive: true });
+    host.app().dialogInput("s");
+    host.app().dialogInput("\x1b");
+    const unknownFile = join(dir, "unknown-result.jsonl");
+    const unknownLog = new EventLog(unknownFile);
+    for (const event of EventLog.load(savedFile).events) unknownLog.append(event);
+    unknownLog.append({ type: "assistant/message", at: "", text: "Updating the release notes.", toolCalls: [{ id: "unfinished-write", name: "write", args: { path: join(dir, "release-notes.md"), content: "Document the recovery behavior." } }], stopReason: "tool" });
+    await host.switchSession({ kind: "resume", file: unknownFile });
+    await capture("result-unknown");
+    await host.app().command("/session recovery");
+    await capture("recovery-details");
+    host.app().dialogInput("\x1b");
+    await new Promise<void>((resolve) => remote.listen(0, "127.0.0.1", resolve));
+    config.mcp = { servers: { demo: { url: `http://127.0.0.1:${(remote.address() as AddressInfo).port}/mcp`, toolTimeoutMs: 500 } } };
+    config.defaults = { ...config.defaults, approve: "all" };
+    remoteMode = "timeout";
+    await host.switchSession({ kind: "new", source: "defaults" });
+    await host.app().submit("Check the release preparation remotely.");
+    await capture("remote-timeout");
+    await host.app().command("/session recovery");
+    await capture("remote-details");
+    host.app().dialogInput("\x1b");
+    remoteMode = "cancel";
+    await host.switchSession({ kind: "new", source: "defaults" });
+    const arrived = new Promise<void>((resolve) => { remoteArrived = resolve; });
+    const remoteRun = host.app().submit("Check the release preparation remotely.");
+    await arrived;
+    term.feed("\x1b");
+    await remoteRun;
+    await capture("remote-cancel");
+    const exitExtension = join(dir, "exit-demo.mjs");
+    writeFileSync(exitExtension, `
+      export let started = false;
+      export let cleaning = false;
+      export let finishTool = () => {};
+      export let finishCleanup = () => {};
+      export const reset = () => { started = false; cleaning = false; };
+      export default () => ({
+        tools: [{ name: "demo_wait", description: "A local shutdown fixture", parameters: { type: "object" },
+          execute() { started = true; return new Promise(resolve => { finishTool = () => resolve("Demo work finished."); }); } }],
+        dispose() { cleaning = true; return new Promise(resolve => { finishCleanup = resolve; }); }
+      });
+    `);
+    const exitControl = await import(pathToFileURL(exitExtension).href);
+    try {
+      exitMode = true;
+      remoteMode = undefined;
+      config.mcp = { servers: {} };
+      config.defaults = { ...config.defaults, extensions: [exitExtension] };
+      await host.switchSession({ kind: "new", source: "defaults" });
+      const exitingWork = host.app().submit("Finish the release checks.");
+      while (!exitControl.started) await tick();
+      void host.app().agent.prompt("Keep the verification notes for later.");
+      host.app().setDraft("Preserve my next question.");
+      await host.app().command("/quit");
+      await capture("exit-wait");
+      const exitSnapshot = host.file().replace(/\.jsonl$/, ".inputs.json");
+      rmSync(exitSnapshot);
+      mkdirSync(exitSnapshot);
+      host.app().setDraft("Preserve the latest question too.");
+      term.feed("f");
+      await capture("exit-save-error");
+      rmSync(exitSnapshot, { recursive: true });
+      exitControl.finishTool();
+      await exitingWork;
+      while (!exitControl.cleaning) await tick();
+      await capture("exit-cleanup");
+      term.feed("f");
+      await host.close();
+      exitControl.finishCleanup();
+      exitControl.reset();
+      host = await startTuiSession({ boot, args: boot.resolve(parseCommonArgs([])), terminal: () => { term = new VirtualTerminal(width, height); return term; }, onExit() {} });
+      const fatalWork = host.app().submit("Finish the release checks.");
+      while (!exitControl.started) await tick();
+      void host.app().agent.prompt("Keep the verification notes for later.");
+      host.app().setDraft("Preserve my question after the failure.");
+      const fatalSnapshot = host.file().replace(/\.jsonl$/, ".inputs.json");
+      rmSync(fatalSnapshot, { force: true });
+      mkdirSync(fatalSnapshot);
+      const fatalClose = host.close("unhandled promise rejection: Error: Local extension failed\n    at releaseCheck (local-fixture.mjs:18:7)");
+      while (!host.app().dialogLines().join("\n").includes("r retry saving")) await tick();
+      await capture("fatal-save-error");
+      rmSync(fatalSnapshot, { recursive: true });
+      term.feed("r");
+      await tick();
+      await capture("fatal-wait");
+      exitControl.finishTool();
+      await fatalWork;
+      while (!exitControl.cleaning) await tick();
+      await capture("fatal-cleanup");
+      term.feed("f");
+      await fatalClose;
+    } finally { exitControl.finishTool(); exitControl.finishCleanup(); }
+  } finally {
+    await host.close();
+    remote.closeAllConnections();
+    await new Promise<void>((resolve) => remote.close(() => resolve()));
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 const index = [

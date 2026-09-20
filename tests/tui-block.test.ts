@@ -1,6 +1,6 @@
 // 文本块:续行悬挂缩进(记号行、引导行、前导空格行),截断模式,底带铺满;状态行左右分栏。
 import { describe, expect, it } from "vitest";
-import { Block, hangingIndent, hangLine, SplitLine } from "../cli/tui-block.js";
+import { Block, hangingIndent, hangLine } from "../cli/tui-block.js";
 import { stripAnsi } from "./helpers/virtual-terminal.js";
 
 describe("hangLine", () => {
@@ -21,6 +21,8 @@ describe("hangLine", () => {
     expect(cut[0]?.trimEnd().endsWith("…")).toBe(true);
     expect(cut[0]?.trimEnd().length).toBeLessThanOrEqual(40);
     expect(cut[1]?.trimEnd()).toBe("   short");
+    const styled = "\x1b[38;2;1;2;3mresult\x1b[39m     short";
+    expect(hangLine(styled, 40)).toEqual([styled]);
   });
 
   it("记号行缩 2,引导行缩 4 并重复引导线,前导空格行照前导空格", () => {
@@ -35,26 +37,14 @@ describe("hangLine", () => {
     expect(guide.length).toBeGreaterThan(1);
     expect(guide[1]?.startsWith("  ┆ ")).toBe(true);
   });
-
-  it("放得下就原样返回;ANSI 不算宽度", () => {
-    const styled = "\x1b[38;2;1;2;3mresult\x1b[39m     short";
-    expect(hangLine(styled, 40)).toEqual([styled]);
-  });
 });
 
-describe("Block 与 SplitLine", () => {
+describe("Block", () => {
   it("Block 左右各留一列,底带铺满整行", () => {
     const b = new Block("› hi", { bg: (s) => `[${s}]` });
     const lines = b.render(12);
     expect(lines).toEqual(["[ › hi       ]"]);
     b.setText("");
     expect(b.render(12)).toEqual([]);
-  });
-
-  it("SplitLine 右边靠右;放不下时只留左边", () => {
-    const s = new SplitLine();
-    s.set("left", "right");
-    expect(s.render(20)).toEqual([" left         right "]);
-    expect(s.render(9)).toEqual([" left "]);
   });
 });

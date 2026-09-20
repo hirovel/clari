@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { describe, expect, it } from "vitest";
-import { bashTool, createBashTool } from "../cli/tools/bash.js";
+import { createBashTool } from "../cli/tools/bash.js";
 import { editTool, readTool } from "../cli/tools/fs.js";
 import { grepTool } from "../cli/tools/search.js";
 import { costOf, fmtCost, usageTotals } from "../src/cost.js";
@@ -141,7 +141,7 @@ describe("bash 工具的边界", () => {
   }, 15000);
 
   it("timeout 参数覆盖缺省", async () => {
-    const out = await bashTool.execute({ command: "echo ok", timeout: 30 }, ctx);
+    const out = await createBashTool().execute({ command: "echo ok", timeout: 30 }, ctx);
     expect(out).toBe("ok");
   });
 });

@@ -66,6 +66,10 @@ describe("listSessions / pruneSessions", () => {
   it("按时间或条数选出要删的;不 apply 不动文件;apply 连旁车删", () => {
     tmp = mkdtempSync(join(tmpdir(), "clari-sessions-"));
     const old = session(tmp, "a-old", "2026-07-01T00:00:00.000Z", { trace: true, mcp: true });
+    writeFileSync(join(tmp, "a-old.inputs.json"), "{}");
+    writeFileSync(join(tmp, "a-old.inputs.json.tmp"), "{}");
+    mkdirSync(join(tmp, "a-old.records"));
+    writeFileSync(join(tmp, "a-old.records", "fixture.body"), "x".repeat(8192));
     const mid = session(tmp, "b-mid", "2026-08-20T00:00:00.000Z");
     const fresh = session(tmp, "c-new", "2026-09-03T00:00:00.000Z");
     const now = new Date("2026-09-04T00:00:00.000Z");
@@ -73,6 +77,7 @@ describe("listSessions / pruneSessions", () => {
     expect(plan.removed.map((s) => s.file)).toEqual([old]);
     expect(plan.kept).toBe(2);
     expect(existsSync(old)).toBe(true);
+    expect(plan.bytes).toBeGreaterThan(8192);
     const byCount = pruneSessions(tmp, { keep: 1, apply: false, now });
     expect(byCount.removed.map((s) => s.file).sort()).toEqual([old, mid].sort());
     const done = pruneSessions(tmp, { olderThanDays: 30, apply: true, now });
@@ -80,6 +85,9 @@ describe("listSessions / pruneSessions", () => {
     expect(existsSync(old)).toBe(false);
     expect(existsSync(join(tmp, "a-old.trace.jsonl"))).toBe(false);
     expect(existsSync(join(tmp, "a-old.mcp"))).toBe(false);
+    expect(existsSync(join(tmp, "a-old.inputs.json"))).toBe(false);
+    expect(existsSync(join(tmp, "a-old.inputs.json.tmp"))).toBe(false);
+    expect(existsSync(join(tmp, "a-old.records"))).toBe(false);
     expect(existsSync(mid)).toBe(true);
     expect(existsSync(fresh)).toBe(true);
     expect(parseAge("30d")).toBe(30);

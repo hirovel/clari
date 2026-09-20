@@ -191,7 +191,7 @@ describe("上下文面板的动作与后果", () => {
     });
     let doc = plain(app.lines(120).join("\n"));
     expect(doc).toContain("Ask anything");
-    expect(doc).toContain("? shortcuts");
+    expect(doc).toContain("/help");
     await app.submit("first");
     await app.submit("second");
     doc = plain(app.lines(120).join("\n"));

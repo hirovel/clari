@@ -32,17 +32,25 @@ export function currentSystem(events: readonly AgentEvent[]): string | undefined
  */
 export function sectionStates(events: readonly AgentEvent[]): SectionState[] | undefined {
   const s = startOf(events);
-  if (!s?.e.sections || s.e.sections.length === 0) return undefined;
-  const full = s.e.system;
-  const expected = s.e.sections.reduce((n, x) => n + x.chars, 0) + 2 * (s.e.sections.length - 1);
+  if (!s) return undefined;
+  let full = s.e.system;
+  let sections = s.e.sections;
+  for (const e of events) {
+    if (e.type === "context/edit" && e.target === s.index && e.field === "system" && e.sections) {
+      full = e.value;
+      sections = e.sections;
+    }
+  }
+  if (!sections?.length) return undefined;
+  const expected = sections.reduce((n, x) => n + x.chars, 0) + 2 * (sections.length - 1);
   if (expected !== full.length) return undefined;
   const now = currentSystem(events) ?? full;
   const out: SectionState[] = [];
   let at = 0;
-  for (let k = 0; k < s.e.sections.length; k++) {
-    const m = s.e.sections[k] as { name: string; source?: string; chars: number };
+  for (let k = 0; k < sections.length; k++) {
+    const m = sections[k] as { name: string; source?: string; chars: number };
     const text = full.slice(at, at + m.chars);
-    const last = k === s.e.sections.length - 1;
+    const last = k === sections.length - 1;
     if (!last && full.slice(at + m.chars, at + m.chars + 2) !== "\n\n") return undefined;
     at += m.chars + 2;
     out.push({ name: m.name, source: m.source, text, chars: m.chars, on: now.includes(text) });

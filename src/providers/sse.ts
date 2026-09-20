@@ -28,27 +28,31 @@ export async function* sseEvents(
   const stallMs = opts.stallTimeoutMs ?? DEFAULT_STALL_MS;
   const decoder = new TextDecoder();
   const it = body[Symbol.asyncIterator]();
-  let buffer = "";
-  while (true) {
-    const step = await nextChunk(it, stallMs, opts.onStall);
-    if (step.done) break;
-    buffer += decoder.decode(step.value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop() ?? "";
-    for (const rawLine of lines) {
-      const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
-      if (opts.onRaw && line.trim()) opts.onRaw(line);
-      if (!line.startsWith("data:")) continue;
-      const data = line.slice(5).trim();
-      if (!data || data === "[DONE]") continue;
-      yield parseData(data);
+  try {
+    let buffer = "";
+    while (true) {
+      const step = await nextChunk(it, stallMs, opts.onStall);
+      if (step.done) break;
+      buffer += decoder.decode(step.value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const rawLine of lines) {
+        const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+        if (opts.onRaw && line.trim()) opts.onRaw(line);
+        if (!line.startsWith("data:")) continue;
+        const data = line.slice(5).trim();
+        if (!data || data === "[DONE]") continue;
+        yield parseData(data);
+      }
     }
-  }
-  const rest = buffer.trim();
-  if (rest.startsWith("data:")) {
-    if (opts.onRaw) opts.onRaw(rest);
-    const data = rest.slice(5).trim();
-    if (data && data !== "[DONE]") yield parseData(data);
+    const rest = buffer.trim();
+    if (rest.startsWith("data:")) {
+      if (opts.onRaw) opts.onRaw(rest);
+      const data = rest.slice(5).trim();
+      if (data && data !== "[DONE]") yield parseData(data);
+    }
+  } finally {
+    await it.return?.();
   }
 }
 

@@ -49,7 +49,6 @@ describe("入口参数与会话文件", () => {
       "--max-steps",
       "3",
       "--json",
-      "--trace",
       "任务",
       "文本",
     ]);
@@ -59,7 +58,7 @@ describe("入口参数与会话文件", () => {
       compaction: "clear",
       maxSteps: 3,
       json: true,
-      trace: true,
+
       rest: ["任务", "文本"],
     });
     expect(parseCommonArgs(["-p", "hi", "--continue"]).rest).toEqual(["hi"]);
@@ -127,7 +126,7 @@ describe("会话恢复", () => {
       tools: [],
       compaction: { strategy: async () => null, window: 100000, reserveTokens: 20000 },
       reserveTokens: 20000,
-      info: { model: "m1", providerName: "p", sessionFile: file },
+      info: { model: "m1", providerName: "p", sessionFile: file, resumed: true },
       systemPrompt: "这份不该被用",
       onExit: () => {},
     });
@@ -204,7 +203,7 @@ describe("配置里的可选项:命令行 > 预设 > defaults > 内置缺省", (
         steering: "turn" as const,
         preservation: "ratio 0.3",
         toolPrompts: "brief" as const,
-        trace: false,
+
         fold: true,
         subagent: true,
         prompt: {
@@ -230,7 +229,7 @@ describe("配置里的可选项:命令行 > 预设 > defaults > 内置缺省", (
       steering: "turn",
       preservation: "ratio 0.3",
       toolPrompts: "brief",
-      trace: false,
+
       fold: true,
       subagent: true,
       memory: true,
@@ -244,23 +243,14 @@ describe("配置里的可选项:命令行 > 预设 > defaults > 内置缺省", (
       toolPrompts: "rules",
       memory: false,
       execution: "parallel",
-      trace: false,
     });
     const byFlags = applyPreset(
-      parseCommonArgs([
-        "--preset",
-        "fast",
-        "--compaction",
-        "pipeline",
-        "--trace",
-        "--steering",
-        "step",
-      ]),
+      parseCommonArgs(["--preset", "fast", "--compaction", "pipeline", "--steering", "step"]),
       config,
     );
     expect(byFlags).toMatchObject({
       compaction: "pipeline",
-      trace: true,
+
       steering: "step",
       approve: "all",
     });

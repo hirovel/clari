@@ -1,14 +1,23 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { collectRequests } from "../cli/inspector.js";
+import { readRequestRecording } from "../cli/session-records.js";
 import { clearToolResults, keepRecentTokens, llmSummarize } from "../src/compaction.js";
 import type { AgentEvent } from "../src/events.js";
+import { exchangeRecorder } from "../src/exchange.js";
 import { EventLog } from "../src/log.js";
 import { describeRequestBody, maxSteps, recordingProvider, runTurn } from "../src/loop.js";
 import { deriveMessages } from "../src/messages.js";
 import { type AssistantTurn, openaiCompat, type Provider } from "../src/provider.js";
+import { anthropic } from "../src/providers/anthropic.js";
 import { ProviderError } from "../src/providers/errors.js";
+import { recordedFetch } from "../src/providers/http.js";
+import { openaiResponses } from "../src/providers/openai-responses.js";
 import { defineTool } from "../src/tools.js";
+import { testImage } from "./helpers/image.js";
 
 const echo = defineTool({
   name: "echo",
@@ -319,9 +328,11 @@ describe("策略请求的真实正文与策略名", () => {
       toolCalls: [],
       stopReason: "end",
     });
+    const captured: string[] = [];
     const summarizer: Provider = {
       model: "fake",
-      async complete() {
+      async complete(messages, _tools, opts) {
+        opts?.onRequest?.(JSON.stringify(messages));
         return {
           text: "摘要正文",
           toolCalls: [],
@@ -335,7 +346,7 @@ describe("策略请求的真实正文与策略名", () => {
       events: log.events,
       window: 100000,
       targetTokens: 50,
-      provider: recordingProvider(log, summarizer),
+      provider: recordingProvider(log, summarizer, { onRequest: (body) => captured.push(body) }),
       preservation: keepRecentTokens(10),
     });
     expect(payload?.strategy).toBe("llmSummarize(structuredFull, replay)");
@@ -350,6 +361,8 @@ describe("策略请求的真实正文与策略名", () => {
       "Compress the conversation above",
     );
     expect(body.prefixEvents).toBeGreaterThan(0);
+    expect(captured).toHaveLength(1);
+    expect(JSON.parse(captured[0] ?? "[]").at(-1)).toEqual(body.tail[0]);
 
     const cleared = await clearToolResults({ keepRecent: 0, clearAtLeast: 1 })({
       events: log.events,
@@ -385,15 +398,178 @@ describe("wire 层与实际发送一致", () => {
     });
     const messages = deriveMessages([
       { type: "session/start", at: "t", model: "m", system: "sys" },
-      { type: "user/message", at: "t", text: "hello" },
+      { type: "user/message", at: "t", text: "hello", images: [testImage] },
     ]);
     const tools = [{ name: "echo", description: "d", parameters: { type: "object" } }];
     const raw: string[] = [];
-    const turn = await p.complete(messages, tools, { onRaw: (l) => raw.push(l) });
+    const captured: string[] = [];
+    const turn = await p.complete(messages, tools, {
+      onRaw: (l) => raw.push(l),
+      onRequest: (body) => captured.push(body),
+    });
     expect(turn.text).toBe("hi");
     expect(JSON.parse(sentBody)).toEqual(p.wire?.(messages, tools));
     expect(sentBody).toBe(JSON.stringify(p.wire?.(messages, tools)));
     expect(raw).toHaveLength(3);
     expect(raw[2]).toBe("data: [DONE]");
+    expect(captured).toEqual([sentBody]);
+    // 三个独立适配器都必须在每次重试边界记录实际序列化正文。
+    for (const create of [openaiCompat, anthropic, openaiResponses]) {
+      const sent: string[] = [];
+      const captures: string[] = [];
+      vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
+        sent.push(String(init.body));
+        if (sent.length === 1) return new Response("retry".repeat(2000), { status: 503 });
+        const event = url.endsWith("/responses")
+          ? { type: "response.completed", response: { status: "completed" } }
+          : url.endsWith("/v1/messages")
+            ? {
+                type: "message_delta",
+                delta: { stop_reason: "end_turn" },
+                usage: { output_tokens: 0 },
+              }
+            : { choices: [{ delta: {}, finish_reason: "stop" }] };
+        return new Response(`data: ${JSON.stringify(event)}\n\n`, { status: 200 });
+      });
+      const provider = create({
+        apiKey: "fixture-auth-token",
+        model: "m",
+        baseUrl: "http://fixture",
+        retry: { maxRetries: 1, sleep: async () => {} },
+      });
+      const dir = mkdtempSync(join(tmpdir(), "clari-http-record-"));
+      try {
+        const file = join(dir, "s.jsonl");
+        const log = new EventLog(file);
+        const record = exchangeRecorder(log, 0);
+        if (!record) throw new Error("missing recorder");
+        await provider.complete(messages, tools, {
+          record,
+          onRequest: (body) => captures.push(body),
+        });
+        const saved = readRequestRecording(file, EventLog.load(file).events, 0);
+        expect(saved?.bodies).toEqual(sent);
+        const wire = JSON.parse(sent[1] ?? "{}");
+        if (create === anthropic)
+          expect(wire.messages[0].content).toContainEqual(
+            expect.objectContaining({
+              type: "image",
+              source: { type: "base64", media_type: "image/png", data: testImage.data },
+            }),
+          );
+        else if (create === openaiResponses)
+          expect(wire.input[0].content).toContainEqual({
+            type: "input_image",
+            image_url: `data:image/png;base64,${testImage.data}`,
+            detail: "auto",
+          });
+        else
+          expect(wire.messages[1].content).toContainEqual({
+            type: "image_url",
+            image_url: { url: `data:image/png;base64,${testImage.data}` },
+          });
+        expect(saved?.attempts?.map((a) => [a.status, a.state])).toEqual([
+          [503, "complete"],
+          [200, "complete"],
+        ]);
+        expect(saved?.attempts?.[0]?.response).toBe("retry".repeat(2000));
+        expect(saved?.attempts?.[1]?.response.endsWith("\n\n")).toBe(true);
+        expect(saved?.bodies.join("\n")).not.toContain("fixture-auth-token");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+      expect(captures).toEqual(sent);
+      expect(captures).toHaveLength(2);
+      expect(captures[0]).toBe(JSON.stringify(provider.wire?.(messages, tools)));
+      expect(captures.join("\n")).not.toContain("fixture-auth-token");
+    }
+  });
+
+  it("响应中断、主动取消和协议解析失败都保存已收到的原文并关闭流", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "clari-partial-record-"));
+    try {
+      for (const mode of ["network", "cancel", "malformed", "saving"] as const) {
+        let pulls = 0;
+        let canceled = false;
+        const text =
+          mode === "saving"
+            ? 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+            : "data: invalid-json 中文\n\n";
+        vi.stubGlobal(
+          "fetch",
+          async () =>
+            new Response(
+              new ReadableStream<Uint8Array>(
+                {
+                  pull(controller) {
+                    if (!pulls++) controller.enqueue(new TextEncoder().encode(text));
+                    else if (mode === "network") controller.error(new Error("connection lost"));
+                    else if (mode === "saving") controller.close();
+                  },
+                  cancel() {
+                    canceled = true;
+                  },
+                },
+                { highWaterMark: 0 },
+              ),
+              { status: 200 },
+            ),
+        );
+        const file = join(dir, `${mode}.jsonl`);
+        const log = new EventLog(file);
+        const record = exchangeRecorder(log, 0);
+        if (!record) throw new Error("missing recorder");
+        if (mode === "malformed" || mode === "saving") {
+          const provider = openaiCompat({
+            baseUrl: "http://fixture",
+            apiKey: "fixture",
+            model: "m",
+            retry: { maxRetries: 0 },
+            stallTimeoutMs: 10,
+          });
+          if (mode === "malformed")
+            await expect(provider.complete([], [], { record })).rejects.toThrow("无法解析");
+          else {
+            const result = await provider.complete([], [], {
+              record: async (body) => {
+                const capture = await record(body);
+                return {
+                  ...capture,
+                  async end(state, error) {
+                    await new Promise((r) => setTimeout(r, 50));
+                    await capture.end(state, error);
+                  },
+                };
+              },
+            });
+            expect(result.stopReason).toBe("end");
+          }
+        } else {
+          const captured = await recordedFetch(
+            "http://fixture",
+            { method: "POST", body: "{}" },
+            record,
+          );
+          const reader = captured.response.body?.getReader();
+          expect((await reader?.read())?.value).toEqual(new TextEncoder().encode(text));
+          if (mode === "network") await expect(reader?.read()).rejects.toThrow("connection lost");
+          else await reader?.cancel();
+          await captured.saved;
+        }
+        const saved = readRequestRecording(file, EventLog.load(file).events, 0);
+        expect(saved?.attempts).toEqual([
+          {
+            n: 1,
+            status: 200,
+            state: mode === "saving" ? "complete" : "interrupted",
+            response: text,
+          },
+        ]);
+        expect(saved?.error).toBeUndefined();
+        if (mode === "cancel" || mode === "malformed") expect(canceled).toBe(true);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

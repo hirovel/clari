@@ -206,7 +206,11 @@ export function createFetchTool(opts: FetchToolOptions = {}) {
       },
     });
 
-  const download = async (start: URL, ctxSignal: AbortSignal | undefined): Promise<Fetched> => {
+  const download = async (
+    start: URL,
+    ctxSignal: AbortSignal | undefined,
+    onChunk?: (data: Uint8Array) => void,
+  ): Promise<Fetched> => {
     const notes: string[] = [];
     let current = start;
     let response: Response | undefined;
@@ -272,6 +276,7 @@ export function createFetchTool(opts: FetchToolOptions = {}) {
         const { value, done } = await reader.read();
         if (done) break;
         if (value) {
+          onChunk?.(value);
           chunks.push(value);
           total += value.byteLength;
           if (total > cfg.maxBytes) {
@@ -334,9 +339,10 @@ export function createFetchTool(opts: FetchToolOptions = {}) {
       let cached = true;
       if (!fetched) {
         cached = false;
-        fetched = await download(rewritten.url, ctx.signal);
+        fetched = await download(rewritten.url, ctx.signal, ctx.output?.write);
         if (fetched.status < 400 && !fetched.cut) cachePut(key, fetched);
       }
+      if (cached || fetched.notes.includes("cross-host redirect")) ctx.output?.write(fetched.text);
       if (fetched.notes.includes("cross-host redirect")) return fetched.text;
 
       let body: string;

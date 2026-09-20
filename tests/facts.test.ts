@@ -2,8 +2,8 @@
 // 两者都只追加,前缀不动。还量了三种注入方式的重算代价,证明"贴在事件上"是缓存代价最低的一种。
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
+import { buildTools } from "../cli/bootstrap.js";
 import { unchangedPrefix } from "../cli/cards.js";
-import { createBashTool } from "../cli/tools/bash.js";
 import { messageTokens } from "../src/context.js";
 import type { AgentEvent, ToolCall } from "../src/events.js";
 import { annotateResult, dateNote, priorFailures, slowNote } from "../src/facts.js";
@@ -180,7 +180,13 @@ describe("事实附注", () => {
   });
 
   it("bash 的工作目录跨调用保持:cd 之后下一次从那里起,结果末尾说目录变了", async () => {
-    const tool = createBashTool();
+    const make = () => {
+      const tool = buildTools().find((t) => t.name === "bash");
+      if (!tool) throw new Error("missing bash tool");
+      return tool;
+    };
+    const tool = make();
+    const sibling = make();
     const signal = new AbortController().signal;
     const first = await tool.execute({ command: "cd .. && echo moved" }, { signal });
     expect(first).toMatch(/^moved\n\[cwd is now .+\]$/);
@@ -191,6 +197,12 @@ describe("事实附注", () => {
     );
     const same = await tool.execute({ command: "echo still" }, { signal });
     expect(same).toBe("still");
+    for (const independent of [sibling, make()]) {
+      const pwd = await independent.execute({ command: "pwd -W 2>/dev/null || pwd" }, { signal });
+      expect(pwd.replace(/\\/g, "/").toLowerCase()).toBe(
+        process.cwd().replace(/\\/g, "/").toLowerCase(),
+      );
+    }
   });
 });
 
@@ -237,13 +249,16 @@ describe("计划复述", () => {
     expect(state?.every((i) => i.status === "done")).toBe(true);
     expect(stepsSincePlan(log.events)).toBe(5);
     expect(planText(state ?? [])).toContain("[x] 3. test");
-    // planReminder 0 从不复述
+    // 缺省关闭:超过旧的八步阈值也不插入提醒。
     const log2 = newLog();
     await runTurn({
       log: log2,
-      provider: scripted(turns),
+      provider: scripted([
+        plan("p1", [{ text: "keep working", status: "in_progress" }]),
+        ...Array.from({ length: 12 }, (_, i) => echo(`default${i}`)),
+        { text: "done", toolCalls: [], stopReason: "end" },
+      ]),
       tools: [planTool, echoTool],
-      planReminder: 0,
     });
     expect(log2.events.some((e) => e.type === "decision" && e.slot === "plan")).toBe(false);
   });

@@ -18,6 +18,7 @@ import {
   type WireOptions,
 } from "../provider.js";
 import { ProviderError, parseRetryAfter } from "./errors.js";
+import { recordedFetch } from "./http.js";
 import { type RetryOptions, withRetry } from "./retry.js";
 import { sseEvents } from "./sse.js";
 
@@ -276,7 +277,20 @@ export function toResponsesInput(
         instructions = instructions ? `${instructions}\n\n${m.content}` : m.content;
         break;
       case "user":
-        input.push({ type: "message", role: "user", content: m.content || "(空)" });
+        input.push({
+          type: "message",
+          role: "user",
+          content: m.images?.length
+            ? [
+                ...(m.content ? [{ type: "input_text", text: m.content }] : []),
+                ...m.images.map((image) => ({
+                  type: "input_image",
+                  image_url: `data:${image.mimeType};base64,${image.data}`,
+                  detail: "auto",
+                })),
+              ]
+            : m.content || "(空)",
+        });
         break;
       case "assistant": {
         if (
@@ -398,19 +412,31 @@ export function openaiResponses(opts: OpenAIResponsesOptions): Provider {
     wire,
     wireMap: (messages) => toResponsesInput(messages, { model: opts.model }).map,
     listModels: () => fetchModelIds(`${baseUrl}/models`, headers),
-    async complete(messages, tools, { onDelta, onReasoning, signal, onRetry, onRaw, effort } = {}) {
-      const body = wire(messages, tools, effort ? { effort } : {});
+    async complete(
+      messages,
+      tools,
+      { onDelta, onReasoning, signal, onRetry, onRaw, onRequest, record, effort } = {},
+    ) {
+      const body = JSON.stringify(wire(messages, tools, effort ? { effort } : {}));
       return withRetry(
         async () => {
           const acc = newResponsesAcc();
           const ac = linkedAbort(signal);
+          let saved: Promise<void> | undefined;
           try {
-            const res = await fetch(`${baseUrl}/responses`, {
-              method: "POST",
-              headers,
-              body: JSON.stringify(body),
-              signal: ac.signal,
-            });
+            onRequest?.(body);
+            const captured = await recordedFetch(
+              `${baseUrl}/responses`,
+              {
+                method: "POST",
+                headers,
+                body,
+                signal: ac.signal,
+              },
+              record,
+            );
+            const res = captured.response;
+            saved = captured.saved;
             if (!res.ok || !res.body) {
               const text = await res.text();
               const retryAfterMs = parseRetryAfter(res.headers);
@@ -450,6 +476,8 @@ export function openaiResponses(opts: OpenAIResponsesOptions): Provider {
           } catch (err) {
             if (signal?.aborted) return finishResponsesAcc(acc, true, opts.model);
             throw stallToError(err, acc.items.size > 0);
+          } finally {
+            await saved;
           }
         },
         mergeRetry(opts.retry, { ...(signal && { signal }), ...(onRetry && { onRetry }) }),

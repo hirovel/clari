@@ -101,8 +101,9 @@ export type PromptConfig = {
  * 指令文件在这里当"预设指令器":不同预设指向不同的 system-prompt / append 文件与段组合。
  */
 export type Preset = {
-  model?: string;
-  effort?: string;
+  /** null 显式使用内置选择,不继承较低层 defaults;省略则继承。 */
+  model?: string | null;
+  effort?: string | null;
   compaction?: string;
   /** all = 不问;ask = 每个调用都问;policy(缺省)= 按 approval 规则。 */
   approve?: "all" | "ask" | "policy";
@@ -113,13 +114,11 @@ export type Preset = {
   /** 插话槽:step(缺省,下一步就注入)| turn(等模型停止调用工具)。 */
   steering?: "step" | "turn";
   /** 保留策略:"tokens 20000" 或 "ratio 0.3";缺省 keepRecentTokens(min(20000, window/4))。 */
-  preservation?: string;
+  preservation?: string | null;
   /** 压缩触发:threshold(缺省,到阈值自动压)| manual(只在 /compact)| remind(到阈值只提示)。 */
   compactionTrigger?: CompactionTrigger;
   /** 自动压缩阈值 = 窗口 − 这个余量;缺省 32000。 */
   compactionReserve?: number;
-  /** 是否记录原始流到 <session>.trace.jsonl;缺省 true。 */
-  trace?: boolean;
   /** 工具结果初始折叠;缺省 true,Ctrl+O 切换。 */
   fold?: boolean;
   /** 折叠时保留的结果行数;缺省 5。 */
@@ -132,7 +131,7 @@ export type Preset = {
   plan?: boolean;
   /** 工具集:disable 列出的内置工具不装(/tools 在会话里还能开关)。 */
   tools?: { disable?: string[] };
-  /** 计划复述:连续这么多步没碰 plan 且还有未完成项就把计划贴到末尾;0 = 从不。缺省 8。 */
+  /** 计划复述:连续这么多步没碰 plan 且还有未完成项就把计划贴到末尾;0 = 关闭计步复述。缺省 0。 */
   planReminder?: number;
   /** 账簿:保持展开的最新步数,更早的折成一行;缺省 3,0 = 从不自动折。 */
   foldSteps?: number;
@@ -142,10 +141,13 @@ export type Preset = {
   notify?: "unfocused" | "always" | "off";
   /** 扩展模块路径列表。 */
   extensions?: string[];
+  /** 切换会话时重新连接的 MCP 服务器名;其它正常连接默认复用。 */
+  mcpReconnect?: string[];
+  saveInputs?: boolean;
   systemPromptFile?: string;
   appendSystemPromptFile?: string;
   subagent?: boolean;
-  maxSteps?: number;
+  maxSteps?: number | null;
   prompt?: PromptConfig;
   /** 工具描述风格。 */
   toolPrompts?: ToolPromptStyle;
@@ -401,6 +403,12 @@ function validate(raw: unknown, path: string): KernelConfig {
   const c = raw as Partial<KernelConfig>;
   if (!c || typeof c !== "object" || typeof c.default !== "string" || !c.providers) {
     throw new Error(`config is missing default or providers: ${path}`);
+  }
+  for (const values of [c.defaults, ...Object.values(c.presets ?? {})]) {
+    if (values && "trace" in values)
+      throw new Error(
+        "Remove obsolete trace from defaults/presets; session recording is now always enabled",
+      );
   }
   for (const [name, p] of Object.entries(c.providers)) {
     if (

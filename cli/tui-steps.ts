@@ -2,7 +2,7 @@
 // PgUp / PgDn 在步之间移动光标并把那一步滚到视野顶,Enter 展开或折起,Esc 放开光标。
 // 折叠只换屏幕上的节点,原节点留在内存里,展开就是放回去;日志一个字不动。
 // 费用不在这一行:它是算出来的,放在状态行的累计与检视器里。
-import { Container } from "@earendil-works/pi-tui";
+import { Container, stripTerminalSequences } from "@earendil-works/pi-tui";
 import type { AgentEvent } from "../src/events.js";
 import { firstLine } from "./cards.js";
 import { fmtTok } from "./inspector.js";
@@ -53,7 +53,7 @@ export function stepSummary(ctx: TuiContext, step: StepView): string {
       calls += e.toolCalls.length;
       const tc = e.toolCalls[0];
       if (tc && !firstCall)
-        firstCall = `${G.call} ${tc.name} ${firstLine(formatArgs(tc.args), 40)}`;
+        firstCall = `${G.call} ${tc.name} ${firstLine(stripTerminalSequences(formatArgs(tc.args)), 40)}`;
       if (e.usage) {
         input += e.usage.inputTokens;
         output += e.usage.outputTokens;

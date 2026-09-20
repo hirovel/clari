@@ -14,23 +14,35 @@ const TUI = resolve("cli/tui.ts");
 function run(
   entry: string,
   args: string[],
-  opts: { cwd: string; env: Record<string, string> },
+  opts: {
+    cwd: string;
+    env: Record<string, string>;
+    input?: (output: { stdout: string; stderr: string }, send: (text: string) => void) => void;
+  },
 ): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolveRun) => {
     const child = spawn(process.execPath, [TSX, entry, ...args], {
       cwd: opts.cwd,
       env: { ...process.env, NO_COLOR: "1", ...opts.env },
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [opts.input ? "pipe" : "ignore", "pipe", "pipe"],
     });
+    const timeout = opts.input ? setTimeout(() => child.kill(), 15000) : undefined;
+    child.stdin?.on("error", () => {});
     let stdout = "";
     let stderr = "";
-    child.stdout.on("data", (d) => {
+    const interact = () => opts.input?.({ stdout, stderr }, (text) => child.stdin?.write(text));
+    child.stdout?.on("data", (d) => {
       stdout += d;
+      interact();
     });
-    child.stderr.on("data", (d) => {
+    child.stderr?.on("data", (d) => {
       stderr += d;
+      interact();
     });
-    child.on("close", (code) => resolveRun({ code, stdout, stderr }));
+    child.on("close", (code) => {
+      clearTimeout(timeout);
+      resolveRun({ code, stdout, stderr });
+    });
   });
 }
 
@@ -74,6 +86,86 @@ afterEach(() => {
 });
 
 describe("真实入口(子进程)", () => {
+  it("致命异常的真实入口:正常收尾与手动强退均退出 70,渲染再次失败仍尝试保存并恢复终端", async () => {
+    tmp = mkdtempSync(join(tmpdir(), "clari-fatal-"));
+    for (const mode of ["graceful", "force", "render-error"] as const) {
+      const extension = join(tmp, `${mode}.mjs`);
+      writeFileSync(
+        extension,
+        `
+        import { mkdirSync } from "node:fs";
+        export default ({ log }) => {
+          process.stdin.once("data", () => setImmediate(() => {
+            ${
+              mode === "render-error"
+                ? `
+              mkdirSync(log.path.replace(/\\.jsonl$/, ".inputs.json"));
+              const write = process.stdout.write;
+              process.stdout.write = function(chunk, ...args) {
+                if (String(chunk).includes("Fatal error")) {
+                  process.stdout.write = write;
+                  throw new Error("Fixture rendering failed");
+                }
+                return write.call(this, chunk, ...args);
+              };
+            `
+                : ""
+            }
+            void Promise.reject(new Error("Fixture fatal error"));
+          }));
+          return { dispose() { ${mode === "force" ? "return new Promise(() => {});" : ""} } };
+        };
+        `,
+      );
+      const cfg = join(tmp, `${mode}.json`);
+      const sessionsDir = join(tmp, mode);
+      writeFileSync(
+        cfg,
+        JSON.stringify({
+          default: "m",
+          providers: {
+            fake: { protocol: "openai", baseUrl: "http://unused", apiKey: "k", models: ["m"] },
+          },
+          sessionsDir,
+          defaults: { extensions: [extension], prompt: { sections: [] } },
+        }),
+      );
+      let typed = false;
+      let forced = false;
+      const result = await run(TUI, [], {
+        cwd: tmp,
+        env: { CLARI_CONFIG: cfg, CLARI_CREDENTIALS: join(tmp, "no-credentials.json") },
+        input: ({ stdout }, send) => {
+          if (!typed && stdout.includes("clari")) {
+            typed = true;
+            send("Keep this unsent draft.");
+          }
+          if (mode === "force" && !forced && stdout.includes("releasing resources")) {
+            forced = true;
+            send("f");
+          }
+        },
+      });
+      expect(result.code, result.stderr).toBe(70);
+      expect(result.stderr).toContain("Fixture fatal error");
+      expect(result.stderr).not.toContain("session saved");
+      const session = readdirSync(sessionsDir).find((file) => file.endsWith(".jsonl"));
+      expect(session).toBeDefined();
+      const snapshot = join(sessionsDir, session as string).replace(/\.jsonl$/, ".inputs.json");
+      if (mode === "render-error") {
+        expect(result.stderr).toContain("Fixture rendering failed");
+        expect(result.stderr).toContain("Input saving failed");
+        expect(result.stderr).toContain("External work may continue");
+        expect(result.stdout).toContain("\x1b[?1049l");
+        expect(result.stdout).toContain("\x1b[?25h");
+      } else {
+        expect(JSON.parse(readFileSync(snapshot, "utf8")).draft.text).toBe(
+          "Keep this unsent draft.",
+        );
+        expect(forced).toBe(mode === "force");
+      }
+    }
+  }, 60000);
   it("--help 打印用法并以 0 退出;两个入口都认", async () => {
     tmp = mkdtempSync(join(tmpdir(), "ak-cli-"));
     const cfg = join(tmp, "config.json");

@@ -61,9 +61,10 @@ export function createBashTool(
         timeoutMs: timeoutS > 0 ? timeoutS * 1000 : 0,
         maxBytes,
         cwd,
+        onData: (data: Buffer) => ctx.output?.write(data),
       });
       const { output, pwd } = splitCwdMarker(r.output);
-      let shown = applyTruncation(output, truncate);
+      let shown = applyTruncation(output, truncate, ctx.output?.path);
       if (pwd && !samePath(pwd, cwd)) {
         cwd = pwd;
         shown = shown ? `${shown}\n[cwd is now ${cwd}]` : `[cwd is now ${cwd}]`;
@@ -84,9 +85,6 @@ export function createBashTool(
     },
   });
 }
-
-/** 默认实例:保尾截断 —— 命令输出的错误与结论通常在末尾。 */
-export const bashTool = createBashTool();
 
 /** 目录标记:命令跑完后打印 $PWD(Git Bash 下取 Windows 形态的路径),退出码照旧。命令自己 exit 就没有标记,目录视为没变。 */
 const CWD_MARK = "";
@@ -110,12 +108,16 @@ function splitCwdMarker(output: string): { output: string; pwd?: string } {
   return pwd ? { output: body, pwd } : { output: body };
 }
 
-function applyTruncation(output: string, truncate: TruncationPolicy): string {
+function applyTruncation(
+  output: string,
+  truncate: TruncationPolicy,
+  recordedPath?: string,
+): string {
   const t = truncate(output);
   if (!t.truncated) return t.text.trimEnd();
   // 全量落盘是透明度要求,与策略无关:被截掉的部分永远找得回来。
-  const fullPath = join(mkdtempSync(join(tmpdir(), "kernel-bash-")), "output.txt");
-  writeFileSync(fullPath, output, "utf8");
+  const fullPath = recordedPath ?? join(mkdtempSync(join(tmpdir(), "kernel-bash-")), "output.txt");
+  if (!recordedPath) writeFileSync(fullPath, output, "utf8");
   return `${t.text.trimEnd()}\n[${t.note ?? "output truncated"}. Full output: ${fullPath}]`;
 }
 
@@ -141,7 +143,7 @@ function run(
   shell: string,
   command: string,
   signal: AbortSignal,
-  limits: { timeoutMs: number; maxBytes: number; cwd: string },
+  limits: { timeoutMs: number; maxBytes: number; cwd: string; onData?: (data: Buffer) => void },
 ): Promise<RunResult> {
   return new Promise((resolvePromise, rejectPromise) => {
     // POSIX 下 detached 开进程组,打断时整组杀掉;Windows 用 taskkill /T 杀进程树。
@@ -172,6 +174,7 @@ function run(
     };
     const onData = (d: Buffer) => {
       if (overflowed) return;
+      limits.onData?.(d);
       chunks.push(d);
       bytes += d.length;
       if (bytes > limits.maxBytes) {

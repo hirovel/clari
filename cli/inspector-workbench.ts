@@ -229,6 +229,14 @@ function describe(
         };
       if (m.role === "tool") {
         const src = events[r.row.event];
+        if (r.row.stages.includes("unknown-result"))
+          return {
+            sign: G.ask,
+            role: "unknown",
+            text: `${m.name} · no recorded result`,
+            faint: false,
+            gold: true,
+          };
         if (r.row.stages.includes("cleared")) {
           const was = src?.type === "tool/result" ? eventTokens(src) : 0;
           return {

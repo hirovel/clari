@@ -5,7 +5,6 @@ import type {
   Component,
   Container,
   Editor,
-  Loader,
   OverlayHandle,
   ScrollView,
   Text,
@@ -13,8 +12,10 @@ import type {
 } from "@earendil-works/pi-tui";
 import type { Agent } from "../src/agent.js";
 import type { ApprovalConfig } from "../src/approval.js";
-import type { ResultView, ToolPromptsConfig } from "../src/config.js";
+import type { Preset, ResultView, ToolPromptsConfig } from "../src/config.js";
 import type { Price, UsageAccumulator } from "../src/cost.js";
+import type { AgentEvent } from "../src/events.js";
+import type { ImageInput } from "../src/images.js";
 import type { EventLog } from "../src/log.js";
 import type { CompactionConfig } from "../src/loop.js";
 import type { Message } from "../src/messages.js";
@@ -25,9 +26,10 @@ import type { Skill } from "./prompt.js";
 import type { PromptTemplate } from "./templates.js";
 import { c } from "./theme.js";
 import type { TuiAppDeps } from "./tui-app.js";
-import type { Block, SplitLine } from "./tui-block.js";
+import type { Block } from "./tui-block.js";
 import type { ChildView, ReplyMarkdown } from "./tui-render.js";
 import type { ApprovalPrompt } from "./tui-slots.js";
+import type { RuntimeStatus } from "./tui-status.js";
 
 /** 折叠时保留的工具结果行数的缺省;配置 foldLines 可改。 */
 export const FOLD_HEAD = 5;
@@ -37,13 +39,14 @@ export const PULSE_STEPS = 10;
 export const CHILD_TAIL = 3;
 /** 引导线:子 agent 的每一行都带它,一眼分清层级;不是框线。 */
 export const GUIDE = `  ${c.faint("┆")} `;
-/** 内存里保留的原始流行数上限;超过就整桶淘汰最旧请求的 raw(磁盘旁路文件不受影响)。 */
-export const RAW_LINE_CAP = 100_000;
 
 /** 子 agent 视图的三态:尾窗(缺省)→ 全部 → 仅进度。 */
 export type ChildMode = "tail" | "all" | "progress";
 
-export type ResultRecord = { name: string; content: string; isError: boolean; durationMs?: number };
+export type ResultRecord = Pick<
+  Extract<AgentEvent, { type: "tool/result" }>,
+  "name" | "content" | "isError" | "durationMs" | "outcome"
+>;
 
 /** 账簿里的一步:一次请求的所有屏幕节点装在一个容器里,折起时换成一行账目。 */
 export type StepView = {
@@ -92,7 +95,6 @@ export type ViewState = {
   turnStartedAt: number | undefined;
   reasoningView: Block | undefined;
   reasoningBuffer: string;
-  loader: Loader | undefined;
   /** 工作行的用时刷新计时器。 */
   loaderTimer: ReturnType<typeof setInterval> | undefined;
   resultNodes: ({ node: Block } & ResultRecord)[];
@@ -100,7 +102,7 @@ export type ViewState = {
   lastUsage: { inputTokens: number; outputTokens: number } | undefined;
 };
 
-/** 请求层记录:发出每个请求时用的 provider、原始流、预计缓存。都不进日志。 */
+/** 请求层记录:发出每个请求时用的 provider、预计缓存。都不进日志。 */
 export type RequestState = {
   count: number;
   lastIndex: number;
@@ -110,8 +112,6 @@ export type RequestState = {
   lastTurnIndex: number;
   lastCompactionIndex: number;
   providersAt: Map<number, Provider>;
-  rawAt: Map<number, string[]>;
-  rawLines: number;
   /** 每次请求发出前算的缓存命中上限;响应回来与实测对照。 */
   predictedAt: Map<number, number>;
   /** 上一次正常步发出的消息:变化说明的比较基线。 */
@@ -140,16 +140,20 @@ export type SlotState = {
 };
 
 /** 换会话的目标:新建、从这里分叉、恢复另一个文件。由入口实现(停掉当前界面,换日志再起)。 */
-export type SessionTarget = { kind: "new" } | { kind: "resume"; file: string };
+export type SessionTarget = ({ kind: "new" } | { kind: "resume"; file: string }) & {
+  source?: "current" | "defaults" | "history";
+};
 
 export type TuiContext = {
   deps: TuiAppDeps;
+  /** 不可变的启动快照;待重启的设置从这里读,不拿新保存的值冒充正在生效。 */
+  setupInitial: Preset;
   log: EventLog;
   tools: Tool[];
   compaction: CompactionConfig;
   agent: Agent;
   tui: TUI;
-  header: Text;
+  header: Block;
   /** 对话流的根容器:步容器与用户消息都挂在它上面。 */
   root: Container;
   /** 新节点现在该进哪个容器:当前步的容器,或(用户消息、回合之外)根。 */
@@ -158,8 +162,10 @@ export type TuiContext = {
   scroll: ScrollView | undefined;
   steps: StepView[];
   live: Container;
-  status: SplitLine;
+  status: RuntimeStatus;
   editor: Editor;
+  draftImages: ImageInput[];
+  inputReading: boolean;
   templates: PromptTemplate[];
   skills: Skill[];
   model: { info: TuiInfo; effortLevels: EffortLevel[] | undefined; contextWindow: number };
@@ -195,6 +201,7 @@ export type TuiContext = {
   notify(text: string): void;
   updateHeader(): void;
   updateStatus(): void;
+  persistSetup(): void;
   showLoader(message: string): void;
   hideLoader(): void;
   /** 自动压缩阈值(token)。 */
@@ -203,7 +210,6 @@ export type TuiContext = {
   /** 随请求发出的工具定义。 */
   defs(): ToolDef[];
   renderReasoning(s: string, kind?: "full" | "summary"): string;
-  onRaw(line: string): void;
   exit(): void;
   stop(): void;
 };

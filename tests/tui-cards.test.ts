@@ -135,9 +135,8 @@ describe("屏幕:完整 turn、卡片、折叠、diff、错误、打断", () => 
     expect(doc).toContain("echo:hi");
     expect(doc).toContain("完成");
     expect(doc.match(/内容是 hi/g)?.length).toBe(1); // 流式组件被定稿替换,不重复
-    expect(doc).toContain("○ idle");
-    expect(doc).toContain("1200→40 tok");
-    expect(doc).toContain("98% until auto-compaction");
+    expect(doc).toContain("Context ~1.2k/100k");
+    expect(doc).toContain("auto-compact ~");
 
     // 整条渲染管线:经差分渲染写入模拟终端后,屏幕上确实有内容
     app.tui.renderNow(true);
@@ -260,7 +259,7 @@ describe("屏幕:完整 turn、卡片、折叠、diff、错误、打断", () => 
     app.stop();
   });
 
-  it("请求失败不崩:错误以朱标行呈现,状态回到空闲", async () => {
+  it("请求失败保留错误和恢复入口,执行结束后仍可继续输入", async () => {
     const provider: Provider = {
       model: "fake-model",
       async complete() {
@@ -272,7 +271,9 @@ describe("屏幕:完整 turn、卡片、折叠、diff、错误、打断", () => 
     const doc = text(app);
     expect(doc).toContain("✗ request #1 failed");
     expect(doc).toContain("网络断了");
-    expect(doc).toContain("○ idle");
+    expect(doc).toContain("Request failed");
+    expect(doc).toContain("/edit retry");
+    expect(app.agent.running).toBe(false);
     app.stop();
   });
 
@@ -289,18 +290,24 @@ describe("屏幕:完整 turn、卡片、折叠、diff、错误、打断", () => 
     const { app, term } = boot(provider);
     const running = app.submit("长任务");
     await new Promise((r) => setImmediate(r));
-    expect(text(app)).toContain("● running");
+    expect(text(app)).toContain("Waiting for model");
+    term.feed("\x1b[5~");
+    expect(text(app)).toContain("Esc return live");
+    term.feed("\x1b");
+    expect(app.agent.running).toBe(true);
+    expect(text(app)).not.toContain("step 1/1");
     term.feed("\x1b");
     await running;
     const doc = text(app);
     expect(doc).toContain("— interrupted —");
-    expect(doc).toContain("○ idle");
+    expect(doc).toContain("Interrupted");
+    expect(app.agent.running).toBe(false);
     app.stop();
   });
 });
 
 describe("少见事件与流式思考的渲染", () => {
-  it("恢复的日志里 session/recovered 与 ext/event(mcp 与未登记来源)各画一行", () => {
+  it("恢复日志与新事件正常呈现,停止界面后不再消费日志", () => {
     const log = new EventLog();
     log.append({ type: "session/start", at: "", model: "m", system: "s" });
     log.append({ type: "session/recovered", at: "", droppedBytes: 12, preview: "{" });
@@ -329,14 +336,31 @@ describe("少见事件与流式思考的渲染", () => {
     });
     log.append({ type: "ext/event", at: "", source: "other", kind: "thing", payload: {} });
     log.append({ type: "session/slot", at: "", slot: "execution", value: "parallel" });
-    const { app } = bootB(scriptedB([]), {}, log);
+    const fresh = new EventLog();
+    for (const e of log.events.filter((e) => e.type === "session/start" || e.type === "ext/event"))
+      fresh.append(e);
+    const starting = bootB(scriptedB([]), {}, fresh);
+    expect(doc(starting.app)).not.toContain("resumed:");
+    starting.app.stop();
+    const { app } = bootB(
+      scriptedB([]),
+      {
+        info: { model: "m", providerName: "p", sessionFile: "s", resumed: true },
+      },
+      log,
+    );
     const d = doc(app);
     expect(d).toContain("recovered: dropped 12 bytes");
     expect(d).toContain("mcp s1: ready · stdio · modern 2026-07-28 · 2 tools of 3 listed · 7ms");
     expect(d).toContain("· other/thing");
     expect(d).not.toContain("rpc");
     expect(d).toContain("resumed: 6 events");
+    log.append({ type: "user/message", at: "", text: "live before stop" });
+    expect(doc(app)).toContain("live before stop");
     app.stop();
+    const stopped = doc(app);
+    log.append({ type: "user/message", at: "", text: "late after stop" });
+    expect(doc(app)).toBe(stopped);
   });
 
   it("流式思考:定稿带思考时保留节点并可 Ctrl+T 展开;定稿无思考时撤掉节点;task 调用留槽", async () => {
@@ -462,7 +486,7 @@ describe("变化说明与缓存说明", () => {
     expect(expanded).toContain("line two");
     const first = plain(firstRunLines().join("\n"));
     expect(first).toContain("Ask anything");
-    expect(first).toContain("? shortcuts");
+    expect(first).toContain("/help");
   });
 });
 

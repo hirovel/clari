@@ -55,7 +55,7 @@ export function createReadTool(opts: { truncate?: TruncationPolicy; maxLineChars
       limit: Type.Optional(Type.Number({ description: "maximum number of lines to return" })),
     }),
     concurrency: "parallel",
-    async execute(args) {
+    async execute(args, ctx) {
       const path = resolve(args.path);
       const st = statSync(path);
       if (st.isDirectory()) return listDirectory(path);
@@ -69,10 +69,11 @@ export function createReadTool(opts: { truncate?: TruncationPolicy; maxLineChars
           `${args.path} is a binary file (${st.size} bytes); read only handles text.`,
         );
       }
-      const lines = capLine(readFileSync(path, "utf8")).split("\n");
+      const lines = readFileSync(path, "utf8").split("\n");
       const start = Math.max(1, args.offset ?? 1);
       const slice = lines.slice(start - 1, args.limit ? start - 1 + args.limit : undefined);
-      const numbered = slice.map((l, i) => `${start + i}\t${l}`).join("\n");
+      ctx.output?.write(slice.join("\n"));
+      const numbered = slice.map((l, i) => `${start + i}\t${capLine(l)}`).join("\n");
       const t = truncate(numbered);
       if (!t.truncated) return t.text;
       const shown = t.text.split("\n").length;

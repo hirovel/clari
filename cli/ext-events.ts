@@ -7,7 +7,12 @@ export type ExtLine = { tone: "jin" | "zhu" | "faint"; text: string };
 
 type Renderer = (e: Extract<AgentEvent, { type: "ext/event" }>) => ExtLine | undefined;
 
-const renderers: Record<string, Renderer> = { mcp: renderMcpEvent };
+const renderers: Record<string, Renderer> = {
+  recording: () => undefined,
+  mcp: renderMcpEvent,
+  setup: (event) =>
+    event.kind === "snapshot" ? undefined : { tone: "faint", text: `· setup/${event.kind}` },
+};
 
 /** 值得给人看的一行;undefined = 这条只进日志,不上屏(如每次 RPC 往返)。 */
 export function renderExtEvent(e: AgentEvent): ExtLine | undefined {

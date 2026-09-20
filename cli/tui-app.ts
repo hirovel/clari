@@ -10,12 +10,12 @@
 // 本文件只做:建组件树、建 Agent、建 ctx、接检视器与按键、回放历史、返回 TuiApp 接口。
 import {
   CombinedAutocompleteProvider,
+  type Component,
   Container,
   Editor,
   getKeybindings,
   isViewportTUI,
   Key,
-  Loader,
   matchesKey,
   ScrollView,
   Spacer,
@@ -24,26 +24,40 @@ import {
   type TUI,
   TuiAltScreen,
   TuiMainScreen,
+  truncateToWidth,
   VStack,
 } from "@earendil-works/pi-tui";
 import { Agent, type DeliverAs } from "../src/agent.js";
 import type { ApprovalConfig } from "../src/approval.js";
-import { contextTokens } from "../src/compaction.js";
-import type { ModelConfig, ResultView, ToolPromptsConfig } from "../src/config.js";
-import { fmtCostApprox, type Price, UsageAccumulator } from "../src/cost.js";
+import type { ModelConfig, Preset, ResultView, ToolPromptsConfig } from "../src/config.js";
+import { type Price, UsageAccumulator } from "../src/cost.js";
 import { type AgentEvent, now } from "../src/events.js";
+import { imageBytes } from "../src/images.js";
 import type { EventLog } from "../src/log.js";
 import { type CompactionConfig, compactionThreshold, type TurnDeps } from "../src/loop.js";
 import type { EffortLevel, Provider, ToolDef } from "../src/provider.js";
 import type { SettingLayers } from "../src/settings.js";
+import { mergeSetup } from "../src/setup.js";
 import type { ChildInfo } from "../src/subagent.js";
 import type { Tool } from "../src/tools.js";
-import { DEFAULT_RESULT_VIEWS, firstRunLines, shortcutLines, thinkingLines } from "./cards.js";
+import { DEFAULT_RESULT_VIEWS, firstRunLines, thinkingLines } from "./cards.js";
+import { type ClipboardInput, imageFromPath, readClipboardInput } from "./clipboard-input.js";
 import { editInExternalEditor } from "./editor.js";
-import { fmtTok, RequestInspector, type SessionSource } from "./inspector.js";
+import { RequestInspector, type SessionSource } from "./inspector.js";
 import type { McpServerStatus } from "./mcp/bridge.js";
 import type { Skill } from "./prompt.js";
 import type { CapabilitySource, Inferred } from "./registry.js";
+import type { SessionInputs } from "./session-inputs.js";
+import type { RecordingSection, RequestRecording } from "./session-records.js";
+import { recordingReader } from "./session-records.js";
+import { captureSessionSetup, type SessionSetup } from "./session-setup.js";
+import {
+  type ExitState,
+  exitReview,
+  SessionSetupReview,
+  sessionChoice,
+  textReview,
+} from "./session-view.js";
 import type { PromptTemplate } from "./templates.js";
 import {
   FOCUS_OFF,
@@ -54,11 +68,11 @@ import {
 } from "./terminal-extras.js";
 import { c, editorTheme, G } from "./theme.js";
 import type { MemoryFiles } from "./tools/memory.js";
-import { Block, SplitLine } from "./tui-block.js";
+import { Block } from "./tui-block.js";
 import { applyTools, COMMANDS, command, openLogin, openPalette, submit } from "./tui-commands.js";
-import { FOLD_HEAD, RAW_LINE_CAP, type SessionTarget, type TuiContext } from "./tui-context.js";
+import { FOLD_HEAD, type SessionTarget, type TuiContext } from "./tui-context.js";
 import { contextAction, flipSection } from "./tui-edit.js";
-import { brief, pct } from "./tui-format.js";
+import { brief } from "./tui-format.js";
 import type { ProviderSummary } from "./tui-login.js";
 import {
   attachChild,
@@ -70,6 +84,7 @@ import {
   toggleReasoning,
 } from "./tui-render.js";
 import { approveImpl, initialApproval, initialSlotState } from "./tui-slots.js";
+import { InputHints, RuntimeStatus } from "./tui-status.js";
 import { clearStepSelection, FOLD_STEPS, selectStep, toggleSelectedStep } from "./tui-steps.js";
 
 export { toolCallDetail } from "./tui-format.js";
@@ -93,6 +108,8 @@ export type ModelChoice = {
 export type TuiSettings = {
   /** "供应商/模型" 列表,供 /model 与补全使用。 */
   listModels(): string[];
+  /** 顶层配置的默认模型;defaults.model 是可移除的覆盖。 */
+  defaultModel?(): string;
   /** 某模型的价格;没配置返回 undefined。会话里换过模型时按各自价格累计。 */
   priceFor?(model: string): Price | undefined;
   /** 按名切换模型(可能需要读 key),返回新 provider。 */
@@ -115,6 +132,11 @@ export type TuiSettings = {
   settingLayers?(): SettingLayers;
   /** 写一个开关进配置 defaults 并落盘;undefined 删掉那一项。 */
   saveSetting?(key: string, value: unknown): void;
+  /** 只包含方案,不暴露供应商连接或凭据。 */
+  listPresets?(): { name: string; values: Preset }[];
+  savePreset?(name: string, values: Preset): void;
+  /** 把方案写为后续启动的 defaults,不伪装成当前会话已切换。 */
+  usePreset?(name: string): void;
 };
 
 export type TuiAppDeps = {
@@ -128,11 +150,14 @@ export type TuiAppDeps = {
     model: string;
     providerName: string;
     sessionFile: string;
+    resumed?: boolean;
     /** 窗口与出处,头部显示;假设值标红。 */
     contextWindow?: number;
     capabilitySource?: CapabilitySource;
   };
   settings?: TuiSettings;
+  /** 启动时已解析的设置快照;用于区分当前值与后来保存的默认值。 */
+  startupSettings?: Preset;
   /** 日志为空时用它落 session/start;入口已经落过(bootstrap.beginSession)就不需要。 */
   systemPrompt?: string;
   onExit?: () => void;
@@ -152,10 +177,12 @@ export type TuiAppDeps = {
   screen?: "alt" | "main";
   /** 桌面通知:unfocused(缺省)| always | off。 */
   notify?: "unfocused" | "always" | "off";
-  /** 记录每次请求收到的原始流,供检视器"接收"分区逐行展示。 */
-  trace?: boolean;
-  /** 原始流旁路输出(如写 trace 文件)。requestIndex 是 request 事件在日志中的下标。 */
-  onRaw?: (requestIndex: number, line: string) => void;
+  recordingFor?: (
+    log: EventLog,
+    requestIndex: number,
+    section?: RecordingSection,
+  ) => RequestRecording | undefined;
+  readClipboard?: () => Promise<ClipboardInput>;
   /** 初始强度级别;缺省不传。 */
   effort?: EffortLevel;
   effortLevels?: EffortLevel[];
@@ -188,11 +215,24 @@ export type TuiAppDeps = {
   unavailable?: string;
   /** 启动时关掉的工具(配置 tools.disable)。 */
   disabledTools?: string[];
+  mcpReconnect?: string[];
+  onSetupChange?: (setup: SessionSetup) => void;
+  readOnlyReason?: string;
+  inputs?: SessionInputs;
+  saveInputs?: boolean;
   /** 换会话(/session new · fork · resume):由入口实现,停掉这个界面、换日志再起一个。 */
   switchSession?: (target: SessionTarget) => void;
 };
 
 export type TuiApp = {
+  setExitState(state?: ExitState): void;
+  flushInputs(): void;
+  draft(): string;
+  setDraft(text: string): void;
+  setup(): SessionSetup;
+  choose(title: string, rows: { label: string; note?: string }[]): Promise<string | undefined>;
+  reviewSetup(setup: SessionSetup, missing: string[]): Promise<SessionSetup | undefined>;
+  showText(title: string, text: string): Promise<void>;
   tui: TUI;
   agent: Agent;
   /** 提交一条用户消息;运行中时 deliverAs 决定是步边界插话(缺省)还是等模型做完再给。 */
@@ -242,11 +282,13 @@ function contextTag(info: TuiAppDeps["info"]): string {
   return src === "assumed" ? c.zhu(`${w} ctx assumed`) : c.faint(`${w} ctx (${src})`);
 }
 
-/** 脉搏的八级格。 */
-const PULSE_BLOCKS = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"] as const;
-
 export function createTuiApp(deps: TuiAppDeps): TuiApp {
   const { log, tools, compaction } = deps;
+  const savedInputs = deps.inputs?.read(log.events);
+  let stopped = false;
+  let unsubscribeLog: (() => void) | undefined;
+  let cancelSessionDialog: (() => void) | undefined;
+  let exiting = false;
 
   // ---------- 组件树 ----------
   // 备用屏(缺省):头部与状态行固定,正文自己滚,鼠标滚轮、拖选即复制、Ctrl+Shift+F 搜索、Ctrl+↑↓ 按步跳;
@@ -265,10 +307,11 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
           searchCurrentMatchStyle: (t) => c.inverse(t),
         })
       : new TuiMainScreen(terminal);
-  const header = new Text("", 1, 0);
+  const header = new Block("", { truncate: true });
   const transcript = new Container();
   const live = new Container();
-  const status = new SplitLine();
+  const status = new RuntimeStatus(() => ctx);
+  const inputHints = new InputHints(() => ctx);
   const editor = new Editor(tui, editorTheme, { paddingX: 1 });
   const templates = deps.templates ?? [];
   editor.setAutocompleteProvider(
@@ -292,6 +335,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     bottom.addChild(new Spacer(1));
     bottom.addChild(status);
     bottom.addChild(editor);
+    bottom.addChild(inputHints);
     scroll = new ScrollView(body, { follow: "end", primary: true, overscroll: "chain" });
     tui.setLayoutRoot(
       new VStack([
@@ -315,6 +359,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     tui.addChild(new Spacer(1));
     tui.addChild(status);
     tui.addChild(editor);
+    tui.addChild(inputHints);
   }
   // 焦点事件:通知只在终端失焦时发。
   deps.terminal.write(FOCUS_ON);
@@ -324,11 +369,15 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
   // 关掉的工具(配置 tools.disable、/tools)不随请求发出;全表仍在 ctx.tools 里,开关随时可翻。
   const disabledTools = new Set(deps.disabledTools ?? []);
   const agent = new Agent({
+    ...(savedInputs && { pending: savedInputs.pending }),
+    onPendingChange: (pending) => {
+      deps.inputs?.setPending(pending);
+      ctx.updateStatus();
+    },
     log,
     provider: deps.provider,
-    tools: tools.filter((t) => !disabledTools.has(t.name)),
+    tools: () => tools.filter((t) => !disabledTools.has(t.name)),
     compaction,
-    onRaw: (line) => ctx.onRaw(line),
     ...(deps.effort && { effort: deps.effort }),
     ...(deps.facts && { facts: deps.facts }),
     ...(deps.planReminder !== undefined && { planReminder: deps.planReminder }),
@@ -342,11 +391,25 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     tools
       .filter((t) => !ctx.slots.disabledTools.has(t.name))
       .map((t) => ({ name: t.name, description: t.description, parameters: t.parameters }));
+  const readRecording = recordingReader();
   const sessions = (): SessionSource[] => [
-    { name: "main", events: log.events },
+    {
+      name: "main",
+      events: log.events,
+      recordingFor: (i: number, section?: RecordingSection) =>
+        deps.recordingFor
+          ? deps.recordingFor(log, i, section)
+          : readRecording(log, log.path ?? deps.info.sessionFile, i, section),
+    },
     ...ctx.children.views.map((v) => ({
       name: `sub #${v.info.index} ${brief(v.info.task)}`,
       events: v.info.log.events,
+      recordingFor: (i: number, section?: RecordingSection) =>
+        deps.recordingFor
+          ? deps.recordingFor(v.info.log, i, section)
+          : v.info.log.path
+            ? readRecording(v.info.log, v.info.log.path, i, section)
+            : undefined,
     })),
   ];
   const inspector = new RequestInspector({
@@ -362,7 +425,6 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     currentProvider: () => agent.provider,
     tools: defs,
     rows: () => deps.terminal.rows,
-    ...(deps.trace && { rawFor: (i: number) => ctx.req.rawAt.get(i) }),
     lastSent: () => ctx.req.lastSent,
     contextWindow: () => ctx.model.contextWindow,
     running: () => agent.running,
@@ -379,6 +441,13 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
   // ---------- ctx:模块共享的全部状态与少数动作 ----------
   const ctx: TuiContext = {
     deps,
+    setupInitial: structuredClone(
+      deps.startupSettings ??
+        mergeSetup(
+          deps.settings?.settingLayers?.().defaults ?? {},
+          deps.settings?.settingLayers?.().preset ?? {},
+        ),
+    ),
     log,
     tools,
     compaction,
@@ -395,6 +464,8 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     templates,
     skills: deps.skills ?? [],
     model: { info: deps.info, effortLevels: deps.effortLevels, contextWindow: compaction.window },
+    draftImages: savedInputs?.draft.images ?? [],
+    inputReading: false,
     view: {
       foldResults: deps.fold ?? true,
       foldLines: deps.foldLines ?? FOLD_HEAD,
@@ -414,7 +485,6 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       turnStartedAt: undefined,
       reasoningView: undefined,
       reasoningBuffer: "",
-      loader: undefined,
       loaderTimer: undefined,
       resultNodes: [],
       reasoningNodes: [],
@@ -427,8 +497,6 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       lastTurnIndex: -1,
       lastCompactionIndex: -1,
       providersAt: new Map(),
-      rawAt: new Map(),
-      rawLines: 0,
       predictedAt: new Map(),
       lastSent: undefined,
     },
@@ -455,11 +523,13 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
         ctx.dialog.onOpen?.();
       },
       close() {
+        const cancel = cancelSessionDialog;
+        cancelSessionDialog = undefined;
+        cancel?.();
         if (!ctx.dialog.overlay) return;
         ctx.dialog.overlay.hide();
         ctx.dialog.overlay = undefined;
         ctx.dialog.component = undefined;
-        tui.setFocus(editor);
         tui.requestRender();
       },
     },
@@ -481,7 +551,6 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
         if (!ctx.inspector.overlay) return;
         ctx.inspector.overlay.hide();
         ctx.inspector.overlay = undefined;
-        tui.setFocus(editor);
         tui.requestRender();
       },
     },
@@ -507,42 +576,33 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       header.setText(
         info.providerName === "none"
           ? `${tone(G.seal)} ${c.bold(c.jin("clari"))}  ${c.zhu("no model")}  ${c.faint(`/login to add an API key · ${info.sessionFile}`)}`
-          : `${tone(G.seal)} ${c.bold(c.jin("clari"))}  ${c.ink(info.model)}  ${c.faint(`${info.providerName} · `)}${contextTag(info)}${c.faint(` · ${info.sessionFile}`)}`,
+          : `${tone(G.seal)} ${c.bold(c.jin("clari"))}  ${c.ink(info.model)}  ${[c.faint(info.providerName), contextTag(info), c.faint(info.sessionFile)].filter(Boolean).join(c.faint(" · "))}`,
       );
     },
     updateStatus,
-    // 工作行:spinner、在做什么、用时、怎么打断;用时每秒刷新。
+    // 工作状态固定在输入区上方,滚回历史时仍然可见。
     showLoader(message) {
       ctx.hideLoader();
       const startedAt = Date.now();
       ctx.view.turnStartedAt = startedAt;
-      const text = () =>
-        `${message} · ${Math.round((Date.now() - startedAt) / 1000)}s · Esc to interrupt`;
-      const loader = new Loader(tui, c.zhu, c.faint, text());
-      ctx.view.loader = loader;
+      status.begin(message);
       // 半秒一拍:印章进一个相位;每两拍刷一次用时与标题。
       ctx.view.loaderTimer = setInterval(() => {
         ctx.view.sealFrame += 1;
         ctx.updateHeader();
         if (ctx.view.sealFrame % 2 === 0) {
-          loader.setMessage(text());
           updateTitle();
         }
         tui.requestRender();
       }, 500);
-      live.addChild(loader);
-      loader.start();
+      tui.requestRender();
     },
     hideLoader() {
-      const loader = ctx.view.loader;
       if (ctx.view.loaderTimer) clearInterval(ctx.view.loaderTimer);
       ctx.view.loaderTimer = undefined;
       ctx.view.sealFrame = 0;
       ctx.updateHeader();
-      if (!loader) return;
-      loader.stop();
-      live.removeChild(loader);
-      ctx.view.loader = undefined;
+      status.end();
     },
     threshold: () => compactionThreshold(ctx.model.contextWindow, deps.reserveTokens),
     // 当前模型的价格:配置接口优先,其次启动时带来的。
@@ -553,24 +613,23 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       thinkingLines(s, kind, ctx.view.showReasoning, Math.max(20, deps.terminal.columns - 24)).join(
         "\n",
       ),
-    onRaw(line) {
-      const r = ctx.req;
-      if (deps.trace) {
-        const bucket = r.rawAt.get(r.lastIndex) ?? [];
-        bucket.push(line);
-        r.rawAt.set(r.lastIndex, bucket);
-        // 缺省开,内存里只留最近 RAW_LINE_CAP 行:整桶淘汰最旧的请求,磁盘旁路文件不删。
-        r.rawLines++;
-        while (r.rawLines > RAW_LINE_CAP && r.rawAt.size > 1) {
-          const oldest = r.rawAt.keys().next().value as number;
-          r.rawLines -= r.rawAt.get(oldest)?.length ?? 0;
-          r.rawAt.delete(oldest);
-        }
-      }
-      deps.onRaw?.(r.lastIndex, line);
-    },
-    exit: deps.onExit ?? (() => process.exit(0)),
+    exit:
+      deps.onExit ??
+      (() => {
+        ctx.stop();
+        process.exit(0);
+      }),
+    persistSetup: () => deps.onSetupChange?.(captureSessionSetup(ctx)),
     stop() {
+      stopped = true;
+      deps.inputs?.flush();
+      deps.inputs?.detach();
+      for (const off of recordingOffs) off();
+      log.recording?.flush();
+      ctx.dialog.close();
+      // 停止的界面不再消费日志;旧连接的迟到事件不能重新驱动它渲染。
+      unsubscribeLog?.();
+      unsubscribeLog = undefined;
       ctx.hideLoader();
       for (const v of ctx.children.views) v.dispose();
       deps.terminal.write(FOCUS_OFF);
@@ -590,8 +649,9 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
   }
 
   let wasRunning = false;
-  /** 状态行:左边是状态与上下文占用,右边是会话累计与快捷键入口;放不下时右边先让。 */
+  /** 通知和标题跟随执行状态;固定状态区自己按实际宽度投影。 */
   function updateStatus(): void {
+    ctx.persistSetup();
     // 回合结束(运行 → 空闲)时通知一次;审批提示在 askApproval 里自己通知。之后的说明行回到根上,不进最后一步。
     if (wasRunning && !agent.running) {
       ctx.notify("turn finished");
@@ -599,73 +659,39 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     }
     wasRunning = agent.running;
     updateTitle();
-    const state = agent.running ? c.zhu(`${G.running} running`) : c.soft(`${G.idle} idle`);
-    const t = ctx.threshold();
-    let tokens = c.faint("no requests yet");
-    const usage = ctx.view.lastUsage;
-    if (usage) {
-      // 上下文占用条:以自动压缩阈值为满格;细线淡色是背景信息,过七成才转朱色提醒。
-      // 口径与请求卡的 limit 行一致:实测优先、压缩后按估算,手动 /compact 之后状态栏立刻回落。
-      const used = Math.min(1, contextTokens(log.events) / t);
-      const cells = used > 0 ? Math.max(1, Math.round(used * 10)) : 0;
-      // 条分两色:淡的是上次请求已缓存的前缀,金的是这次新增(金只给变化)。过七成整条转朱色。
-      const predicted = ctx.req.predictedAt.get(ctx.req.lastTurnIndex) ?? 0;
-      const cachedCells = Math.min(cells, Math.round(Math.min(1, predicted / t) * 10));
-      const tone = used >= 0.7 ? c.zhu : c.faint;
-      const bar =
-        used >= 0.7
-          ? "━".repeat(cells) + "┄".repeat(10 - cells)
-          : `${c.faint("━".repeat(cachedCells))}${c.jin("━".repeat(cells - cachedCells))}${c.faint("┄".repeat(10 - cells))}`;
-      const trigger = compaction.trigger ?? "threshold";
-      const room = `${pct(Math.max(0, 1 - used))} ${trigger === "threshold" ? "until auto-compaction" : "until the compaction threshold"}`;
-      const over =
-        used >= 1 && trigger !== "threshold"
-          ? c.zhu(
-              ` · past the threshold: /compact to compress${trigger === "manual" ? "" : " (compaction is set to remind)"}`,
-            )
-          : "";
-      tokens = `${tone(bar)} ${c.faint(`${room} · ${usage.inputTokens}→${usage.outputTokens} tok`)}${over}`;
-    }
-    const queued = agent.queued > 0 ? c.faint(` · queued ${agent.queued}`) : "";
-    const effort = agent.effort ? c.faint(` · effort ${agent.effort}`) : "";
-    const runningChildren = ctx.children.views.filter((v) => v.running).length;
-    const kids = runningChildren > 0 ? c.faint(` · sub-agents ${runningChildren} running`) : "";
-    // 会话累计(含压缩摘要请求):输入、输出、缓存命中、费用。增量累计,每条事件到来时 render 喂进去。
-    const totals = ctx.usage.totals();
-    const sum =
-      totals.requests > 0
-        ? `↑${fmtTok(totals.inputTokens)} ↓${fmtTok(totals.outputTokens)}${totals.cacheReadTokens > 0 ? ` · cache ${fmtTok(totals.cacheReadTokens)}` : ""}${totals.cost !== undefined ? ` · ${fmtCostApprox(totals.cost)}` : ""} · `
-        : "";
-    // 上下文脉搏:最近十次请求的占用比各一格,压缩发生在哪、上下文在涨还是稳,一眼看到。
-    const pulse =
-      ctx.view.pulse.length > 1
-        ? ` ${c.faint(ctx.view.pulse.map((r) => PULSE_BLOCKS[Math.min(7, Math.max(0, Math.round(r * 7)))]).join(""))}`
-        : "";
-    const cursor =
-      ctx.view.selectedStep !== undefined
-        ? c.soft(
-            ` · step ${ctx.view.selectedStep + 1}/${ctx.steps.length} · Enter fold or unfold · Esc release`,
-          )
-        : "";
-    status.set(
-      `${state}  ${tokens}${pulse}${effort}${queued}${kids}${cursor}`,
-      c.faint(`${sum}? shortcuts`),
-    );
     tui.requestRender();
   }
 
+  const recordingOffs: (() => void)[] = [];
+  const watchRecording = (source: EventLog) => {
+    const off = source.recording?.subscribe(() => {
+      if (source.recording?.error)
+        ctx.note(
+          c.zhu(
+            `Saving failed: ${source.recording.error}. Work continues; unsaved data stays in memory. Retrying automatically; Ctrl+S retries now.`,
+          ),
+        );
+      tui.requestRender();
+    });
+    if (off) recordingOffs.push(off);
+  };
+  watchRecording(log);
+
   // ---------- 历史回放与订阅:屏幕即历史,历史与新事件长得一样 ----------
-  const draw = (e: AgentEvent) => render(ctx, e);
+  const draw = (e: AgentEvent, index = log.events.length - 1) => {
+    status.observe(e);
+    render(ctx, e, index);
+  };
   if (log.events.length > 0) {
-    for (const e of log.events) draw(e);
-    log.subscribe(draw);
-    if (log.events.length > 1) {
+    for (const [index, e] of log.events.entries()) draw(e, index);
+    unsubscribeLog = log.subscribe(draw);
+    if (deps.info.resumed) {
       ctx.note(
         c.soft(`· resumed: ${log.events.length} events, appending to ${deps.info.sessionFile}`),
       );
     }
   } else {
-    log.subscribe(draw);
+    unsubscribeLog = log.subscribe(draw);
     log.append({
       type: "session/start",
       at: now(),
@@ -685,18 +711,115 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
 
   // ---------- 输入 ----------
   editor.onSubmit = (raw) => {
+    // 编辑器先清空再回调;接收成功前恢复草稿,让附图归属与失败保留走同一条路径。
+    editor.setText(raw);
     const text = raw.trim();
-    editor.setText("");
-    if (!text) return;
+    if (ctx.inputReading) {
+      ctx.note(c.soft("Reading clipboard; send after the attachment appears."));
+      return;
+    }
+    if (!text && !ctx.draftImages.length) return;
     editor.addToHistory(text);
-    if (text.startsWith("/")) void command(ctx, text);
-    else void submit(ctx, text);
+    if (text.startsWith("/")) {
+      editor.setText("");
+      void command(ctx, text);
+    } else void submit(ctx, text);
+  };
+  if (savedInputs) editor.setText(savedInputs.draft.text);
+  deps.inputs?.bind((error) =>
+    ctx.note(
+      c.zhu(
+        `Input saving failed: ${error.message}. Keep this session open and retry with /session inputs.`,
+      ),
+    ),
+  );
+  editor.onChange = (text) => deps.inputs?.setDraft(text, ctx.draftImages);
+
+  const pasteInput = async (get: () => Promise<ClipboardInput>) => {
+    if (ctx.inputReading) return;
+    ctx.inputReading = true;
+    tui.requestRender();
+    try {
+      const value = await get();
+      const image = value.image ?? (value.text ? await imageFromPath(value.text) : undefined);
+      if (stopped) return;
+      if (image) {
+        ctx.draftImages = [...ctx.draftImages, image];
+        deps.inputs?.setDraft(editor.getText(), ctx.draftImages);
+      } else if (value.text) {
+        editor.handleInput(`\x1b[200~${value.text}\x1b[201~`);
+      } else ctx.note(c.soft("No image or text on the clipboard."));
+    } catch (error) {
+      if (!stopped) ctx.note(c.zhu(`Paste failed: ${(error as Error).message}. Draft unchanged.`));
+    } finally {
+      ctx.inputReading = false;
+      if (!stopped) tui.requestRender();
+    }
   };
 
   tui.addInputListener((data) => {
+    if (!exiting && !ctx.inspector.overlay && !approval.overlay && !ctx.dialog.overlay) {
+      if (matchesKey(data, Key.ctrl("v")) || matchesKey(data, Key.alt("v"))) {
+        void pasteInput(deps.readClipboard ?? readClipboardInput);
+        return { consume: true };
+      }
+      if (data.startsWith("\x1b[200~") && data.endsWith("\x1b[201~")) {
+        const pasted = data.slice(6, -6);
+        if (/\.(png|jpe?g|gif|webp)["']?\s*$/i.test(pasted.trim()) && !/[\r\n]/.test(pasted)) {
+          void pasteInput(async () => ({ text: pasted }));
+          return { consume: true };
+        }
+      }
+      if (matchesKey(data, Key.alt("i"))) {
+        let selected = 0;
+        ctx.dialog.open({
+          invalidate() {},
+          render(width) {
+            const line = (s: string) => truncateToWidth(s, Math.max(1, width - 2));
+            const count = Math.max(1, terminal.rows - 8);
+            const start = Math.max(0, selected - count + 1);
+            return [
+              line(` Draft images · ${ctx.draftImages.length} attached · Enter sends from editor`),
+              "",
+              ...ctx.draftImages.slice(start, start + count).map((image, index) => {
+                const i = start + index;
+                return line(
+                  ` ${selected === i ? "›" : " "} ${i + 1}. ${image.name ?? image.mimeType} · ${imageBytes(image)} bytes`,
+                );
+              }),
+              ...(ctx.draftImages.length ? [] : [" No images attached."]),
+              "",
+              " ↑↓ select · Delete remove · Esc back",
+            ];
+          },
+          handleInput(key) {
+            if (matchesKey(key, Key.escape)) ctx.dialog.close();
+            else if (matchesKey(key, Key.up)) selected = Math.max(0, selected - 1);
+            else if (matchesKey(key, Key.down))
+              selected = Math.min(ctx.draftImages.length - 1, selected + 1);
+            else if (matchesKey(key, Key.delete)) {
+              ctx.draftImages = ctx.draftImages.filter((_, i) => i !== selected);
+              selected = Math.max(0, Math.min(selected, ctx.draftImages.length - 1));
+              deps.inputs?.setDraft(editor.getText(), ctx.draftImages);
+            }
+            tui.requestRender();
+          },
+        });
+        return { consume: true };
+      }
+    }
+    if (matchesKey(data, Key.ctrl("s"))) {
+      for (const source of [log, ...ctx.children.views.map((v) => v.info.log)])
+        source.recording?.flush();
+      tui.requestRender();
+      return { consume: true };
+    }
     if (matchesKey(data, Key.ctrl("c"))) {
-      ctx.stop();
       ctx.exit();
+      return { consume: true };
+    }
+    if (exiting) {
+      ctx.dialog.component?.handleInput?.(data);
       return { consume: true };
     }
     if (matchesKey(data, Key.ctrl("k"))) {
@@ -717,11 +840,13 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       return { consume: true };
     }
     if (matchesKey(data, Key.ctrl("r"))) {
+      if (approval.overlay || ctx.dialog.overlay) return undefined;
       if (ctx.inspector.overlay) ctx.inspector.close();
       else ctx.inspector.open();
       return { consume: true };
     }
     if (matchesKey(data, Key.ctrl("e"))) {
+      if (approval.overlay || ctx.dialog.overlay) return undefined;
       // Ctrl+E:上下文工作台。账簿光标停在某一步时,落在那一步的消息上;再按一次关。
       if (ctx.inspector.overlay && inspector.currentMode === "composition") {
         ctx.inspector.close();
@@ -735,18 +860,15 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       return { consume: true };
     }
     if (ctx.inspector.overlay || approval.overlay || ctx.dialog.overlay) return undefined; // 检视器、审批提示或对话框打开时,其余按键归它们
-    if (data === "?" && editor.getText() === "") {
-      ctx.note(shortcutLines().join("\n"));
-      return { consume: true };
-    }
     if (matchesKey(data, Key.alt("enter"))) {
       // 后续留言:不打断当前步,等模型不再调工具时才给它。空闲时与普通提交等价。
       const text = editor.getText().trim();
-      if (!text) return { consume: true };
-      editor.setText("");
+      if (!text && !ctx.draftImages.length) return { consume: true };
       editor.addToHistory(text);
-      if (text.startsWith("/")) void command(ctx, text);
-      else void submit(ctx, text, { deliverAs: "followUp" });
+      if (text.startsWith("/")) {
+        editor.setText("");
+        void command(ctx, text);
+      } else void submit(ctx, text, { deliverAs: "followUp" });
       return { consume: true };
     }
     if (matchesKey(data, Key.ctrl("o"))) {
@@ -761,13 +883,21 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     if (
       matchesKey(data, Key.enter) &&
       editor.getText() === "" &&
+      !ctx.draftImages.length &&
       !editor.isShowingAutocomplete() &&
       ctx.view.selectedStep !== undefined
     ) {
       toggleSelectedStep(ctx);
       return { consume: true };
     }
-    if (matchesKey(data, Key.escape) && !agent.running && clearStepSelection(ctx)) {
+    if (
+      matchesKey(data, Key.escape) &&
+      !editor.isShowingAutocomplete() &&
+      (ctx.view.selectedStep !== undefined || (scroll && !scroll.isFollowingEnd))
+    ) {
+      clearStepSelection(ctx);
+      scroll?.scrollToEnd();
+      tui.requestRender();
       return { consume: true };
     }
     if (matchesKey(data, Key.ctrl("t"))) {
@@ -786,11 +916,77 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
   // 没 key:屏幕上只留头部与对话框;原因已在头部(no model),不再另打一行。
   if (deps.unavailable) openLogin(ctx, {});
 
+  function sessionDialog<T>(
+    build: (done: (value?: T) => void) => Component,
+  ): Promise<T | undefined> {
+    return new Promise((resolve) => {
+      ctx.dialog.open(
+        build((value) => {
+          cancelSessionDialog = undefined;
+          resolve(value);
+          ctx.dialog.close();
+        }),
+      );
+      cancelSessionDialog = () => resolve(undefined);
+    });
+  }
+
   return {
     tui,
+    flushInputs: () => deps.inputs?.flush(),
     agent,
-    submit: (text, opts) => submit(ctx, text, opts),
-    command: (text) => command(ctx, text),
+    draft: () => editor.getText(),
+    setDraft: (text) => {
+      editor.setText(text);
+      tui.requestRender();
+    },
+    setExitState(state) {
+      exiting = Boolean(state);
+      if (state) {
+        ctx.inspector.close();
+        ctx.dialog.open(exitReview(ctx, state));
+      } else ctx.dialog.close();
+    },
+    setup: () => captureSessionSetup(ctx),
+    choose: (heading, rows) =>
+      sessionDialog<string>((done) =>
+        sessionChoice(
+          heading,
+          rows,
+          () => deps.terminal.rows,
+          done,
+          () => tui.requestRender(),
+        ),
+      ),
+    reviewSetup: (setup, missing) =>
+      sessionDialog<SessionSetup>(
+        (done) =>
+          new SessionSetupReview(
+            setup,
+            missing,
+            () => deps.terminal.rows,
+            done,
+            () => tui.requestRender(),
+          ),
+      ),
+    showText: (heading, text) =>
+      sessionDialog<void>((done) =>
+        textReview(
+          heading,
+          text,
+          () => deps.terminal.rows,
+          done,
+          () => tui.requestRender(),
+        ),
+      ),
+    submit: (text, opts) =>
+      exiting
+        ? Promise.reject(new Error("Session is closing; new input was not submitted."))
+        : submit(ctx, text, opts),
+    command: (text) =>
+      exiting && text.trim() !== "/quit"
+        ? Promise.reject(new Error("Session is closing; command was not run."))
+        : command(ctx, text),
     // 离线验证与预览用的整份文档:两种屏幕模式都按同一顺序拼,备用屏的滚动区不经布局不出行。
     lines: (width = deps.terminal.columns) =>
       isViewportTUI(tui)
@@ -802,6 +998,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
             "",
             ...status.render(width),
             ...editor.render(width),
+            ...inputHints.render(width),
           ]
         : tui.render(width),
     inspector: {
@@ -824,10 +1021,13 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       lines: (width = deps.terminal.columns) =>
         ctx.inspector.overlay ? inspector.render(width) : [],
     },
-    attachChild: (child) => attachChild(ctx, child),
+    attachChild: (child) => {
+      watchRecording(child.log);
+      return attachChild(ctx, child);
+    },
     children: () => ctx.children.views.map((v) => v.info),
     slots: () => ctx.agent.slots,
-    approvalLines: () => approval.prompt?.render() ?? [],
+    approvalLines: () => approval.prompt?.render(deps.terminal.columns) ?? [],
     approvalInput: (data) => approval.prompt?.handleInput(data),
     note: (text) => ctx.note(text),
     dialogLines: () => ctx.dialog.component?.render(deps.terminal.columns) ?? [],

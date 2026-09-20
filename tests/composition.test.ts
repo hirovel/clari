@@ -9,6 +9,7 @@ import type { AssistantTurn, Provider } from "../src/provider.js";
 import { openaiCompat } from "../src/provider.js";
 import { anthropic } from "../src/providers/anthropic.js";
 import { openaiResponses } from "../src/providers/openai-responses.js";
+import { recordUnresolvedCalls } from "../src/recovery.js";
 
 const ansi = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
 const plain = (s: string) => s.replace(ansi, "");
@@ -38,6 +39,75 @@ function sample(): AgentEvent[] {
 }
 
 describe("composeContext", () => {
+  it("恢复缺失工具结果:记录未知且不重跑,投影保留合法调用配对与来源,旧请求不被改写", () => {
+    const log = new EventLog();
+    for (const e of sample().slice(0, 4)) log.append(e); // a 有结果,b 没有。
+    const before = composeContext(log.events);
+    recordUnresolvedCalls(log);
+    recordUnresolvedCalls(log);
+    expect(log.events.filter((e) => e.type === "tool/unresolved")).toHaveLength(1);
+    expect(composeContext(log.events, 4)).toEqual(before);
+    log.append({ type: "user/message", at: "", text: "Check the actual state and continue." });
+    const recovered = composeContext(log.events);
+    expect(recovered.messages.map((m) => m.role)).toEqual([
+      "system",
+      "user",
+      "assistant",
+      "tool",
+      "tool",
+      "user",
+    ]);
+    expect(recovered.messages[4]).toMatchObject({ role: "tool", callId: "b", isError: true });
+    expect(recovered.messages[4]?.content).toContain("execution outcome is unknown");
+    expect(recovered.provenance[4]).toEqual({ event: 4, stages: ["unknown-result"] });
+    log.append({
+      type: "context/edit",
+      at: "",
+      target: 4,
+      field: "content",
+      value: "Verified separately by the user.",
+    });
+    expect(composeContext(log.events).messages[4]?.content).toBe(
+      "Verified separately by the user.",
+    );
+    log.append({ type: "context/drop", at: "", target: 2 });
+    expect(composeContext(log.events).messages.some((m) => m.role === "tool")).toBe(false);
+    const late = new EventLog();
+    for (const e of sample().slice(0, 4)) late.append(e);
+    recordUnresolvedCalls(late);
+    late.append({
+      type: "tool/result",
+      at: "",
+      callId: "b",
+      name: "r",
+      content: "actual late result",
+      isError: false,
+    });
+    expect(
+      composeContext(late.events).messages.filter((m) => m.role === "tool" && m.callId === "b"),
+    ).toEqual([
+      { role: "tool", callId: "b", name: "r", content: "actual late result", isError: false },
+    ]);
+    const remote = new EventLog();
+    for (const e of sample().slice(0, 4)) remote.append(e);
+    remote.append({
+      type: "tool/result",
+      at: "",
+      callId: "b",
+      name: "r",
+      content: "Remote outcome unknown.",
+      isError: true,
+      outcome: "unknown",
+    });
+    const remoteBefore = composeContext(remote.events);
+    recordUnresolvedCalls(remote);
+    expect(remote.events).toHaveLength(5);
+    expect(composeContext(remote.events)).toEqual(remoteBefore);
+    expect(remoteBefore.messages.filter((m) => m.role === "tool" && m.callId === "b")).toHaveLength(
+      1,
+    );
+    expect(remoteBefore.provenance.at(-1)).toEqual({ event: 4, stages: ["unknown-result"] });
+  });
   it("每条消息带来源事件与阶段;摘要、清除、编辑、丢弃各有名字;省略列出原因;deriveMessages 只是它的一列", () => {
     const events: AgentEvent[] = [
       ...sample(),

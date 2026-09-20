@@ -33,6 +33,7 @@ function editable(
     case "user/message":
       return { fields: ["content"], current: () => cur.content ?? e.text };
     case "tool/result":
+    case "tool/unresolved":
       return { fields: ["content"], current: () => cur.content ?? e.content };
     case "session/start":
       return { fields: ["system"], current: () => cur.system ?? e.system };
@@ -93,13 +94,7 @@ export function editCommand(ctx: TuiContext, arg: string): string {
     value = next;
   }
   log.append({ type: "context/edit", at: now(), target, field, value });
-  return [
-    c.soft(`· edited event #${target}.${field} (${value.length} chars)`),
-    ...consequenceLines(ctx, target),
-    c.faint(
-      "  · the original stays in the event; Ctrl+E shows the projection, the events view shows context/edit",
-    ),
-  ].join("\n");
+  return consequenceLines(ctx, target).join("\n");
 }
 
 export function dropCommand(ctx: TuiContext, arg: string): string {
@@ -117,14 +112,7 @@ export function dropCommand(ctx: TuiContext, arg: string): string {
   }
   const note = m[2]?.trim();
   log.append({ type: "context/drop", at: now(), target, ...(note && { note }) });
-  const withResults =
-    e.type === "assistant/message" && e.toolCalls.length > 0
-      ? ` with its ${e.toolCalls.length} tool results`
-      : "";
-  return [
-    c.soft(`· dropped event #${target}${withResults}`),
-    ...consequenceLines(ctx, target),
-  ].join("\n");
+  return consequenceLines(ctx, target).join("\n");
 }
 
 /** 某事件在投影里可改的主字段与它的原值。 */
@@ -139,6 +127,7 @@ export function originalOf(
     case "user/message":
       return { field: "content", value: e.text };
     case "tool/result":
+    case "tool/unresolved":
       return { field: "content", value: e.content };
     case "session/start":
       return { field: "system", value: e.system };
@@ -285,7 +274,12 @@ export function forkCommand(ctx: TuiContext, arg: string): string {
     upTo = lastUser < 0 ? log.events.length : log.events.length - 1 - lastUser;
     if (upTo < 1) return c.faint("nothing to fork yet");
   }
-  const r = forkSession(log.events, upTo, ctx.deps.sessionsDir ?? SESSIONS_DIR);
+  const r = forkSession(
+    log.events,
+    upTo,
+    ctx.deps.sessionsDir ?? SESSIONS_DIR,
+    ctx.deps.info.sessionFile,
+  );
   return `${c.soft(`· forked: first ${r.events} events → ${r.file}`)}\n${c.faint(`  pnpm tui -- --resume ${r.file}   continues from there; this session is untouched`)}`;
 }
 
@@ -294,6 +288,10 @@ export function forkCommand(ctx: TuiContext, arg: string): string {
  * 原文留在事件里,再翻回来就是又一次编辑。切不回段(旧日志)时说明原因。
  */
 export function flipSection(ctx: TuiContext, name: string): void {
+  if (ctx.deps.readOnlyReason) {
+    ctx.note(c.zhu(ctx.deps.readOnlyReason));
+    return;
+  }
   const { log, agent } = ctx;
   if (agent.running) {
     ctx.note(c.zhu(BUSY));
@@ -341,6 +339,10 @@ export async function contextAction(
   row: CompositionRow,
 ): Promise<void> {
   if (action === "view") return;
+  if (ctx.deps.readOnlyReason && action !== "compare" && action !== "fork") {
+    ctx.note(c.zhu(ctx.deps.readOnlyReason));
+    return;
+  }
   ctx.inspector.close();
   const target = row.event;
   switch (action) {

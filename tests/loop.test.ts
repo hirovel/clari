@@ -56,13 +56,29 @@ function firstResult(log: EventLog) {
 describe("runTurn", () => {
   it("工具调用→执行→回喂→模型收尾:事件序列完整", async () => {
     const log = newLog();
+    const tools = [echoTool];
+    let requests = 0;
     const outcome = await runTurn({
       log,
-      provider: scripted([
-        { text: "", toolCalls: [call("echo", { text: "hi" })], stopReason: "tool" },
-        { text: "完成", toolCalls: [], stopReason: "end" },
-      ]),
-      tools: [echoTool],
+      provider: {
+        model: "fake",
+        async complete(_messages, definitions) {
+          if (requests++ === 0) {
+            expect(definitions[0]?.description).toBe(echoTool.description);
+            tools[0] = {
+              ...echoTool,
+              description: "updated",
+              async execute() {
+                return "wrong version";
+              },
+            };
+            return { text: "", toolCalls: [call("echo", { text: "hi" })], stopReason: "tool" };
+          }
+          expect(definitions[0]?.description).toBe("updated");
+          return { text: "完成", toolCalls: [], stopReason: "end" };
+        },
+      },
+      tools: () => tools,
     });
     expect(outcome).toBe("idle");
     // 每次模型请求前落一条 request(只给人看),响应紧随其后。
@@ -254,6 +270,67 @@ describe("runTurn", () => {
       content: "Interrupted by the user; not executed.",
       isError: true,
     });
+
+    // 审批等待与批次刷新都能让取消跨过最外层检查;以实际副作用计数验证执行入口。
+    for (const mode of ["approval", "buffered", "flush"] as const) {
+      const boundaryLog = newLog();
+      const cancel = new AbortController();
+      const executed: string[] = [];
+      const first = defineTool({
+        name: "first",
+        description: "first",
+        parameters: Type.Object({}),
+        concurrency: "parallel",
+        async execute() {
+          executed.push("first");
+          if (mode === "flush") cancel.abort();
+          return "first finished";
+        },
+      });
+      const second = defineTool({
+        name: "second",
+        description: "second",
+        parameters: Type.Object({}),
+        async execute() {
+          executed.push("second");
+          return "second finished";
+        },
+      });
+      const stopped = await runTurn({
+        log: boundaryLog,
+        tools: [first, second],
+        signal: cancel.signal,
+        provider: scripted([
+          {
+            text: "",
+            toolCalls: [call("first", {}, "one"), call("second", {}, "two")],
+            stopReason: "tool",
+          },
+        ]),
+        slots: {
+          execution: mode === "approval" ? "sequential" : "parallel",
+          approve: async (call) => {
+            if (
+              (mode === "approval" && call.id === "one") ||
+              (mode === "buffered" && call.id === "two")
+            )
+              cancel.abort();
+            return true;
+          },
+        },
+      });
+      expect(stopped).toBe("aborted");
+      expect(executed, mode).toEqual(mode === "flush" ? ["first"] : []);
+      const boundaryResults = boundaryLog.events.filter((e) => e.type === "tool/result");
+      expect(boundaryResults.map((r) => r.callId)).toEqual(["one", "two"]);
+      for (const result of boundaryResults.slice(mode === "flush" ? 1 : 0)) {
+        expect(result).toMatchObject({
+          content: "Interrupted by the user; not executed.",
+          isError: true,
+        });
+        expect(result.durationMs).toBeUndefined();
+      }
+    }
   });
 
   it("未知工具→错误回喂,不抛出", async () => {

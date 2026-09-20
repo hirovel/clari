@@ -11,7 +11,7 @@ import { createSkillTool } from "../cli/tools/skill.js";
 import { createTuiApp } from "../cli/tui-app.js";
 import type { KernelConfig } from "../src/config.js";
 import { EventLog } from "../src/log.js";
-import type { AssistantTurn, Provider } from "../src/provider.js";
+import type { Provider } from "../src/provider.js";
 import { defineTool } from "../src/tools.js";
 import { VirtualTerminal } from "./helpers/virtual-terminal.js";
 
@@ -87,23 +87,8 @@ describe("SKILL.md 解析与发现", () => {
       { signal: new AbortController().signal },
     );
     expect(out).toContain("Deploy to prod.");
-    const log = new EventLog();
-    const choice = {
-      provider: {
-        model: "m",
-        async complete(): Promise<AssistantTurn> {
-          return { text: "", toolCalls: [], stopReason: "end" };
-        },
-      },
-      model: "m",
-      providerName: "p",
-      contextWindow: 1000,
-    };
-    const cfg = { strategy: async () => null, window: 1000 };
-    expect(buildTools(log, choice, cfg, false).map((t) => t.name)).not.toContain("skill");
-    expect(
-      buildTools(log, choice, cfg, false, undefined, undefined, skills).map((t) => t.name),
-    ).toContain("skill");
+    expect(buildTools().map((t) => t.name)).not.toContain("skill");
+    expect(buildTools({ skills }).map((t) => t.name)).toContain("skill");
   });
 
   it("skills.list = none:清单不进系统提示词;配置与预设都能给", () => {

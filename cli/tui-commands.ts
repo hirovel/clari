@@ -10,14 +10,18 @@ import { fmtCost } from "../src/cost.js";
 import { now } from "../src/events.js";
 import { recordingProvider } from "../src/loop.js";
 import { EFFORT_LEVELS, parseEffort } from "../src/provider.js";
+import { unresolvedCalls } from "../src/recovery.js";
 import { SETTINGS, type SettingDef } from "../src/settings.js";
+import { setupGuide } from "../src/setup.js";
 import { expandFileRefs } from "./attachments.js";
 import { SESSIONS_DIR } from "./bootstrap.js";
 import { firstLine, thesisLines } from "./cards.js";
 import { describeStatus } from "./mcp/bridge.js";
 import { expandSkill } from "./prompt.js";
 import { describeInferred } from "./registry.js";
+import { PendingInputsView, textReview } from "./session-view.js";
 import { forkSession, listSessions, sessionRows } from "./sessions.js";
+import { SetupView } from "./setup-view.js";
 import { expandTemplate } from "./templates.js";
 import { copySequence } from "./terminal-extras.js";
 import { c } from "./theme.js";
@@ -36,8 +40,9 @@ import { pct } from "./tui-format.js";
 import { LoginDialog, type PickRow } from "./tui-login.js";
 import { choose, confirm, title, valueRows } from "./tui-menu.js";
 import { Palette, type PaletteItem } from "./tui-palette.js";
-import { applySettingNow, describeChange, parseTyped, SettingsView } from "./tui-settings.js";
+import { changeSetting, parseTyped } from "./tui-settings.js";
 import { slotCommand, slotsList } from "./tui-slots.js";
+import { openShortcutHelp } from "./tui-status.js";
 
 export type Command = {
   name: string;
@@ -60,7 +65,8 @@ export const COMMANDS: Command[] = [
   },
   {
     name: "settings",
-    description: "Every session: display, context, tools, notifications; saved to the config",
+    description:
+      "Assemble your agent: current session, saved defaults, recommended values and presets",
     picks: true,
   },
   {
@@ -91,7 +97,15 @@ export async function submit(
   raw: string,
   opts: { deliverAs?: DeliverAs } = {},
 ): Promise<void> {
-  const { agent, log } = ctx;
+  const { agent } = ctx;
+  if (ctx.inputReading) {
+    ctx.note(c.soft("Reading clipboard; wait for the attachment before sending."));
+    return;
+  }
+  if (ctx.deps.readOnlyReason) {
+    ctx.note(c.zhu(ctx.deps.readOnlyReason));
+    return;
+  }
   if (ctx.model.info.providerName === "none") {
     ctx.note(c.zhu("no provider yet: add an API key first"));
     openLogin(ctx, {});
@@ -107,28 +121,58 @@ export async function submit(
     );
   }
   const text = expanded.text;
+  const inputId = ctx.deps.inputs?.draftId;
+  const fromEditor = ctx.editor.getText().trim() === raw.trim();
+  const images = fromEditor ? ctx.draftImages : [];
+  const clearAcceptedDraft = () => {
+    if (
+      fromEditor &&
+      (!inputId ||
+        agent.pending.some((p) => p.id === inputId) ||
+        ctx.log.events.some((e) => e.type === "user/message" && e.inputId === inputId))
+    ) {
+      ctx.draftImages = [];
+      ctx.editor.setText("");
+      ctx.deps.inputs?.setDraft("", []);
+    }
+  };
   if (agent.running) {
-    void agent.prompt(text, opts);
+    void agent
+      .prompt(text, { ...opts, images, ...(fromEditor && inputId && { inputId }) })
+      .catch(() => {});
+    clearAcceptedDraft();
     ctx.note(
       c.faint(
         opts.deliverAs === "followUp"
-          ? "· queued for after the current step"
-          : "· queued as steering: injected at the next step boundary",
+          ? "· queued as follow-up: delivered after the current turn"
+          : `· queued as steering: delivered ${ctx.slots.state.steering === "turn" ? "after the current turn" : "at the next step boundary"}`,
       ),
     );
     ctx.updateStatus();
     return;
   }
+  await runInput(ctx, () => {
+    const pending = agent.prompt(text, { images, ...(fromEditor && inputId && { inputId }) });
+    clearAcceptedDraft();
+    return pending;
+  });
+}
+
+async function runInput(
+  ctx: TuiContext,
+  start: () => ReturnType<TuiContext["agent"]["continuePending"]>,
+): Promise<void> {
   ctx.showLoader("thinking");
   try {
     // prompt() 同步执行到首个 await 时已把 running 置位;此处刷新状态栏才能显示"运行中"。
-    const pending = agent.prompt(text);
+    const pending = start();
     ctx.updateStatus();
     const outcome = await pending;
     if (typeof outcome === "object") ctx.note(c.soft(`· loop stopped: ${outcome.stopped}`));
   } catch (err) {
     // 请求层的失败已由 request/error 事件画成错误行;这里只兜住循环之外的异常。
-    if (log.events.at(-1)?.type !== "request/error") ctx.note(c.zhu(`✗ ${(err as Error).message}`));
+    if (ctx.log.events.at(-1)?.type !== "request/error")
+      ctx.note(c.zhu(`✗ ${(err as Error).message}`));
   } finally {
     ctx.hideLoader();
     ctx.updateStatus();
@@ -152,7 +196,7 @@ function helpText(ctx: TuiContext): string {
     row("Ctrl+K", "search everything: commands, models, skills, templates"),
     row("Ctrl+R", "inspector · Ctrl+E context · Ctrl+O results · Ctrl+T thinking"),
     row("PgUp PgDn", "step cursor · Enter fold or unfold · Esc release"),
-    row("Alt+Enter", "queue a message for after the current step · @path attaches a file"),
+    row("Alt+Enter", "queue a follow-up for after the current turn · @path attaches a file"),
     row("?", "every key"),
   ].join("\n");
 }
@@ -431,10 +475,7 @@ async function inspectSection(ctx: TuiContext, section: InspectSection, arg = ""
       }
       const picked = await choose(
         ctx,
-        title(
-          "Raw stream",
-          `pick a request; raw capture is ${ctx.deps.trace ? "on" : "off (--no-trace)"}`,
-        ),
+        title("Raw stream", "pick a request; session recording is always enabled"),
         rows.reverse(),
       );
       if (picked) showRaw(ctx, Number(picked.row.label.slice(1)));
@@ -984,7 +1025,7 @@ export function openLogin(ctx: TuiContext, opts: { intro?: string; provider?: st
 /** 把开关落到 agent:关掉的工具不随请求发出。记一条 session/slot。 */
 export function applyTools(ctx: TuiContext): void {
   const off = ctx.slots.disabledTools;
-  ctx.agent.setTools(ctx.tools.filter((t) => !off.has(t.name)));
+  ctx.agent.setTools(() => ctx.tools.filter((t) => !off.has(t.name)));
   const value = off.size === 0 ? "all" : `off: ${[...off].join(" ")}`;
   ctx.slots.state.tools = value;
   ctx.log.append({ type: "session/slot", at: now(), slot: "tools", value });
@@ -1048,10 +1089,19 @@ async function toolsCommand(ctx: TuiContext, arg: string): Promise<void> {
 
 // ---------- 会话(/session) ----------
 
-async function sessionCommand(ctx: TuiContext, arg: string): Promise<void> {
+async function sessionCommand(ctx: TuiContext, arg: string, selectSource = false): Promise<void> {
   const sw = ctx.deps.switchSession;
   const [sub = "", ...rest] = arg.split(/\s+/);
   const restArg = rest.join(" ").trim();
+  const source = async (history: boolean) => {
+    if (!selectSource) return undefined;
+    const picked = await choose(ctx, title("Session setup", "choose the configuration source"), [
+      ...(history ? [{ label: "history", note: "the combination recorded at this point" }] : []),
+      { label: "current", note: "the combination currently in use" },
+      { label: "defaults", note: "saved defaults" },
+    ]);
+    return picked?.row.label as "history" | "current" | "defaults" | undefined;
+  };
   const need = (): boolean => {
     if (!sw) ctx.note(c.faint("· switching sessions is not available here"));
     return !!sw;
@@ -1069,22 +1119,69 @@ async function sessionCommand(ctx: TuiContext, arg: string): Promise<void> {
   };
   switch (sub) {
     case "": {
-      const picked = await choose(ctx, title("Session", ctx.deps.info.sessionFile), [
-        { label: "new", note: "a fresh log with the same model and config" },
-        {
-          label: "fork",
-          note: "copy this session up to the last message into a new file and continue there",
-        },
-        { label: "resume", note: "pick a recent session file" },
-        { label: "list", note: "recent session files" },
-      ]);
-      if (picked) await sessionCommand(ctx, picked.row.label);
+      const picked = await choose(
+        ctx,
+        title("Session", ctx.deps.info.sessionFile),
+        [
+          { label: "new", note: "a fresh log with the same model and config" },
+          {
+            label: "fork",
+            note: "copy this session up to the last message into a new file and continue there",
+          },
+          { label: "resume", note: "pick a recent session file" },
+          { label: "list", note: "recent session files" },
+          { label: "inputs", note: `${ctx.agent.queued} pending · continue, edit or remove` },
+          { label: "recovery", note: "tool calls with unknown outcomes" },
+        ],
+        "Enter use default setup · d choose setup · Esc back",
+      );
+      if (picked) await sessionCommand(ctx, picked.row.label, picked.key === "d");
       return;
     }
-    case "new":
-      if (!need() || running()) return;
-      sw?.({ kind: "new" });
+    case "recovery": {
+      const calls = unresolvedCalls(ctx.log.events).filter((item) => item.recovery || item.result);
+      const body = [
+        calls.length
+          ? `${calls.length} tool ${calls.length === 1 ? "call has an unknown execution outcome" : "calls have unknown execution outcomes"}.`
+          : "No tool calls with unknown outcomes are recorded.",
+        ...calls.map(
+          ({ call, event, recovery, result }) =>
+            `\n${call.name} · ${call.id} · event #${event}\n${(result ?? recovery)?.content}\n\nArguments\n${JSON.stringify(call.args, null, 2)}`,
+        ),
+      ].join("\n\n");
+      ctx.dialog.open(
+        textReview(
+          "Recovery · results unknown",
+          body,
+          () => ctx.deps.terminal.rows,
+          () => ctx.dialog.close(),
+          () => ctx.tui.requestRender(),
+        ),
+      );
       return;
+    }
+    case "inputs": {
+      ctx.dialog.open(
+        new PendingInputsView(ctx, () => {
+          if (!ctx.agent.queued) return;
+          if (ctx.deps.readOnlyReason || ctx.model.info.providerName === "none") {
+            ctx.note(c.zhu(ctx.deps.readOnlyReason ?? "Add a provider key before continuing."));
+            return;
+          }
+          ctx.dialog.close();
+          if (ctx.agent.running) void ctx.agent.continuePending().catch(() => {});
+          else void runInput(ctx, () => ctx.agent.continuePending());
+        }),
+      );
+      return;
+    }
+    case "new": {
+      if (!need() || running()) return;
+      const selected = await source(false);
+      if (selectSource && !selected) return;
+      sw?.({ kind: "new", ...(selected && { source: selected }) });
+      return;
+    }
     case "fork": {
       // 分叉就是复制前缀到一个新文件;有入口支持就接着切过去,没有(无头、测试)就只留下文件。
       if (running()) return;
@@ -1093,15 +1190,24 @@ async function sessionCommand(ctx: TuiContext, arg: string): Promise<void> {
         ctx.note(c.zhu("Usage: /session fork [N]  (N = how many events to copy)"));
         return;
       }
-      const forked = forkSession(ctx.log.events, n, ctx.deps.sessionsDir ?? SESSIONS_DIR);
+      const selected = await source(true);
+      if (selectSource && !selected) return;
+      const forked = forkSession(
+        ctx.log.events,
+        n,
+        ctx.deps.sessionsDir ?? SESSIONS_DIR,
+        ctx.deps.info.sessionFile,
+      );
       ctx.note(c.soft(`· forked: first ${forked.events} events → ${forked.file}`));
-      sw?.({ kind: "resume", file: forked.file });
+      sw?.({ kind: "resume", file: forked.file, ...(selected && { source: selected }) });
       return;
     }
     case "resume": {
       if (!need() || running()) return;
       if (restArg) {
-        sw?.({ kind: "resume", file: restArg });
+        const selected = await source(true);
+        if (selectSource && !selected) return;
+        sw?.({ kind: "resume", file: restArg, ...(selected && { source: selected }) });
         return;
       }
       const dir = ctx.deps.sessionsDir ?? SESSIONS_DIR;
@@ -1113,8 +1219,18 @@ async function sessionCommand(ctx: TuiContext, arg: string): Promise<void> {
         return;
       }
       const rows = sessionRows(list).map((line, i) => ({ label: list[i]?.file ?? "", note: line }));
-      const picked = await choose(ctx, title("Resume", "recent sessions, newest first"), rows);
-      if (picked) sw?.({ kind: "resume", file: picked.row.label });
+      const picked = await choose(
+        ctx,
+        title("Resume", "recent sessions, newest first"),
+        rows,
+        "Enter restore history setup · d choose setup · Esc back",
+      );
+      if (picked) {
+        selectSource ||= picked.key === "d";
+        const selected = await source(true);
+        if (selectSource && !selected) return;
+        sw?.({ kind: "resume", file: picked.row.label, ...(selected && { source: selected }) });
+      }
       return;
     }
     case "list":
@@ -1122,7 +1238,8 @@ async function sessionCommand(ctx: TuiContext, arg: string): Promise<void> {
       return;
     default:
       ctx.note(
-        c.zhu(`unknown session action ${sub}`) + c.faint("  new · fork [N] · resume [file] · list"),
+        c.zhu(`unknown session action ${sub}`) +
+          c.faint("  new · fork [N] · resume [file] · list · inputs"),
       );
   }
 }
@@ -1283,12 +1400,12 @@ async function manualCompact(ctx: TuiContext, instructions: string): Promise<voi
       targetTokens: ctx.threshold(),
       provider: recordingProvider(log, agent.provider, {
         threshold: ctx.threshold(),
-        onRaw: ctx.onRaw,
       }),
       ...(instructions && { instructions }),
     });
     if (!payload) ctx.note(c.faint("compaction skipped: nothing to do or not enough progress"));
     else log.append({ type: "compaction", at: now(), ...payload });
+    await log.checkpoint();
   } catch (err) {
     ctx.note(c.zhu(`✗ compaction failed: ${(err as Error).message}`));
   } finally {
@@ -1301,7 +1418,14 @@ async function manualCompact(ctx: TuiContext, instructions: string): Promise<voi
 
 /** Ctrl+K:命令面板。条目来自命令表、配置里的模型、技能、模板、每个供应商的登录。 */
 export function openPalette(ctx: TuiContext): void {
-  const items: PaletteItem[] = [];
+  const items: PaletteItem[] = [
+    {
+      kind: "command",
+      label: "Keyboard shortcuts",
+      note: "Read keys without changing your draft",
+      run: () => openShortcutHelp(ctx),
+    },
+  ];
   const fill = (text: string) => {
     ctx.editor.setText(text);
     ctx.tui.requestRender();
@@ -1321,7 +1445,7 @@ export function openPalette(ctx: TuiContext): void {
     items.push({
       kind: "setting",
       label: `settings ${def.key}`,
-      note: def.note,
+      note: `${setupGuide(def).title} · ${def.note}`,
       run: () => void command(ctx, `/settings ${def.key}`),
     });
   }
@@ -1371,26 +1495,22 @@ export function openPalette(ctx: TuiContext): void {
 
 // ---------- 设置(/settings) ----------
 
+function applySetupSlot(ctx: TuiContext, slot: string, value: string): Promise<string> {
+  if (slot === "model")
+    return Promise.resolve(
+      useModel(ctx, value, false)
+        ? ""
+        : "✗ Model switch failed. Check the provider login and model name; details are in the conversation.",
+    );
+  return isSlotName(slot) ? applySlot(ctx, slot, value) : Promise.resolve("");
+}
+
 /** 落一个开关:当场生效(能的话),写回配置,回一句说明。 */
 async function setSetting(ctx: TuiContext, def: SettingDef, value: unknown): Promise<string> {
-  let applied: string | undefined;
-  try {
-    applied = await applySettingNow(ctx, def, value, (slot, v) =>
-      isSlotName(slot) ? applySlot(ctx, slot, v) : Promise.resolve(""),
-    );
-  } catch (err) {
-    return c.zhu((err as Error).message);
-  }
-  const save = ctx.deps.settings?.saveSetting;
-  if (save) save(def.key, value);
-  return describeChange(
-    def,
-    value,
-    applied?.trim()
-      ? applied.replace(new RegExp(`${String.fromCharCode(27)}[[0-9;]*m`, "g"), "")
-      : undefined,
-    save !== undefined,
+  const result = await changeSetting(ctx, def, value, "both", (slot, v) =>
+    applySetupSlot(ctx, slot, v),
   );
+  return result.ok ? result.message : c.zhu(result.message);
 }
 
 /** /settings:无参数开全屏设置表;/settings key 定位到那一行;/settings key value 直接落。 */
@@ -1405,12 +1525,12 @@ async function settingsCommand(ctx: TuiContext, arg: string): Promise<void> {
     ctx.note(c.soft(`· ${await setSetting(ctx, parsed.def, parsed.value)}`));
     return;
   }
-  const view = new SettingsView({
+  const view = new SetupView({
     ctx,
-    set: (def, value) => setSetting(ctx, def, value),
-    fill: (text) => {
-      ctx.editor.setText(text);
-      ctx.tui.requestRender();
+    set: (def, value, scope) =>
+      changeSetting(ctx, def, value, scope, (slot, v) => applySetupSlot(ctx, slot, v)),
+    open: (text) => {
+      void command(ctx, text);
     },
     onClose: () => ctx.dialog.close(),
     onChange: () => ctx.tui.requestRender(),
@@ -1432,7 +1552,7 @@ export async function command(ctx: TuiContext, text: string): Promise<void> {
   const opened = new Promise<void>((resolve) => {
     ctx.dialog.onOpen = resolve;
   });
-  const flow = dispatch(ctx, text);
+  const flow = dispatch(ctx, text).finally(() => ctx.persistSetup());
   flow.catch((err: unknown) => ctx.note(c.zhu(`✗ ${(err as Error).message}`)));
   try {
     await Promise.race([flow, opened]);
@@ -1444,12 +1564,18 @@ export async function command(ctx: TuiContext, text: string): Promise<void> {
 async function dispatch(ctx: TuiContext, text: string): Promise<void> {
   const [cmd = "", ...rest] = text.replace(/^\//, "").split(/\s+/);
   const arg = rest.join(" ").trim();
+  if (
+    ctx.deps.readOnlyReason &&
+    !["help", "quit", "stop", "inspect", "session", "copy", "login"].includes(cmd)
+  ) {
+    ctx.note(c.zhu(ctx.deps.readOnlyReason));
+    return;
+  }
   switch (cmd) {
     case "help":
       ctx.note(helpText(ctx));
       break;
     case "quit":
-      ctx.stop();
       ctx.exit();
       break;
     case "stop":

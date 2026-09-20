@@ -328,6 +328,7 @@ describe("分叉与扩展模块", () => {
         '  tools: [{ name: "hello", description: "d", parameters: { type: "object", properties: {} }, execute: async () => "hi " + ctx.cwd }],',
         '  slots: { execution: "parallel" },',
         "  onEvent: (e) => { globalThis.__seen = (globalThis.__seen ?? 0) + 1; },",
+        "  dispose: () => { globalThis.__released = (globalThis.__released ?? 0) + 1; },",
         "});",
       ].join("\n"),
     );
@@ -337,10 +338,18 @@ describe("分叉与扩展模块", () => {
     expect(ext.slots?.execution).toBe("parallel");
     log.append({ type: "user/message", at: "", text: "x" });
     expect((globalThis as { __seen?: number }).__seen).toBe(1);
+    await ext.dispose();
+    await ext.dispose();
+    log.append({ type: "user/message", at: "", text: "after release" });
+    expect((globalThis as { __seen?: number }).__seen).toBe(1);
+    expect((globalThis as { __released?: number }).__released).toBe(1);
     writeFileSync(join(dir, "bad.mjs"), "export default 42;");
-    await expect(loadExtensions([join(dir, "bad.mjs")], { cwd: "/w", log })).rejects.toThrow(
+    await expect(loadExtensions([file, join(dir, "bad.mjs")], { cwd: "/w", log })).rejects.toThrow(
       /must default-export a function/,
     );
+    log.append({ type: "user/message", at: "", text: "after failed initialization" });
+    expect((globalThis as { __seen?: number }).__seen).toBe(1);
+    expect((globalThis as { __released?: number }).__released).toBe(2);
   });
 });
 

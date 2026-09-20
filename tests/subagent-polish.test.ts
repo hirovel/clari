@@ -1,4 +1,7 @@
 // 子 agent 打磨项:审批继承与收紧、步数上限与续聊、类型注册表、嵌套深度、描述的注册表段。
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
 import type { AgentEvent, ToolCall } from "../src/events.js";
@@ -207,6 +210,62 @@ describe("步数上限与续聊", () => {
     await expect(tool.execute({ task: "x", resume: "sub-9" }, ctx())).rejects.toThrow(
       'Unknown sub-agent id "sub-9"',
     );
+
+    // 重建工具等价于恢复父会话:新子不能把自己的起始事件写进旧子的文件。
+    const dir = mkdtempSync(join(tmpdir(), "clari-child-resume-"));
+    try {
+      const parent = new Log(join(dir, "parent.jsonl"));
+      for (const event of parentLog().events) parent.append(event);
+      const initial = mk({ parent, provider: childProvider(), tools: [echo] });
+      await initial.tool.execute({ task: "original child" }, ctx());
+      const childPath = join(dir, "parent-sub-1.jsonl");
+      const original = readFileSync(childPath, "utf8");
+      let missingResultSeen = 0;
+      let toolCalls = 0;
+      const restored = mk({
+        parent: Log.load(parent.path as string, { attach: true }),
+        tools: [
+          {
+            ...echo,
+            execute: async () => {
+              toolCalls++;
+              return "unexpected replay";
+            },
+          },
+        ],
+        provider: {
+          model: "fake",
+          async complete(messages) {
+            if (messages.some((m) => m.role === "tool" && m.callId === "unfinished")) {
+              expect(
+                messages.find((m) => m.role === "tool" && m.callId === "unfinished"),
+              ).toMatchObject({ content: expect.stringContaining("execution outcome is unknown") });
+              missingResultSeen++;
+            }
+            return { text: "checked", toolCalls: [], stopReason: "end" };
+          },
+        },
+      });
+      expect(await restored.tool.execute({ task: "new child" }, ctx())).toContain("sub-2 finished");
+      expect(readFileSync(childPath, "utf8")).toBe(original);
+      const interrupted = Log.load(childPath, { attach: true });
+      interrupted.append({
+        type: "assistant/message",
+        at: "t",
+        text: "Working",
+        toolCalls: [{ id: "unfinished", name: "echo", args: { text: "side effect unknown" } }],
+        stopReason: "tool",
+      });
+      await restored.tool.execute({ task: "check actual state", resume: "sub-1" }, ctx());
+      await restored.tool.execute({ task: "follow-up", resume: "sub-1" }, ctx());
+      expect(missingResultSeen).toBe(2);
+      expect(toolCalls).toBe(0);
+      const recovered = Log.load(childPath);
+      expect(recovered.events.filter((e) => e.type === "tool/unresolved")).toHaveLength(1);
+      expect(recovered.events.filter((e) => e.type === "session/start")).toHaveLength(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -277,8 +336,13 @@ describe("类型注册表与嵌套", () => {
         return { text: `done ${n}`, toolCalls: [], stopReason: "end" };
       },
     };
-    const { tool } = mk({ provider, tools: [echo], depth: 2 });
-    const out = await tool.execute({ task: "child" }, ctx());
+    const { tool } = mk({
+      provider,
+      tools: [echo, other],
+      depth: 2,
+      types: { limited: { description: "restricted tools", tools: ["echo", "task"] } },
+    });
+    const out = await tool.execute({ task: "child", type: "limited" }, ctx());
     expect(out).toContain("done 3");
     expect(seen[0]).toEqual(["echo", "task"]);
     expect(seen[1]).toEqual(["echo"]);

@@ -2,8 +2,8 @@
 // 再跑一组自动判据(判据与报告在 cli/checkup.ts)。离线、只读:不联网、不改文件、不读凭据;
 // key 从不进会话文件,也不进这里的输出,报告可以原样贴回对话。
 // 用法:pnpm checkup sessions/<文件>.jsonl [--json]
-import { existsSync, readFileSync } from "node:fs";
-import { analyze, reportLines, type TraceInfo } from "../cli/checkup.js";
+import { analyze, reportLines } from "../cli/checkup.js";
+import { readRequestRecording } from "../cli/session-records.js";
 import { loadRegistrySync, resolveCapabilities } from "../cli/registry.js";
 import { type KernelConfig, loadConfig, resolveModel } from "../src/config.js";
 import { type Price, usageTotals } from "../src/cost.js";
@@ -39,24 +39,11 @@ function priceLookup(): (model: string) => Price | undefined {
   };
 }
 
-/** 原始流旁路文件:界面写的,一行一条 {request, line}。 */
-function readTrace(sessionFile: string): TraceInfo | undefined {
-  const path = sessionFile.replace(/\.jsonl$/, ".trace.jsonl");
-  if (!existsSync(path)) return undefined;
-  const lines = readFileSync(path, "utf8").split("\n").filter(Boolean);
-  const requests = new Set<number>();
-  for (const l of lines) {
-    try {
-      requests.add((JSON.parse(l) as { request: number }).request);
-    } catch {
-      // 半行不影响判断
-    }
-  }
-  return { lines: lines.length, requests: [...requests] };
-}
-
 const log = EventLog.load(file);
-const checkup = analyze(log.events, readTrace(file));
+const requests = log.events.flatMap((e, i) => e.type === "request" ? [i] : []);
+const records = requests.map((i) => readRequestRecording(file, log.events, i));
+const evidence = records.some(Boolean) ? { lines: records.reduce((n, r) => n + (r?.attempts?.reduce((count, a) => count + a.response.split(/\r?\n/).length, 0) ?? 0), 0), requests: requests.filter((_, i) => records[i]?.attempts?.length && !records[i]?.error) } : undefined;
+const checkup = analyze(log.events, evidence);
 const totals = usageTotals(log.events, priceLookup());
 
 if (flags.includes("--json")) {

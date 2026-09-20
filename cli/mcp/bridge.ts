@@ -6,14 +6,15 @@ import { join } from "node:path";
 import type { TSchema } from "@sinclair/typebox";
 import { type AgentEvent, now } from "../../src/events.js";
 import type { EventLog } from "../../src/log.js";
-import type { Tool } from "../../src/tools.js";
+import { type Tool, ToolOutcomeUnknownError } from "../../src/tools.js";
 import {
-  McpClient,
+  type McpClient,
   type McpClient as McpClientType,
   type McpContent,
-  type McpToolDef,
+  McpOutcomeUnknownError,
 } from "./client.js";
 import type { McpConfig, ResolvedServer } from "./config.js";
+import { type Connection, McpConnections } from "./connections.js";
 
 export type McpServerStatus = {
   name: string;
@@ -22,16 +23,19 @@ export type McpServerStatus = {
   era?: "modern" | "legacy";
   protocolVersion?: string;
   serverInfo?: { name?: string; version?: string };
+  instructions?: string;
   toolCount: number;
   error?: string;
   ms: number;
   missingVars: string[];
+  connection?: "new" | "reused" | "reconnected";
 };
 
 export type McpBridge = {
   statuses(): McpServerStatus[];
   /** 全部工具名(桥接后的)。 */
   toolNames(): string[];
+  activate(): void;
   close(): Promise<void>;
 };
 
@@ -52,6 +56,7 @@ export type McpEvent =
       error?: string;
       warning?: string;
       ms?: number;
+      connection?: McpServerStatus["connection"];
     }
   | {
       kind: "rpc";
@@ -136,12 +141,6 @@ export function toolAllowed(name: string, enabled?: string[], disabled?: string[
   return true;
 }
 
-function redact(message: unknown): string {
-  return JSON.stringify(message, (k, v) =>
-    k.toLowerCase() === "authorization" && typeof v === "string" ? "<redacted>" : v,
-  );
-}
-
 const EXT: Record<string, string> = {
   "image/png": "png",
   "image/jpeg": "jpg",
@@ -185,203 +184,188 @@ export function contentToText(
 
 export type ConnectOptions = {
   log: EventLog;
-  /** 二进制结果落盘目录;没有就不落盘。 */
   artifactsDir?: string;
-  /** 被桥接的工具追加到这里(原地改,list_changed 时也原地换)。 */
   tools: Tool[];
   mcp?: McpConfig;
   clientVersion?: string;
-  /** 测试注入:自定义客户端工厂。 */
   createClient?: (
     server: ResolvedServer,
     opts: ConstructorParameters<typeof McpClient>[2],
   ) => McpClientType;
+  connections?: McpConnections;
+  reconnect?: string[];
+  /** 候选会话先准备资源,成功后才切换连接事件的归属。 */
+  activate?: boolean;
 };
 
-/** 连接全部服务器。required 的失败抛错;其余失败只记事件。 */
 export async function connectMcpServers(
   servers: ResolvedServer[],
   opts: ConnectOptions,
 ): Promise<McpBridge> {
-  const { log, tools } = opts;
-  const maxChars = opts.mcp?.maxResultChars ?? 100000;
-  const statuses: McpServerStatus[] = [];
-  const clients: McpClient[] = [];
-  const owned = new Map<string, string[]>();
-
-  const bridge = (server: ResolvedServer, client: McpClient, def: McpToolDef): Tool => ({
-    name: bridgedName(server.name, def.name),
-    description: def.description ?? def.title ?? "",
-    parameters: (def.inputSchema ?? { type: "object", properties: {} }) as unknown as TSchema,
-    concurrency: "sequential",
-    async execute(args, ctx) {
-      const r = await client.callTool(def.name, args, {
-        signal: ctx.signal,
-        timeoutMs: server.config.toolTimeoutMs ?? 60000,
-      });
-      let text = contentToText(r.content, {
-        ...(opts.artifactsDir && { dir: opts.artifactsDir }),
-        ...(ctx.callId && { callId: ctx.callId }),
-      });
-      if (r.structuredContent !== undefined && !text.trim())
-        text = JSON.stringify(r.structuredContent, null, 2);
-      if (text.length > maxChars)
-        text = `${text.slice(0, maxChars)}\n[truncated to ${maxChars} chars of ${text.length}]`;
-      if (r.isError) throw new Error(text || "tool reported an error without a message");
-      return text;
-    },
-  });
-
-  const install = (server: ResolvedServer, client: McpClient, defs: McpToolDef[]): string[] => {
-    const before = owned.get(server.name) ?? [];
-    const kept = defs.filter((d) =>
-      toolAllowed(d.name, server.config.enabledTools, server.config.disabledTools),
-    );
-    const fresh = kept.map((d) => bridge(server, client, d));
-    const names = fresh.map((t) => t.name);
-    for (let i = tools.length - 1; i >= 0; i--)
-      if (before.includes(tools[i]?.name ?? "")) tools.splice(i, 1);
-    tools.push(...fresh);
-    owned.set(server.name, names);
-    const added = names.filter((n) => !before.includes(n));
-    const removed = before.filter((n) => !names.includes(n));
-    if (before.length > 0 || added.length > 0)
-      emit(log, { kind: "tools", server: server.name, added, removed, total: names.length });
-    return names;
-  };
-
-  for (const server of servers) {
-    const started = Date.now();
-    const transport: "stdio" | "http" = server.config.url ? "http" : "stdio";
-    const status: McpServerStatus = {
-      name: server.name,
-      phase: "failed",
-      transport,
-      toolCount: 0,
-      ms: 0,
-      missingVars: server.missing,
-    };
-    statuses.push(status);
-    emit(log, {
-      kind: "server",
-      server: server.name,
-      phase: "starting",
-      transport,
-      ...(server.missing.length > 0 && {
-        warning: `unset variables kept as-is: ${server.missing.join(", ")}`,
-      }),
-    });
-    const clientOpts: ConstructorParameters<typeof McpClient>[2] = {
-      ...(opts.clientVersion && { clientVersion: opts.clientVersion }),
-      ...(opts.mcp?.protocolVersions && { protocolVersions: opts.mcp.protocolVersions }),
-      requestTimeoutMs: server.config.toolTimeoutMs ?? 60000,
-      onRpc: (direction, message) => {
-        const body = redact(message);
-        emit(log, {
-          kind: "rpc",
-          server: server.name,
-          direction,
-          ...(message.method && { method: message.method }),
-          ...(message.id !== undefined && { id: message.id }),
-          bytes: Buffer.byteLength(body),
-          body: body.length > maxChars ? `${body.slice(0, maxChars)}…` : body,
-        });
-      },
-      onLog: (line) => emit(log, { kind: "log", server: server.name, line }),
-      onNotification: (method) => {
-        if (method === "notifications/tools/list_changed") {
-          client
-            .listTools()
-            .then((defs) => {
-              const names = install(server, client, defs);
-              status.toolCount = names.length;
-            })
-            .catch((err) =>
-              emit(log, {
-                kind: "log",
-                server: server.name,
-                line: `tools/list after list_changed failed: ${(err as Error).message}`,
-              }),
-            );
-        }
-      },
-      onExit: (code, signal) => {
-        if (status.phase === "ready") {
+  const pool = opts.connections ?? new McpConnections();
+  const bindings: {
+    connection: Connection;
+    server: ResolvedServer;
+    status: McpServerStatus;
+    install: () => void;
+  }[] = [];
+  const failed: McpServerStatus[] = [];
+  const names = new Set<string>();
+  let closed = false;
+  let closing: Promise<void> | undefined;
+  const close = (): Promise<void> =>
+    (closing ??= (async () => {
+      closed = true;
+      for (let i = opts.tools.length - 1; i >= 0; i--)
+        if (names.has(opts.tools[i]?.name ?? "")) opts.tools.splice(i, 1);
+      const results = await Promise.allSettled(
+        bindings.map(async ({ connection, install, status }) => {
+          connection.listeners.delete(install);
+          if (connection.active === opts.log) connection.active = undefined;
           status.phase = "closed";
-          status.error = `process exited (code ${code ?? "null"}${signal ? `, signal ${signal}` : ""})`;
-          emit(log, {
-            kind: "server",
+          await pool.release(connection);
+        }),
+      );
+      const errors = results.flatMap((r) => (r.status === "rejected" ? [r.reason] : []));
+      if (errors.length) throw new AggregateError(errors, "MCP session cleanup failed");
+    })());
+  try {
+    for (const server of servers) {
+      const started = Date.now();
+      let acquired: Awaited<ReturnType<McpConnections["acquire"]>>;
+      try {
+        acquired = await pool.acquire(server, opts, opts.reconnect?.includes(server.name));
+      } catch (error) {
+        if (server.config.required)
+          throw new Error(
+            `mcp server ${server.name} is required but failed: ${(error as Error).message}`,
+          );
+        failed.push({
+          name: server.name,
+          phase: "failed",
+          transport: server.config.url ? "http" : "stdio",
+          toolCount: 0,
+          ms: Date.now() - started,
+          missingVars: server.missing,
+          error: (error as Error).message,
+        });
+        continue;
+      }
+      const { connection, reused } = acquired;
+      const status: McpServerStatus = {
+        ...connection.status,
+        connection: reused
+          ? "reused"
+          : opts.reconnect?.includes(server.name)
+            ? "reconnected"
+            : "new",
+      };
+      let installed: string[] = [];
+      const install = () => {
+        if (closed) return;
+        const before = installed;
+        const definitions = connection.definitions.filter((d) =>
+          toolAllowed(d.name, server.config.enabledTools, server.config.disabledTools),
+        );
+        const fresh: Tool[] = definitions.map((definition) => ({
+          name: bridgedName(server.name, definition.name),
+          description: definition.description ?? definition.title ?? "",
+          parameters: (definition.inputSchema ?? { type: "object" }) as unknown as TSchema,
+          concurrency: "sequential",
+          async execute(args, ctx) {
+            if (closed) throw new Error("This MCP session is closed");
+            const result = await connection
+              .call(
+                opts.log,
+                definition.name,
+                args,
+                ctx.signal,
+                server.config.toolTimeoutMs ?? 60000,
+              )
+              .catch((error: unknown) => {
+                if (error instanceof McpOutcomeUnknownError)
+                  throw new ToolOutcomeUnknownError(error.message, { cause: error });
+                throw error;
+              });
+            ctx.output?.write(JSON.stringify(result));
+            let text = contentToText(result.content, {
+              ...(opts.artifactsDir && { dir: opts.artifactsDir }),
+              ...(ctx.callId && { callId: ctx.callId }),
+            });
+            if (result.structuredContent !== undefined && !text.trim())
+              text = JSON.stringify(result.structuredContent, null, 2);
+            const max = opts.mcp?.maxResultChars ?? 100000;
+            if (text.length > max)
+              text = `${text.slice(0, max)}\n[truncated to ${max} chars of ${text.length}]`;
+            if (result.isError) throw new Error(text || "tool reported an error without a message");
+            return text;
+          },
+        }));
+        for (let i = opts.tools.length - 1; i >= 0; i--)
+          if (before.includes(opts.tools[i]?.name ?? "")) opts.tools.splice(i, 1);
+        for (const name of before) names.delete(name);
+        opts.tools.push(...fresh);
+        installed = fresh.map((t) => t.name);
+        for (const name of installed) names.add(name);
+        status.phase = connection.status.phase;
+        status.toolCount = fresh.length;
+        const added = installed.filter((name) => !before.includes(name));
+        const removed = before.filter((name) => !installed.includes(name));
+        if (added.length || removed.length)
+          emit(opts.log, {
+            kind: "tools",
             server: server.name,
-            phase: "closed",
-            transport,
-            error: status.error,
+            added,
+            removed,
+            total: installed.length,
           });
-        }
-      },
-    };
-    const transportCfg = server.config.url
-      ? { url: server.config.url, ...(server.config.headers && { headers: server.config.headers }) }
-      : {
-          command: server.config.command ?? "",
-          ...(server.config.args && { args: server.config.args }),
-          ...(server.config.env && { env: server.config.env }),
-          ...(server.config.cwd && { cwd: server.config.cwd }),
-        };
-    const client = opts.createClient
-      ? (opts.createClient(server, clientOpts) as McpClient)
-      : new McpClient(server.name, transportCfg, clientOpts);
-    clients.push(client);
-    try {
-      if (!server.config.url && !server.config.command)
-        throw new Error("server needs either command (stdio) or url (http)");
-      const info = await client.connect(server.config.startupTimeoutMs ?? 10000);
-      const defs = await client.listTools();
-      const names = install(server, client, defs);
-      Object.assign(status, {
-        phase: "ready",
-        era: info.era,
-        protocolVersion: info.protocolVersion,
-        ...(info.serverInfo && { serverInfo: info.serverInfo }),
-        toolCount: names.length,
-        ms: Date.now() - started,
-      });
-      emit(log, {
+      };
+      bindings.push({ connection, server, status, install });
+      connection.listeners.add(install);
+      install();
+      emit(opts.log, {
         kind: "server",
         server: server.name,
         phase: "ready",
-        transport,
-        era: info.era,
-        protocolVersion: info.protocolVersion,
-        ...(info.serverInfo && { serverInfo: info.serverInfo }),
-        toolCount: names.length,
-        listed: defs.length,
+        transport: status.transport,
+        ...(status.era && { era: status.era }),
+        ...(status.protocolVersion && { protocolVersion: status.protocolVersion }),
+        ...(status.serverInfo && { serverInfo: status.serverInfo }),
+        ...(status.instructions && { instructions: status.instructions }),
+        toolCount: status.toolCount,
+        listed: connection.definitions.length,
         ms: status.ms,
-        ...(info.instructions && { instructions: info.instructions }),
+        connection: status.connection,
       });
-    } catch (err) {
-      status.error = (err as Error).message;
-      status.ms = Date.now() - started;
-      emit(log, {
-        kind: "server",
-        server: server.name,
-        phase: "failed",
-        transport,
-        error: status.error,
-        ms: status.ms,
-      });
-      await client.close().catch(() => {});
-      if (server.config.required)
-        throw new Error(`mcp server ${server.name} is required but failed: ${status.error}`);
     }
+  } catch (error) {
+    try {
+      await close();
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        `MCP initialization failed: ${(error as Error).message}`,
+      );
+    }
+    throw error;
   }
-
+  const activate = () => {
+    if (closed) throw new Error("This MCP session is closed");
+    for (const { connection } of bindings) connection.active = opts.log;
+  };
+  if (opts.activate !== false) activate();
   return {
-    statuses: () => statuses,
-    toolNames: () => [...owned.values()].flat(),
-    close: async () => {
-      await Promise.all(clients.map((c) => c.close().catch(() => {})));
-      for (const s of statuses) if (s.phase === "ready") s.phase = "closed";
-    },
+    statuses: () => [
+      ...bindings.map(({ connection, status }) => ({
+        ...status,
+        ...(status.phase !== "closed" && { phase: connection.status.phase }),
+        ...(connection.status.error && { error: connection.status.error }),
+      })),
+      ...failed,
+    ],
+    toolNames: () => [...names],
+    activate,
+    close,
   };
 }
 
@@ -393,6 +377,7 @@ export function describeStatus(s: McpServerStatus): string {
     s.transport,
     s.era ?? "",
     s.protocolVersion ?? "",
+    s.connection ?? "",
     `${s.toolCount} tools`,
     `${s.ms}ms`,
   ]

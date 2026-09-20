@@ -1,8 +1,9 @@
 // 账簿:更早的步自动折成一行账目;PgUp/PgDn 移动光标,Enter 展开/折起,Esc 放开;foldSteps 0 从不折;脉搏出现在状态行。
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createTuiApp } from "../cli/tui-app.js";
 import { EventLog } from "../src/log.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
+import { testImage } from "./helpers/image.js";
 import { stripAnsi, VirtualTerminal } from "./helpers/virtual-terminal.js";
 
 function counting(): Provider {
@@ -45,8 +46,56 @@ function open(n: number): RegExp {
 }
 
 describe("账簿折叠", () => {
+  it("长路径工具摘要在终端中显示路径,不会截断链接控制序列", async () => {
+    const log = new EventLog();
+    log.append({ type: "session/start", at: "", model: "m", system: "sys" });
+    for (let i = 0; i < 4; i++) {
+      log.append({
+        type: "request",
+        at: "",
+        model: "m",
+        messages: 1,
+        tools: ["read"],
+        estimatedTokens: 10,
+        reason: "turn",
+      });
+      log.append({
+        type: "assistant/message",
+        at: "",
+        text: "",
+        toolCalls: [
+          { id: `c${i}`, name: "read", args: { path: `C:/workspace/${"a".repeat(100)}.txt` } },
+        ],
+        stopReason: "tool",
+      });
+      log.append({
+        type: "tool/result",
+        at: "",
+        callId: `c${i}`,
+        name: "read",
+        content: "contents",
+        isError: false,
+      });
+    }
+    const { app, term, doc } = boot({ log });
+    try {
+      expect(
+        doc()
+          .split("\n")
+          .find((line) => line.includes("≡ #1")),
+      ).toContain("read C:/workspace/");
+      app.tui.renderNow(true);
+      const screen = (await term.screen()).join("\n");
+      expect(screen).not.toContain("]8;");
+      expect(screen).not.toContain("file://");
+    } finally {
+      app.stop();
+    }
+  });
+
   it("最新三步展开,更早的折成一行账目;用户消息永远不折", async () => {
-    const { app, doc } = boot();
+    const log = new EventLog();
+    const { app, doc } = boot({ log });
     for (let i = 1; i <= 5; i++) await app.submit(`question ${i}`);
     const d = doc();
     expect(d).toContain("≡ #1");
@@ -60,10 +109,17 @@ describe("账簿折叠", () => {
     expect(d).toMatch(/≡ #1 {2}end · ↑100 ↓10 · reply number 1/);
     for (let i = 1; i <= 5; i++) expect(d).toContain(`› question ${i}`);
     app.stop();
+
+    const replay = boot({ log });
+    expect(replay.doc()).toMatch(/≡ #1 {2}end · ↑100 ↓10 · reply number 1/);
+    expect(replay.doc()).toMatch(/≡ #2 {2}end · ↑200 ↓10 · reply number 2/);
+    expect(replay.doc()).toMatch(open(5));
+    replay.app.stop();
   });
 
   it("PgUp/PgDn 移动光标,状态行显示位置;Enter 折起或展开;Esc 放开;手动展开的不再自动折", async () => {
-    const { app, term, doc } = boot();
+    const log = new EventLog();
+    const { app, term, doc } = boot({ log, readClipboard: async () => ({ image: testImage }) });
     for (let i = 1; i <= 4; i++) await app.submit(`q ${i}`);
     term.feed("\x1b[5~"); // PgUp:从最后一步起
     expect(doc()).toContain("step 4/4");
@@ -88,6 +144,17 @@ describe("账簿折叠", () => {
     d = doc();
     expect(d).toMatch(open(1));
     expect(d).toContain("≡ #2");
+    term.feed("\x1b[5~");
+    term.feed("\x1bv");
+    await vi.waitFor(() => expect(doc()).toContain("1 image(s) attached"));
+    term.feed("\r"); // 有图片时 Enter 属于草稿,不能被历史折叠抢走。
+    await vi.waitFor(() =>
+      expect(log.events.filter((e) => e.type === "user/message").at(-1)).toMatchObject({
+        text: "",
+        images: [testImage],
+      }),
+    );
+    await vi.waitFor(() => expect(doc()).toContain("reply number 6"));
     app.stop();
   });
 

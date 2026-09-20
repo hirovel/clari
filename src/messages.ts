@@ -1,4 +1,6 @@
 import type { AgentEvent, ToolCall } from "./events.js";
+import type { ImageInput } from "./images.js";
+import { unresolvedCalls } from "./recovery.js";
 
 /**
  * 内部消息模型:自有类型,不绑任何 provider 的 wire 格式。
@@ -6,7 +8,7 @@ import type { AgentEvent, ToolCall } from "./events.js";
  */
 export type Message =
   | { role: "system"; content: string; edited?: true }
-  | { role: "user"; content: string; edited?: true }
+  | { role: "user"; content: string; edited?: true; images?: ImageInput[] }
   | {
       role: "assistant";
       content: string;
@@ -56,6 +58,7 @@ export function editState(
         for (let i = 0; i < upTo; i++) {
           const x = events[i];
           if (x?.type === "tool/result" && ids.has(x.callId)) dropped.add(i);
+          if (x?.type === "tool/unresolved" && x.callEvent === e.target) dropped.add(i);
         }
       }
     }
@@ -131,6 +134,7 @@ export type Composition = {
  */
 const verbatim = new WeakMap<AgentEvent, Message>();
 function remember(e: AgentEvent, m: Message): Message {
+  Object.freeze(m);
   verbatim.set(e, m);
   return m;
 }
@@ -150,6 +154,34 @@ export function composeContext(
   const messages: Message[] = [];
   const provenance: Provenance[] = [];
   const omitted: Composition["omitted"] = [];
+  const recovered = new Map<number, ReturnType<typeof unresolvedCalls>>();
+  for (const item of unresolvedCalls(events, upTo)) {
+    if (!item.recovery || item.result || ed.dropped.has(item.recovery.event)) continue;
+    const list = recovered.get(item.event) ?? [];
+    list.push(item);
+    recovered.set(item.event, list);
+  }
+  let unknown: ReturnType<typeof unresolvedCalls> = [];
+  const flushUnknown = () => {
+    for (const item of unknown) {
+      if (!item.recovery) continue;
+      const edited = ed.edits.get(item.recovery.event)?.content;
+      messages.push({
+        role: "tool",
+        callId: item.call.id,
+        name: item.call.name,
+        content: edited ?? item.recovery.content,
+        isError: true,
+        // 合成内容改变了前缀,其后的签名/密文不能按未变历史回传。
+        edited: true,
+      });
+      provenance.push({
+        event: item.recovery.event,
+        stages: ["unknown-result", ...(edited !== undefined ? ["edited:content"] : [])],
+      });
+    }
+    unknown = [];
+  };
   let summaryEvent = -1;
   for (let i = 0; i < upTo; i++) {
     const e = events[i];
@@ -159,6 +191,7 @@ export function composeContext(
     }
   }
   const push = (m: Message, event: number, stages: string[]) => {
+    if (m.role !== "tool") flushUnknown();
     messages.push(m);
     provenance.push({ event, stages });
   };
@@ -201,8 +234,18 @@ export function composeContext(
       case "user/message":
         push(
           edit?.content !== undefined
-            ? { role: "user", content: edit.content, edited: true }
-            : (verbatim.get(e) ?? remember(e, { role: "user", content: e.text })),
+            ? {
+                role: "user",
+                content: edit.content,
+                edited: true,
+                ...(e.images?.length && { images: e.images }),
+              }
+            : (verbatim.get(e) ??
+                remember(e, {
+                  role: "user",
+                  content: e.text,
+                  ...(e.images?.length && { images: e.images }),
+                })),
           i,
           editedStages,
         );
@@ -226,6 +269,7 @@ export function composeContext(
           ...editedStages,
           ...(edited && e.opaque !== undefined ? ["opaque-dropped"] : []),
         ]);
+        unknown = recovered.get(i) ?? [];
         break;
       }
       case "tool/result": {
@@ -242,10 +286,16 @@ export function composeContext(
           ...(changed && { edited: true }),
         };
         if (!changed && !hit) remember(e, m);
-        push(m, i, [...(cleared ? ["cleared"] : []), ...editedStages]);
+        push(m, i, [
+          ...(e.outcome === "unknown" ? ["unknown-result"] : []),
+          ...(cleared ? ["cleared"] : []),
+          ...editedStages,
+        ]);
         break;
       }
       case "session/interrupt":
+      case "session/exit":
+      case "tool/unresolved":
       case "session/recovered":
       case "ext/event":
       case "session/model":
@@ -260,6 +310,7 @@ export function composeContext(
         break;
     }
   }
+  flushUnknown();
   return { messages, provenance, omitted };
 }
 
@@ -269,6 +320,7 @@ export function isProjected(e: AgentEvent): boolean {
     e.type === "session/start" ||
     e.type === "user/message" ||
     e.type === "assistant/message" ||
-    e.type === "tool/result"
+    e.type === "tool/result" ||
+    e.type === "tool/unresolved"
   );
 }

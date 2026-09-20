@@ -3,6 +3,7 @@
 // 这里还有子 agent 视图、流式回复与思考的增量绘制、折叠/展开两个显示开关。
 import { type Component, Container, Markdown, Spacer } from "@earendil-works/pi-tui";
 import type { AgentEvent } from "../src/events.js";
+import { imageSummary } from "../src/images.js";
 import { type Composition, composeContext, type Message } from "../src/messages.js";
 import { classifyError, type ErrorKind, hintFor } from "../src/providers/errors.js";
 import type { ChildInfo } from "../src/subagent.js";
@@ -197,7 +198,7 @@ export class ChildView {
   refresh(): void {
     const mode = this.ctx.view.childMode;
     const elapsed = fmtMs((this.finishedAt ?? Date.now()) - this.startedAt);
-    const stats = `step ${this.steps} · ${this.toolsUsed} tool calls · ${elapsed}${this.tokens ? ` · ${fmtTok(this.tokens)} tok` : ""}`;
+    const stats = `${this.steps} steps · ${this.toolsUsed} tool calls · ${elapsed}${this.tokens ? ` · last input ${fmtTok(this.tokens)}` : ""}`;
     const who = `${this.info.id}${this.info.type !== "default" ? ` ${this.info.type}` : ""}${this.info.resumed ? " resumed" : ""}`;
     const status = this.info.state.status;
     const head = this.running
@@ -210,13 +211,10 @@ export class ChildView {
     this.progress.setText(GUIDE + head);
     let body: string;
     if (mode === "progress" || (!this.running && mode !== "all")) {
-      body =
-        GUIDE +
-        c.faint(
-          `sub-session ${this.lines.length} lines · Ctrl+O to expand${this.info.log.path ? ` · ${this.info.log.path}` : ""}`,
-        );
+      body = GUIDE + c.faint(`sub-session ${this.lines.length} lines · Ctrl+O to expand`);
     } else if (mode === "all") {
       body = this.lines.length > 0 ? this.lines.join("\n") : GUIDE + c.faint("(no output yet)");
+      if (this.info.log.path) body += `\n${GUIDE}${c.faint(`Log: ${this.info.log.path}`)}`;
     } else {
       const tail = this.lines.slice(-CHILD_TAIL);
       const more =
@@ -244,7 +242,9 @@ export function attachChild(ctx: TuiContext, child: ChildInfo): void {
 export function childEventLines(e: AgentEvent): string[] {
   switch (e.type) {
     case "user/message":
-      return [`${c.zhu(G.you)} ${c.ink(e.text)}`];
+      return [
+        `${c.zhu(G.you)} ${c.ink([e.text, imageSummary(e.images)].filter(Boolean).join("\n"))}`,
+      ];
     case "assistant/message": {
       const lines: string[] = [];
       if (e.reasoning)
@@ -268,7 +268,7 @@ export function childEventLines(e: AgentEvent): string[] {
       return lines;
     }
     case "tool/result": {
-      const mark = e.isError ? c.zhu(G.err) : c.soft(G.ok);
+      const mark = e.outcome === "unknown" ? c.jin("?") : e.isError ? c.zhu(G.err) : c.soft(G.ok);
       const body = e.content.trim().split("\n");
       const meta = [
         ...(body.length > 1 ? [`${body.length} lines`] : []),
@@ -379,6 +379,7 @@ function renderToolResult(ctx: TuiContext, e: Extract<AgentEvent, { type: "tool/
     name: e.name,
     content: e.content,
     isError: e.isError,
+    ...(e.outcome && { outcome: e.outcome }),
     ...(e.durationMs !== undefined && { durationMs: e.durationMs }),
   };
   const node = new Block(resultText(ctx, rec), { truncate: true });
@@ -392,10 +393,14 @@ function renderToolResult(ctx: TuiContext, e: Extract<AgentEvent, { type: "tool/
  * 请求:开一步,投影出这次实际发出的消息(正常步 = 之前事件的投影;摘要请求 = 记录的 body),
  * 与上一次正常步比;有别的工具看不见的变化才印一行说明。全文永远在检视器。
  */
-function renderRequest(ctx: TuiContext, e: Extract<AgentEvent, { type: "request" }>): void {
+function renderRequest(
+  ctx: TuiContext,
+  e: Extract<AgentEvent, { type: "request" }>,
+  index: number,
+): void {
   const { log, agent, req } = ctx;
   req.count += 1;
-  req.lastIndex = log.events.length - 1;
+  req.lastIndex = index;
   req.providersAt.set(req.lastIndex, agent.provider);
   // 账簿:这次请求是新的一步;更早的步按 foldSteps 折起。脉搏记下这次的占用比。
   beginStep(ctx, req.count, req.lastIndex);
@@ -477,11 +482,11 @@ function renderCompaction(ctx: TuiContext, e: Extract<AgentEvent, { type: "compa
 }
 
 /** 一条事件 → 屏幕。历史回放与实时订阅都走这里。 */
-export function render(ctx: TuiContext, e: AgentEvent): void {
+export function render(ctx: TuiContext, e: AgentEvent, index: number): void {
   ctx.usage.add(e);
   switch (e.type) {
     case "user/message":
-      renderUser(ctx, e.text);
+      renderUser(ctx, [e.text, imageSummary(e.images)].filter(Boolean).join("\n"));
       break;
     case "assistant/message":
       renderAssistant(ctx, e);
@@ -490,7 +495,7 @@ export function render(ctx: TuiContext, e: AgentEvent): void {
       renderToolResult(ctx, e);
       break;
     case "request":
-      renderRequest(ctx, e);
+      renderRequest(ctx, e, index);
       break;
     case "retry":
       ctx.note(
@@ -518,6 +523,24 @@ export function render(ctx: TuiContext, e: AgentEvent): void {
     case "compaction":
       renderCompaction(ctx, e);
       break;
+    case "context/edit":
+      ctx.note(
+        c.soft(`· edited event #${e.target}.${e.field} (${e.value.length} chars)`) +
+          c.faint("\n  original kept · Ctrl+E current context"),
+      );
+      break;
+    case "context/drop": {
+      const target = ctx.log.events[e.target];
+      const results =
+        target?.type === "assistant/message" && target.toolCalls.length > 0
+          ? ` with its ${target.toolCalls.length} tool results`
+          : "";
+      ctx.note(
+        c.soft(`· dropped event #${e.target}${results}`) +
+          c.faint("\n  original kept · Ctrl+E current context"),
+      );
+      break;
+    }
     case "session/model":
       ctx.note(c.soft(`· model switched to ${e.model}`));
       break;
@@ -539,6 +562,20 @@ export function render(ctx: TuiContext, e: AgentEvent): void {
     }
     case "session/interrupt":
     case "session/start":
+      break;
+    case "session/exit":
+      ctx.note(
+        c.jin(
+          `· force exit requested while ${e.phase === "cleanup" ? "releasing resources" : "stopping work"}. External work may continue.`,
+        ),
+      );
+      break;
+    case "tool/unresolved":
+      ctx.note(
+        c.jin(
+          `· ${e.name}: result unknown. Nothing was restarted. /session recovery shows details.`,
+        ),
+      );
       break;
   }
   ctx.updateStatus();

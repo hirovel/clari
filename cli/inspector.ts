@@ -11,11 +11,18 @@ import {
   Key,
   matchesKey,
   truncateToWidth,
+  visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import type { AgentEvent } from "../src/events.js";
 import type { Message } from "../src/messages.js";
 import type { Provider, ToolDef } from "../src/provider.js";
+import {
+  BodyBrowser,
+  inputBlocks,
+  receivedBlocks,
+  recordingErrorBlock,
+} from "./inspector-bodies.js";
 import {
   COMPACTION_SECTIONS,
   type CompactionRecord,
@@ -48,10 +55,10 @@ import {
   collectRequests,
   decisionLines,
   eventLines,
+  exchangeLines,
   listRow,
   messagesFor,
   type RequestRecord,
-  receivedLines,
   SECTIONS,
   type Section,
   sentLines,
@@ -70,6 +77,7 @@ import {
   workbenchLine,
 } from "./inspector-workbench.js";
 import { type SectionState, sectionStates } from "./prompt-sections.js";
+import type { RecordingSection, RequestRecording } from "./session-records.js";
 import { c, G } from "./theme.js";
 
 export * from "./inspector-compactions.js";
@@ -79,7 +87,11 @@ export * from "./inspector-format.js";
 export * from "./inspector-requests.js";
 export * from "./inspector-workbench.js";
 
-export type SessionSource = { name: string; events: readonly AgentEvent[] };
+export type SessionSource = {
+  name: string;
+  events: readonly AgentEvent[];
+  recordingFor?: (index: number, section?: RecordingSection) => RequestRecording | undefined;
+};
 
 export type InspectorDeps = {
   /** 主会话的事件。 */
@@ -93,8 +105,6 @@ export type InspectorDeps = {
   tools: () => ToolDef[];
   /** 可用行数(终端高度)。 */
   rows: () => number;
-  /** 主会话某请求的原始流(开了 trace 才有)。 */
-  rawFor?: (requestIndex: number) => string[] | undefined;
   /** 上一次正常请求发出的消息:工作台据此画缓存线。 */
   lastSent?: () => Message[] | undefined;
   /** 上下文窗口:工作台头行的占比。 */
@@ -147,7 +157,8 @@ export class RequestInspector implements Component {
   private section: Section = 1;
   private compactionSection: CompactionSection = 1;
   private scroll = 0;
-  private folded = false;
+  private bodies = new BodyBrowser();
+  private bodyEvidence = "";
   private lastViewport = 10;
   private sectionSelected = 0;
   /** 运行中按了会改上下文的键:在预览区说一句,不开动作单。 */
@@ -341,6 +352,41 @@ export class RequestInspector implements Component {
     this.busyNote = undefined;
   }
 
+  private prepareBodies(rec: RequestRecord | undefined): boolean {
+    if (!rec) return false;
+    const events = this.events();
+    const saved = this.sessions()[this.sessionIndex]?.recordingFor?.(
+      rec.index,
+      this.section === 3 ? "input" : "received",
+    );
+    const start = events.find((e) => e.type === "session/start");
+    this.bodyEvidence =
+      this.section === 3
+        ? saved?.input
+          ? saved.unsaved
+            ? "captured input · not saved"
+            : "saved adapter input"
+          : "reconstructed from events"
+        : "response and tool evidence";
+    const prior = this.records()[rec.n - 2];
+    const previous =
+      prior && this.section === 3
+        ? (this.sessions()[this.sessionIndex]?.recordingFor?.(prior.index, "input")?.input
+            ?.messages ?? messagesFor(events, prior))
+        : undefined;
+    const blocks =
+      this.section === 3
+        ? inputBlocks(
+            saved?.input?.messages ?? messagesFor(events, rec),
+            start?.type === "session/start" ? start.sections : undefined,
+            previous,
+          )
+        : receivedBlocks(rec, saved);
+    if (this.section === 3 && saved?.error) blocks.unshift(recordingErrorBlock(saved.error));
+    this.bodies.set(`${this.sessionIndex}:${rec.index}:${this.section}`, blocks);
+    return true;
+  }
+
   private busy(): boolean {
     return this.deps.running?.() ?? false;
   }
@@ -392,15 +438,18 @@ export class RequestInspector implements Component {
         if (matchesKey(data, Key.escape) || data === "q") {
           this.mode = "list";
           this.scroll = 0;
+        } else if (
+          (this.section === 3 || this.section === 6) &&
+          this.prepareBodies(recs[this.selected]) &&
+          this.bodies.handleInput(data)
+        ) {
+          // 选择与展开仅属于当前正文视图。
         } else if (scrollKeys()) {
           // 已处理
         } else if (matchesKey(data, Key.left) || data === "h") this.switchSection(-1);
         else if (matchesKey(data, Key.right) || data === "l") this.switchSection(1);
         else if (/^[1-7]$/.test(data)) {
           this.section = Number(data) as Section;
-          this.scroll = 0;
-        } else if (data === "f") {
-          this.folded = !this.folded;
           this.scroll = 0;
         } else if (data === "[" || data === "]") {
           this.selected = clampSel(this.selected + (data === "]" ? 1 : -1), recs.length);
@@ -642,27 +691,47 @@ export class RequestInspector implements Component {
   /** 当前分区的完整内容行(未按视口裁切),测试与预览用。 */
   sectionLines(rec: RequestRecord, section: Section): string[] {
     const events = this.events();
-    const messages = messagesFor(events, rec);
-    const defs = this.deps.tools().filter((d) => rec.request.tools.includes(d.name));
+    const recording = this.sessions()[this.sessionIndex]?.recordingFor?.(
+      rec.index,
+      section === 5 ? "wire" : section === 1 ? "summary" : "input",
+    );
+    const messages = recording?.input?.messages ?? messagesFor(events, rec);
+    const available = new Map(this.deps.tools().map((d) => [d.name, d]));
+    const defs =
+      recording?.input?.tools ?? rec.request.tools.flatMap((name) => available.get(name) ?? []);
+    const missing = rec.request.tools.filter((name) => !defs.some((d) => d.name === name));
+    const previous = this.records()[rec.n - 2];
+    const prior = previous ? messagesFor(events, previous) : undefined;
     switch (section) {
       case 1:
-        return summaryLines(rec, messages);
+        return [
+          ...exchangeLines(events, rec, messages, prior, recording),
+          "",
+          ...summaryLines(rec, messages),
+        ];
       case 2:
         return decisionLines(rec);
       case 3: {
         const start = events.find((e) => e.type === "session/start");
         const sections = start?.type === "session/start" ? start.sections : undefined;
-        return sentLines(messages, this.folded, sections);
+        return [
+          ...(recording?.error ? [c.zhu(recording.error)] : []),
+          ...sentLines(messages, false, sections, prior, Boolean(recording?.input)),
+        ];
       }
       case 4:
-        return toolLines(defs);
+        return toolLines(defs, rec.request.tools, recording);
       case 5:
-        return wireLines(this.providerFor(rec.index), messages, defs, rec.request.effort);
-      case 6:
-        return receivedLines(
-          rec,
-          this.sessionIndex === 0 ? this.deps.rawFor?.(rec.index) : undefined,
+        return wireLines(
+          this.providerFor(rec.index),
+          messages,
+          defs,
+          rec.request.effort,
+          recording,
+          missing,
         );
+      case 6:
+        return []; // 正文浏览器负责此分区。
       case 7: {
         const recs = this.records();
         const next = recs.find((r) => r.index > rec.index);
@@ -691,13 +760,20 @@ export class RequestInspector implements Component {
   }
 
   /** 页签行:[1 name] 2 name 3 name。 */
-  private tabs(names: readonly string[], current: number): string {
-    return names
+  private tabs(
+    names: readonly string[],
+    current: number,
+    width = Number.POSITIVE_INFINITY,
+  ): string {
+    const full = names
       .map((name, i) => {
         const n = i + 1;
         return n === current ? c.bold(c.ink(`[${n} ${name}]`)) : c.soft(` ${n} ${name} `);
       })
       .join(" ");
+    return visibleWidth(full) <= width
+      ? full
+      : `${c.bold(c.ink(`[${current} ${names[current - 1]}]`))} ${c.faint(`· ${current}/${names.length} · ←→ or 1–${names.length}`)}`;
   }
 
   render(width: number): string[] {
@@ -714,8 +790,13 @@ export class RequestInspector implements Component {
     const windowStart = (sel: number, total: number, viewport: number) =>
       Math.max(0, Math.min(sel - Math.floor(viewport / 2), total - viewport));
     const sessionLine = this.sessionLine();
-    const withSession = (head: string[]) =>
-      sessionLine ? [head[0] as string, pad(sessionLine), ...head.slice(1)] : head;
+    const focusLine = pad(c.jin("Inspector · Ctrl+R returns to draft"));
+    const withSession = (head: string[]) => [
+      head[0] as string,
+      focusLine,
+      ...(sessionLine ? [pad(sessionLine)] : []),
+      ...head.slice(1),
+    ];
     const cacheKey = (k: string) => `${this.sessionIndex}:${events.length}:${inner}:${k}`;
 
     if (this.mode === "list") {
@@ -786,7 +867,7 @@ export class RequestInspector implements Component {
       const idx = filteredIndices(events, this.eventFilter);
       const pos = idx.indexOf(this.eventSelected);
       const title = `${c.bold(c.ink(`Event #${this.eventSelected}`))}  ${c.ink(e?.type ?? "")}  ${c.faint(e ? clock(e.at) : "")}  ${c.faint(`(${pos + 1}/${idx.length})`)}   ${this.tabs(EVENT_SECTIONS, this.eventSection)}`;
-      const head = [pad(title), pad(rule)];
+      const head = [pad(title), focusLine, pad(rule)];
       const content = this.cached(
         cacheKey(`event:${this.eventSelected}:${this.eventSection}`),
         () => {
@@ -912,7 +993,7 @@ export class RequestInspector implements Component {
       const sel = Math.min(this.actionSelected, items.length - 1);
       const m = r.message;
       const title = `${c.bold(c.ink(`#${r.event} ${roleLabel(m)}`))}  ${c.soft(`≈${messageTokens(m)} tok${m.edited ? ` · ${c.jin("edited")}` : ""}`)}`;
-      const head = [pad(title), pad(rule)];
+      const head = [pad(title), focusLine, pad(rule)];
       const previewSrc = m.content
         ? m.content.split("\n").slice(0, 6)
         : m.role === "assistant" && m.toolCalls.length > 0
@@ -952,7 +1033,7 @@ export class RequestInspector implements Component {
       }
       const crows = this.composition().rows;
       const title = `${c.bold(c.ink(`#${r.event} ${roleLabel(r.message)}`))}  ${c.faint(`message ${r.i} of ${crows.length}`)}`;
-      const head = [pad(title), pad(rule)];
+      const head = [pad(title), focusLine, pad(rule)];
       const content = this.cached(cacheKey(`message:${r.event}:${r.i}`), () =>
         compositionLines(events, r).flatMap((l) => wrapTextWithAnsi(l, inner)),
       );
@@ -972,7 +1053,7 @@ export class RequestInspector implements Component {
       const metas = start?.type === "session/start" ? (start.sections ?? []) : [];
       const total = metas.reduce((n, s) => n + Math.ceil(s.chars / 4), 0);
       const title = `${c.bold(c.ink("System prompt"))}  ${c.soft(`${metas.length} sections · ≈${total} tok`)}   ${c.faint(states ? "Enter flips a section for this session" : "section texts cannot be recovered from this log: read-only")}`;
-      const head = [pad(title), pad(rule)];
+      const head = [pad(title), focusLine, pad(rule)];
       const list =
         states ?? names.map((name) => ({ name, on: true, text: "", chars: 0, source: undefined }));
       const body: string[] = [];
@@ -1022,7 +1103,7 @@ export class RequestInspector implements Component {
         return this.render(width);
       }
       const title = `${c.bold(c.ink(`Covered #${row.from}–#${row.upTo - 1}`))}  ${c.soft(`${row.count} messages · ≈${fmtTok(row.tok)} tok`)}  ${c.faint(`replaced by the summary #${row.summary}`)}`;
-      const head = [pad(title), pad(rule)];
+      const head = [pad(title), focusLine, pad(rule)];
       const content = this.cached(cacheKey(`covered:${row.from}:${row.upTo}`), () =>
         coveredLines(events, row).flatMap((l) => wrapTextWithAnsi(l, inner)),
       );
@@ -1045,7 +1126,7 @@ export class RequestInspector implements Component {
       }
       const tabs = this.tabs(COMPACTION_SECTIONS, this.compactionSection);
       const title = `${c.bold(c.ink(`Compaction #${rec.n}`))}  ${c.ink(rec.event.strategy ?? "")}  ${c.faint(clock(rec.event.at))}  ${c.faint(`(${this.compactionSelected + 1}/${comps.length})`)}`;
-      const head = [pad(title), pad(tabs), pad(rule)];
+      const head = [pad(title), focusLine, pad(tabs), pad(rule)];
       const content = this.cached(
         cacheKey(`compaction:${rec.index}:${this.compactionSection}`),
         () =>
@@ -1069,17 +1150,44 @@ export class RequestInspector implements Component {
       this.mode = "list";
       return this.render(width);
     }
-    const tabs = this.tabs(SECTIONS, this.section);
+    const tabs = this.tabs(SECTIONS, this.section, inner);
     const title = `${c.bold(c.ink(`Request #${rec.n}`))}  ${c.ink(rec.request.model)}  ${c.faint(clock(rec.request.at))}  ${c.faint(`(${this.selected + 1}/${recs.length})`)}`;
-    const head = [pad(title), pad(tabs), pad(rule)];
-    const content = this.cached(
-      cacheKey(`detail:${rec.index}:${this.section}:${this.folded}`),
-      () => this.sectionLines(rec, this.section).flatMap((l) => wrapTextWithAnsi(l, inner)),
-    );
+    const head = [pad(title), focusLine, pad(tabs), pad(rule)];
+    if ((this.section === 3 || this.section === 6) && this.prepareBodies(rec)) {
+      const body = this.bodies.render(inner);
+      const bodyHead = [
+        ...head.slice(0, -1),
+        pad(c.soft(`${body.position} · ${this.bodyEvidence}`)),
+        pad(
+          c.ink(
+            `Selected · ${body.selected} · ${body.action === "collapse" ? "expanded" : "collapsed"}`,
+          ),
+        ),
+        head.at(-1) as string,
+      ];
+      const viewport = Math.max(1, rows - bodyHead.length - 2);
+      if (
+        body.focus !== undefined &&
+        (body.focus < this.scroll || body.focus >= this.scroll + viewport - 2)
+      )
+        this.scroll = body.focus;
+      const action = `↑↓ block · Enter ${body.action} · PgUp/Dn read`;
+      return this.scrollable(bodyHead, body.lines, action, rows, pad, rule, true);
+    }
+    const build = () =>
+      this.sectionLines(rec, this.section).flatMap((l) => wrapTextWithAnsi(l, inner));
+    // 旁路流在请求完成前持续变化,不一定追加内核事件。仅正在查看的实录分区跳过缓存。
+    const streaming =
+      !rec.response && !rec.error && !rec.compaction && [1, 4, 5, 6].includes(this.section);
+    const content = streaming
+      ? build()
+      : this.cached(cacheKey(`detail:${rec.index}:${this.section}`), build);
     return this.scrollable(
       head,
       content,
-      "↑↓ scroll · PgUp/PgDn · ←→ 1-7 section · [ ] request · f fold · Esc back",
+      width < 90
+        ? "↑↓ read · [ ] request · Esc back"
+        : "↑↓ scroll · PgUp/PgDn · ←→ 1-7 section · [ ] request · Esc back",
       rows,
       pad,
       rule,
@@ -1094,6 +1202,7 @@ export class RequestInspector implements Component {
     rows: number,
     pad: (s: string) => string,
     rule: string,
+    controlsFirst = false,
   ): string[] {
     const viewport = Math.max(1, rows - head.length - 2);
     this.lastViewport = viewport;
@@ -1106,7 +1215,9 @@ export class RequestInspector implements Component {
         ? `${content.length} lines`
         : `lines ${this.scroll + 1}-${Math.min(content.length, this.scroll + viewport)} of ${content.length}`;
     // 位置在前:窄终端截断的是按键提示,不是"第几行"。
-    const foot = [pad(rule), pad(`${c.soft(pos)}  ${c.faint(hint)}`)];
+    const foot = controlsFirst
+      ? [pad(`${c.faint(pos)} · ${c.faint("[ ] request · Esc back")}`), pad(c.soft(hint))]
+      : [pad(rule), pad(`${c.soft(pos)}  ${c.faint(hint)}`)];
     return [...head, ...slice.map(pad), ...foot];
   }
 }

@@ -1,11 +1,14 @@
 // 会话文件:目录、新建、恢复、分叉,以及列表与清理。
 // 会话目录里每个 .jsonl 是一份事件数组,旁边可能有 .trace.jsonl(原始流)与 .mcp/(MCP 图片结果)。
 // 列表只读首尾几个事件;清理按开始时间或保留条数,连同旁车文件一起删,不加 --yes 只打印计划。
-import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { existsSync, lstatSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { KernelConfig } from "../src/config.js";
 import type { AgentEvent } from "../src/events.js";
 import { EventLog } from "../src/log.js";
+import { type ContentRef, Recording } from "../src/recording.js";
+import { recordUnresolvedCalls } from "../src/recovery.js";
 import type { CommonArgs } from "./args.js";
 
 export const SESSIONS_DIR = "sessions";
@@ -33,6 +36,9 @@ function sidecarsOf(file: string): string[] {
   const out: string[] = [];
   if (existsSync(`${base}.trace.jsonl`)) out.push(`${base}.trace.jsonl`);
   if (existsSync(`${base}.mcp`)) out.push(`${base}.mcp`);
+  if (existsSync(`${base}.records`)) out.push(`${base}.records`);
+  if (existsSync(`${base}.inputs.json`)) out.push(`${base}.inputs.json`);
+  if (existsSync(`${base}.inputs.json.tmp`)) out.push(`${base}.inputs.json.tmp`);
   return out;
 }
 
@@ -102,7 +108,15 @@ export function sessionRows(list: SessionSummary[], width = 100): string[] {
     const when = s.startedAt.slice(0, 16).replace("T", " ");
     const tags = [
       ...(s.fork ? ["fork"] : []),
-      ...s.sidecars.map((p) => (p.endsWith(".mcp") ? "mcp" : "trace")),
+      ...s.sidecars.map((p) =>
+        p.endsWith(".records")
+          ? "records"
+          : p.endsWith(".mcp")
+            ? "mcp"
+            : p.includes(".inputs.json")
+              ? "inputs"
+              : "trace",
+      ),
     ];
     const head = `${when}  ${(s.model ?? "?").padEnd(24).slice(0, 24)} ${String(s.requests).padStart(4)} req ${fmtBytes(s.bytes).padStart(9)}${tags.length ? `  [${tags.join(" ")}]` : ""}`;
     const tail = s.lastUser ? `  ${s.lastUser}` : "";
@@ -120,6 +134,14 @@ export type PruneOptions = {
   apply: boolean;
   now?: Date;
 };
+
+function storedBytes(path: string): number {
+  const stat = lstatSync(path);
+  if (stat.isSymbolicLink()) return 0;
+  return stat.isDirectory()
+    ? readdirSync(path).reduce((n, name) => n + storedBytes(join(path, name)), 0)
+    : stat.size;
+}
 
 /** 选出要删的会话并(apply 时)连旁车一起删。两个条件都给时取并集。 */
 export function pruneSessions(
@@ -141,7 +163,7 @@ export function pruneSessions(
     bytes += s.bytes;
     for (const side of s.sidecars) {
       try {
-        bytes += statSync(side).size;
+        bytes += storedBytes(side);
       } catch {}
     }
     if (opts.apply) {
@@ -179,7 +201,10 @@ export function latestSession(dir = SESSIONS_DIR): string | undefined {
 }
 
 export function newSessionPath(dir = SESSIONS_DIR, suffix = ""): string {
-  return join(dir, `${new Date().toISOString().replace(/[:.]/g, "-")}${suffix}.jsonl`);
+  return join(
+    dir,
+    `${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}${suffix}.jsonl`,
+  );
 }
 
 /**
@@ -197,7 +222,9 @@ export function openSession(
   const target = args.resume ?? (args.continue ? latestSession(dir) : undefined);
   if (target) {
     if (!existsSync(target)) throw new Error(`session file not found: ${target}`);
-    return { log: EventLog.load(target, { attach: true }), sessionFile: target, resumed: true };
+    const log = EventLog.load(target, { attach: true });
+    recordUnresolvedCalls(log);
+    return { log, sessionFile: target, resumed: true };
   }
   if (args.continue) throw new Error(`no session to resume in ${dir}/`);
   const sessionFile = newSessionPath(dir);
@@ -212,10 +239,36 @@ export function forkSession(
   events: readonly AgentEvent[],
   upTo: number,
   dir = SESSIONS_DIR,
+  sourceFile?: string,
 ): { file: string; events: number } {
   const n = Math.max(1, Math.min(upTo, events.length));
   const file = newSessionPath(dir, "-fork");
   const log = new EventLog(file);
-  for (const e of events.slice(0, n)) log.append(e);
-  return { file, events: n };
+  const refs = new Map<string, ContentRef>();
+  for (const e of events.slice(0, n)) {
+    if (e.type !== "ext/event" || e.source !== "recording") continue;
+    for (const key of ["input", "sent", "received", "output"]) {
+      const ref = e.payload[key] as ContentRef | undefined;
+      if (ref) refs.set(ref.file, ref);
+    }
+  }
+  if (refs.size && !sourceFile)
+    throw new Error("Forking recorded history requires its source session file");
+  try {
+    if (sourceFile && log.recording) {
+      const source = new Recording(sourceFile);
+      for (const ref of refs.values()) source.copy(ref, log.recording);
+      log.recording.flush();
+      if (log.recording.error) throw new Error(log.recording.error);
+    }
+    for (const e of events.slice(0, n)) log.append(e);
+    log.recording?.flush();
+    if (log.recording?.error) throw new Error(log.recording.error);
+    return { file, events: n };
+  } catch (error) {
+    log.recording?.dispose();
+    rmSync(file, { force: true });
+    if (log.recording) rmSync(log.recording.directory, { recursive: true, force: true });
+    throw error;
+  }
 }

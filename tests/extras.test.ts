@@ -83,9 +83,9 @@ describe("extras:供应商元数据原样保存", () => {
 });
 
 describe("raw 缺省开;/raw N;/tools", () => {
-  it("trace 缺省 true,--no-trace 关;/tools 列出定义;/raw N 打开检视器接收分区并显示原始流", async () => {
-    expect(parseCommonArgs([]).trace).toBe(true);
-    expect(parseCommonArgs(["--no-trace"]).trace).toBe(false);
+  it("旧 trace 开关显式报错;/tools 列出定义;/raw N 打开检视器接收分区且自定义供应商无实录时明确显示缺口", async () => {
+    expect(() => parseCommonArgs(["--trace"])).toThrow("removed");
+    expect(() => parseCommonArgs(["--no-trace"])).toThrow("removed");
 
     const echo = defineTool({
       name: "echo",
@@ -98,9 +98,7 @@ describe("raw 缺省开;/raw N;/tools", () => {
     });
     const provider: Provider = {
       model: "m",
-      async complete(_m, _t, opts): Promise<AssistantTurn> {
-        opts?.onRaw?.('data: {"choices":[{"delta":{"content":"ok"}}]}');
-        opts?.onRaw?.("data: [DONE]");
+      async complete(): Promise<AssistantTurn> {
         return {
           text: "ok",
           toolCalls: [],
@@ -118,7 +116,7 @@ describe("raw 缺省开;/raw N;/tools", () => {
       reserveTokens: 1000,
       info: { model: "m", providerName: "p", sessionFile: "s" },
       systemPrompt: "s",
-      trace: true,
+
       onExit: () => {},
     });
     await app.command("/inspect tools");
@@ -140,9 +138,8 @@ describe("raw 缺省开;/raw N;/tools", () => {
     expect(app.inspector.isOpen()).toBe(true);
     const ins = plain(app.inspector.lines(120).join("\n"));
     expect(ins).toContain("Request #1");
-    expect(ins).toContain('data: {"choices"');
-    expect(ins).toContain("data: [DONE]");
-    expect(ins).toContain("extras");
+    expect(ins).toContain("No HTTP response captured");
+    expect(ins).toContain("Provider metadata");
     app.stop();
   });
 });

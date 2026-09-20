@@ -1,6 +1,6 @@
 // 策略槽在会话中切换:每次切换记 session/slot,下一次 turn 起生效。
 // 审批槽的三种形态与审批提示组件也在这里:它是唯一需要界面参与的槽。
-import { type Component, Key, matchesKey } from "@earendil-works/pi-tui";
+import { type Component, Key, matchesKey, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import {
   type ApprovalConfig,
   type ApproveDecision,
@@ -30,9 +30,6 @@ import { formatArgs, toolCallDetail } from "./tui-format.js";
 
 type ApprovalChoice = { kind: "y" | "n" | "a"; reason?: string };
 
-/** 审批提示里最多显示的 diff 行数。 */
-const APPROVAL_DETAIL_LINES = 20;
-
 /** 审批的四个选项,顺序固定:允许一次、允许并记住(作用域写在文案里)、拒绝并说明、拒绝。 */
 type ApprovalOption = { kind: ApprovalChoice["kind"] | "r"; key: string; label: string };
 
@@ -52,39 +49,67 @@ export class ApprovalPrompt implements Component {
   private mode: "choose" | "reason" = "choose";
   private reason = "";
   private index = 0;
+  private offset = 0;
+  private page = 1;
+  private contentRows = 0;
+  private contentWidth = -1;
+  private content: string[] = [];
 
   constructor(
     private readonly call: ToolCall,
     private readonly why: string,
     private readonly onDecide: (d: ApprovalChoice) => void,
     private readonly onChange: () => void = () => {},
+    private readonly height: () => number = () => 30,
   ) {}
 
-  render(): string[] {
+  render(width = 120): string[] {
+    const inner = Math.max(1, width - 2);
     const head = `${c.zhu("?")} ${c.bold(c.ink(this.call.name))}  ${c.soft(formatArgs(this.call.args))}  ${c.faint(this.why)}`;
-    const detail = toolCallDetail(this.call.name, this.call.args);
-    const all = detail ? detail.split("\n") : [];
-    const shown = all.slice(0, APPROVAL_DETAIL_LINES).map((l) => `  ${l}`);
-    if (all.length > APPROVAL_DETAIL_LINES)
-      shown.push(c.faint(`  … +${all.length - APPROVAL_DETAIL_LINES} lines`));
-    if (this.mode === "reason") {
+    if (this.contentWidth !== inner) {
+      const detail =
+        toolCallDetail(this.call.name, this.call.args, "full") ||
+        JSON.stringify(this.call.args, null, 2);
+      this.content = [head, ...(detail ? detail.split("\n") : [])].flatMap((line) =>
+        wrapTextWithAnsi(line, inner),
+      );
+      this.contentWidth = inner;
+    }
+    const all = this.content;
+    const layout = (actions: string[]) => {
+      const rows = actions.flatMap((line) => wrapTextWithAnsi(line, inner));
+      this.contentRows = all.length;
+      this.page = Math.max(1, this.height() - rows.length - 4);
+      this.offset = Math.min(this.offset, Math.max(0, all.length - this.page));
       return [
-        head,
-        ...shown,
+        ...all.slice(this.offset, this.offset + this.page),
+        ...(all.length > this.page
+          ? [
+              c.faint(
+                `PgUp/PgDn details · ${this.offset + 1}-${Math.min(all.length, this.offset + this.page)}/${all.length}`,
+              ),
+            ]
+          : []),
+        "",
+        ...rows,
+      ].map((line) => ` ${line}`);
+    };
+    if (this.mode === "reason") {
+      return layout([
         `${c.soft("  reason:")} ${c.ink(this.reason)}${c.faint("▏")}`,
         c.faint("  Enter deny with this reason · Esc back"),
-      ];
+      ]);
     }
     const options = OPTIONS(this.call.name);
-    const width = Math.max(...options.map((o) => o.label.length));
+    const labelWidth = Math.max(...options.map((o) => o.label.length));
     const rows = options.map((o, i) => {
       const cursor = i === this.index ? c.ink("▸") : " ";
-      const label = o.label.padEnd(width);
+      const label = o.label.padEnd(labelWidth);
       const text = i === this.index ? c.bold(c.ink(label)) : c.ink(label);
       const key = o.kind === "n" ? `${o.key} · Esc` : o.key;
       return `  ${cursor} ${c.faint(`${i + 1}.`)} ${text}  ${c.faint(key)}`;
     });
-    return [head, ...shown, ...rows, c.faint("  ↑↓ choose · Enter confirm · 1-4 or the letter")];
+    return layout([...rows, c.faint("  ↑↓ choose · Enter confirm · 1-4 or the letter")]);
   }
 
   private choose(o: ApprovalOption): void {
@@ -97,6 +122,17 @@ export class ApprovalPrompt implements Component {
   }
 
   handleInput(data: string): void {
+    if (matchesKey(data, "pageUp") || matchesKey(data, "pageDown")) {
+      this.offset = Math.max(
+        0,
+        Math.min(
+          Math.max(0, this.contentRows - this.page),
+          this.offset + (matchesKey(data, "pageUp") ? -this.page : this.page),
+        ),
+      );
+      this.onChange();
+      return;
+    }
     if (this.mode === "reason") {
       if (matchesKey(data, Key.enter)) {
         const reason = this.reason.trim();
@@ -161,6 +197,7 @@ export function askApproval(
         a.overlay?.hide();
         a.overlay = undefined;
         a.prompt = undefined;
+        ctx.updateStatus();
         ctx.tui.setFocus(ctx.editor);
         if (decision.kind === "a") {
           a.alwaysAllow.add(call.name);
@@ -183,10 +220,11 @@ export function askApproval(
         );
       },
       () => ctx.tui.requestRender(),
+      () => ctx.deps.terminal.rows,
     );
     a.prompt = prompt;
     a.overlay = ctx.tui.showOverlay(prompt, { width: "100%", anchor: "bottom-left" });
-    ctx.tui.requestRender();
+    ctx.updateStatus();
     ctx.notify(`approval needed: ${call.name}`);
   });
 }

@@ -16,8 +16,10 @@ import {
   compactionRow,
   decisionLines,
   listRow,
+  messagesFor,
   sentLines,
 } from "./inspector.js";
+import { readRequestRecording } from "./session-records.js";
 
 const [file, ...flags] = process.argv.slice(2);
 if (!file) {
@@ -53,8 +55,18 @@ if (requestFlag >= 0) {
   }
   console.log(`\n${"─".repeat(72)}\nrequest #${n} decisions:`);
   for (const l of decisionLines(rec)) console.log(l);
-  console.log(`\neverything the model saw when request #${n} was sent:`);
-  for (const l of sentLines(deriveMessages(log.events.slice(0, rec.index)), false, sections)) {
+  const saved = readRequestRecording(file, log.events, rec.index);
+  if (saved?.error) console.error(saved.error);
+  console.log(
+    `\n${saved?.input ? "saved adapter input" : "input reconstructed from events"} for request #${n}:`,
+  );
+  for (const l of sentLines(
+    saved?.input?.messages ?? messagesFor(log.events, rec),
+    false,
+    sections,
+    undefined,
+    !!saved?.input,
+  )) {
     console.log(l);
   }
 }
@@ -117,4 +129,6 @@ for (const p of b.parts) {
       `  ${p.tokens} tok · ${p.count} items · ${p.label}`,
   );
 }
-console.log("\nEverything above comes from the log file alone. There is no other source.\n");
+console.log(
+  "\nRead from this session's events and recorded bodies. No network requests were made.\n",
+);

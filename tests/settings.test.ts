@@ -48,8 +48,10 @@ describe("开关登记表", () => {
       "prompt.memory": true,
       "prompt.skills.list": "none",
       "prompt.skills.load": "tool",
-      trace: false,
+
       "tools.disable": ["bash"],
+      mcpReconnect: ["browser"],
+      saveInputs: false,
       toolPrompts: "rules",
       subagent: true,
       maxSteps: 42,
@@ -61,6 +63,7 @@ describe("开关登记表", () => {
       steering: "turn",
       notify: "off",
       effort: "high",
+      model: "p/m",
     };
     for (const s of SETTINGS) expect(probe, `probe value for ${s.key}`).toHaveProperty(s.key);
     let defaults: Preset = {};
@@ -83,8 +86,10 @@ describe("开关登记表", () => {
       "prompt.memory": args.memory,
       "prompt.skills.list": args.skillsList,
       "prompt.skills.load": args.skillsLoad,
-      trace: args.trace,
+
       "tools.disable": args.disabledTools,
+      mcpReconnect: args.mcpReconnect,
+      saveInputs: args.saveInputs,
       toolPrompts: args.toolPrompts,
       subagent: args.subagent,
       maxSteps: args.maxSteps,
@@ -96,6 +101,7 @@ describe("开关登记表", () => {
       steering: args.steering,
       notify: args.notify,
       effort: args.effort,
+      model: args.model,
     };
     for (const s of SETTINGS) expect(seen[s.key], s.key).toEqual(probe[s.key]);
   });

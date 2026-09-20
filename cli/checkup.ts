@@ -5,9 +5,9 @@
 import type { UsageTotals } from "../src/cost.js";
 import { fmtCost } from "../src/cost.js";
 import type { AgentEvent } from "../src/events.js";
-import { deriveMessages, type Message } from "../src/messages.js";
+import type { Message } from "../src/messages.js";
 import { predictedCache, unchangedPrefix } from "./cards.js";
-import { collectCompactions, collectRequests } from "./inspector.js";
+import { collectCompactions, collectRequests, messagesFor } from "./inspector.js";
 import { fmtMs, fmtTok } from "./inspector-format.js";
 
 export type CheckupRow = {
@@ -15,14 +15,16 @@ export type CheckupRow = {
   reason: string;
   model: string;
   msgs: number;
-  /** 发送前的估算(与自动压缩检查同一口径,不含工具定义)。 */
+  /** 发送前的估算:首次只估消息,后续通常以供应商用量为基准。 */
   est: number;
+  /** 上一请求有用量,且模型、工具名和上下文没有切换;仅用于漂移启发式。 */
+  comparable: boolean;
   /** 供应商实测。 */
   inTok: number | undefined;
   cacheRead: number | undefined;
   cacheWrite: number | undefined;
   out: number | undefined;
-  /** 发送前算的缓存命中上限:未变前缀的估算 token。 */
+  /** 未变消息前缀的粗估,不含工具定义,不是供应商缓存命中的上限。 */
   predicted: number;
   /** 未变前缀的消息条数,与上一次发出的条数。 */
   keep: number;
@@ -57,7 +59,7 @@ export type Checkup = {
   minutes: number;
 };
 
-export type TraceInfo = { lines: number; requests: number[] };
+export type ResponseCoverage = { lines: number; requests: number[] };
 
 const median = (xs: number[]): number => {
   if (xs.length === 0) return 0;
@@ -66,26 +68,41 @@ const median = (xs: number[]): number => {
   return s.length % 2 ? (s[mid] as number) : ((s[mid - 1] as number) + (s[mid] as number)) / 2;
 };
 
-export function analyze(events: readonly AgentEvent[], trace?: TraceInfo): Checkup {
+export function analyze(events: readonly AgentEvent[], recording?: ResponseCoverage): Checkup {
   const records = collectRequests(events);
   const compactions = collectCompactions(events);
   const rows: CheckupRow[] = [];
   let lastSent: Message[] | undefined;
   for (const rec of records) {
-    const messages = deriveMessages(events.slice(0, rec.index));
+    const previous = records[rec.n - 2];
+    const messages = messagesFor(events, rec);
     const keep = unchangedPrefix(lastSent, messages);
     const usage = rec.response?.usage ?? rec.compaction?.usage;
     // 策略自己发的请求(摘要)不是纯投影:请求事件记了差异部分,按它重建。
-    const body = rec.request.body;
-    const rebuilt = body
-      ? deriveMessages(events.slice(0, body.prefixEvents)).length + body.tail.length
-      : messages.length;
+    const rebuilt = messages.length;
     rows.push({
       n: rec.n,
       reason: rec.request.reason,
       model: rec.request.model,
       msgs: rec.request.messages,
       est: rec.request.estimatedTokens,
+      comparable: Boolean(
+        previous?.response?.usage &&
+          previous.request.reason === "turn" &&
+          rec.request.reason === "turn" &&
+          !previous.request.body &&
+          !rec.request.body &&
+          previous.request.model === rec.request.model &&
+          JSON.stringify(previous.request.tools) === JSON.stringify(rec.request.tools) &&
+          !rec.before.some(
+            (e) =>
+              e.type === "compaction" ||
+              e.type === "context/edit" ||
+              e.type === "context/drop" ||
+              e.type === "session/model" ||
+              e.type === "session/slot",
+          ),
+      ),
       inTok: usage?.inputTokens,
       cacheRead: usage?.cacheReadTokens,
       cacheWrite: usage?.cacheWriteTokens,
@@ -132,7 +149,7 @@ export function analyze(events: readonly AgentEvent[], trace?: TraceInfo): Check
     const off = rows.filter((r) => r.rebuilt !== r.msgs);
     add(
       "B",
-      "the log rebuilds the request that was sent",
+      "request message counts match log reconstruction",
       rows.length === 0 ? "skip" : off.length === 0 ? "pass" : "fail",
       rows.length === 0
         ? "no requests"
@@ -142,18 +159,21 @@ export function analyze(events: readonly AgentEvent[], trace?: TraceInfo): Check
     );
   }
 
-  // C 估算口径:实测减估算的差主要是工具定义,同一套工具下应当稳定。
+  // C 仅比较已有用量基准的连续普通请求。差额是启发式信号,不是请求丢失的证明。
   {
     const groups = new Map<string, CheckupRow[]>();
     for (const r of rows) {
-      if (r.inTok === undefined) continue;
-      const g = groups.get(r.tools) ?? [];
+      if (r.inTok === undefined || !r.comparable) continue;
+      const key = JSON.stringify([r.model, r.tools]);
+      const g = groups.get(key) ?? [];
       g.push(r);
-      groups.set(r.tools, g);
+      groups.set(key, g);
     }
     const outliers: string[] = [];
     const notes: string[] = [];
-    for (const [tools, g] of groups) {
+    let judged = 0;
+    for (const g of groups.values()) {
+      const tools = g[0]?.tools ?? "";
       const m = median(g.map((r) => (r.inTok as number) - r.est));
       if (g.length < 3) {
         notes.push(
@@ -162,7 +182,10 @@ export function analyze(events: readonly AgentEvent[], trace?: TraceInfo): Check
         continue;
       }
       const count = tools.split(",").filter(Boolean).length;
-      notes.push(`${g.length} requests with ${count} tools: gap ≈${fmtTok(Math.round(m))}`);
+      judged += g.length;
+      notes.push(
+        `${g.length} comparable requests (${g[0]?.model}, ${count} tool names): gap ≈${fmtTok(Math.round(m))}`,
+      );
       for (const r of g) {
         const gap = (r.inTok as number) - r.est;
         if (Math.abs(gap - m) > Math.max(500, Math.abs(m) * 0.3)) {
@@ -172,36 +195,31 @@ export function analyze(events: readonly AgentEvent[], trace?: TraceInfo): Check
     }
     add(
       "C",
-      "token estimate: measured minus estimated is stable per tool set",
-      groups.size === 0 ? "skip" : outliers.length === 0 ? "pass" : "fail",
-      groups.size === 0
-        ? "no usage reported"
-        : `${notes.join(" · ")}${outliers.length > 0 ? ` · off: ${outliers.join(", ")}` : ""}`,
+      "token estimate drift: heuristic for comparable requests",
+      judged === 0 ? "skip" : outliers.length === 0 ? "pass" : "fail",
+      `${notes.join(" · ") || "no comparable usage"} · ${rows.filter((r) => !r.comparable || r.inTok === undefined).length} excluded (initial, changed, custom or missing usage)${outliers.length > 0 ? ` · off: ${outliers.join(", ")}` : ""}`,
     );
   }
 
-  // D 缓存:供应商报了命中数时,实测不该超过预测上限,且大多数步该拿到预测的一半以上。
+  // D 工具定义和供应商格式也参与缓存;消息粗估不能当缓存上限,只核对用量自身的一致性。
   {
-    const reported = rows.filter((r) => r.cacheRead !== undefined && r.predicted >= 1024);
-    const over = reported.filter((r) => (r.cacheRead as number) > r.predicted * 1.25);
-    const half = reported.filter((r) => (r.cacheRead as number) >= r.predicted * 0.5);
-    const status: Check["status"] =
-      reported.length === 0
-        ? "skip"
-        : over.length > 0
-          ? "fail"
-          : half.length / reported.length >= 0.7
-            ? "pass"
-            : "fail";
+    const reported = rows.filter((r) => r.cacheRead !== undefined && r.inTok !== undefined);
+    const invalid = reported.filter(
+      (r) =>
+        !Number.isFinite(r.cacheRead) ||
+        (r.cacheRead as number) < 0 ||
+        (r.cacheRead as number) > (r.inTok as number),
+    );
+    const hits = reported.filter((r) => (r.cacheRead as number) > 0);
     add(
       "D",
-      "prompt cache: measured hits track the prediction",
-      status,
+      "reported cache reads are within measured input",
+      reported.length === 0 ? "skip" : invalid.length ? "fail" : "pass",
       reported.length === 0
-        ? "the provider reported no cache reads on any request with a prefix over 1k"
-        : over.length > 0
-          ? `requests ${over.map((r) => `#${r.n}`).join(", ")} report more cache than the unchanged prefix can explain`
-          : `${half.length} of ${reported.length} requests hit at least half of the prediction`,
+        ? "no paired cache-read and input usage reported"
+        : invalid.length > 0
+          ? `requests ${invalid.map((r) => `#${r.n}`).join(", ")} have invalid cache-read usage`
+          : `${hits.length} of ${reported.length} requests report cache hits; message-prefix estimates exclude tools and provider formatting, and do not guarantee hits`,
     );
   }
 
@@ -219,7 +237,7 @@ export function analyze(events: readonly AgentEvent[], trace?: TraceInfo): Check
     const bad = pairs.filter((p) => p.after.est >= p.before.est);
     add(
       "E",
-      "compaction actually shrinks the next request",
+      "estimated context decreases after compaction (heuristic)",
       pairs.length === 0 ? "skip" : bad.length === 0 ? "pass" : "fail",
       pairs.length === 0
         ? "no compaction with a request on both sides"
@@ -232,13 +250,13 @@ export function analyze(events: readonly AgentEvent[], trace?: TraceInfo): Check
     );
   }
 
-  // F 失败恢复:每次失败之后要么后来有成功的请求,要么它就是会话末尾。
+  // F 失败之后是否出现过成功请求;不把会话结束当成恢复。
   {
     const failed = rows.filter((r) => r.error);
     const unrecovered = failed.filter((r) => !rows.some((x) => x.n > r.n && x.stop && !x.error));
     add(
       "F",
-      "every failed request either recovered or ended the session",
+      "failed requests have a later successful request",
       failed.length === 0 ? "skip" : unrecovered.length === 0 ? "pass" : "fail",
       failed.length === 0
         ? "no request failed"
@@ -246,7 +264,7 @@ export function analyze(events: readonly AgentEvent[], trace?: TraceInfo): Check
     );
   }
 
-  // G 工具:错误率过高说明描述或参数形状有问题,不是模型的错。
+  // G 只报告错误率信号,不能单凭结果推断是模型、参数还是执行环境导致。
   const toolResults = events.filter(
     (e): e is Extract<AgentEvent, { type: "tool/result" }> => e.type === "tool/result",
   );
@@ -265,7 +283,7 @@ export function analyze(events: readonly AgentEvent[], trace?: TraceInfo): Check
     }
     add(
       "G",
-      "tool calls succeed",
+      "tool-result error rate is at most 30% (heuristic)",
       toolResults.length === 0 ? "skip" : rate <= 0.3 ? "pass" : "fail",
       toolResults.length === 0
         ? "no tool was called"
@@ -278,38 +296,34 @@ export function analyze(events: readonly AgentEvent[], trace?: TraceInfo): Check
     );
   }
 
-  // H 思考回传:全文思考的模型,带工具调用的回复应当每条都带思考,缺了就是回传链断了。
+  // H 没有思考文本不等于丢失。只查明确的全文记录矛盾,接收日志不能证明实际线路回传。
   {
     const assistants = events.filter(
       (e): e is Extract<AgentEvent, { type: "assistant/message" }> =>
         e.type === "assistant/message",
     );
     const full = assistants.filter((e) => e.reasoningKind === "full");
-    const withCalls = assistants.filter((e) => e.toolCalls.length > 0);
-    const carried = withCalls.filter((e) => e.reasoning);
-    const kinds = [...new Set(assistants.map((e) => e.reasoningKind ?? "none"))].join(", ");
+    const missing = full.filter((e) => !e.reasoning && (e.usage?.reasoningTokens ?? 0) > 0);
+    const recorded = full.filter((e) => e.reasoning);
+    const zero = assistants.filter((e) => !e.reasoning && e.usage?.reasoningTokens === 0);
     add(
       "H",
-      "thinking is carried back on tool-calling replies",
-      full.length === 0
-        ? "skip"
-        : withCalls.length === 0 || carried.length === withCalls.length
-          ? "pass"
-          : "fail",
-      full.length === 0
-        ? `no full thinking in this session (kinds: ${kinds})`
-        : `${carried.length} of ${withCalls.length} tool-calling replies carry thinking · kinds: ${kinds}`,
+      "full-thinking records agree with explicit reasoning usage",
+      missing.length ? "fail" : recorded.length + zero.length ? "pass" : "skip",
+      `${recorded.length} full-text replies recorded · ${zero.length} explicitly report zero thinking · ${missing.length} full-thinking replies report tokens but lack text · other replies are unverifiable; outbound thinking is not verified by this log`,
     );
   }
 
-  // I 原始流:开了 trace 就该有旁路文件,且覆盖每一次请求。
+  // I 原始响应:会话附件 是否覆盖每次请求。
+  const traced = new Set(recording?.requests);
+  const covered = records.filter((r) => traced.has(r.index)).length;
   add(
     "I",
     "raw stream recorded",
-    trace === undefined ? "skip" : trace.requests.length >= records.length ? "pass" : "fail",
-    trace === undefined
-      ? "no trace sidecar next to this session; the UI writes one unless trace is off, one-shot mode never does"
-      : `${trace.lines} lines covering ${trace.requests.length} of ${records.length} requests`,
+    recording === undefined ? "skip" : covered === records.length ? "pass" : "fail",
+    recording === undefined
+      ? "no recorded HTTP responses found; older sessions or custom providers may lack captures"
+      : `${recording.lines} lines covering ${covered} of ${records.length} requests`,
   );
 
   const firstAt = events[0]?.at;
@@ -342,7 +356,7 @@ export function reportLines(
     `${eventCount} events · ${c.requests} requests · ${c.compactions} compactions · ${c.toolCalls} tool calls · ${c.models.join(", ")} · ${c.minutes.toFixed(1)} min`,
     `${fmtTok(totals.inputTokens)} in (${fmtTok(totals.cacheReadTokens)} cached${totals.cacheWriteTokens > 0 ? `, ${fmtTok(totals.cacheWriteTokens)} written` : ""}) · ${fmtTok(totals.outputTokens)} out${totals.cost !== undefined ? ` · ${fmtCost(totals.cost)}` : " · no price configured"}`,
     "",
-    "  #  reason          msgs    est  measured    gap   cache (predicted)  out  latency  stop",
+    "  #  reason          msgs    est  measured    gap   cache (prefix ≈)   out  latency  stop",
     `  ${"─".repeat(88)}`,
   ];
   for (const r of c.rows) {
@@ -356,7 +370,11 @@ export function reportLines(
       `  ${pad(r.n, 2)}  ${padEnd(r.reason, 14)} ${pad(r.msgs, 4)} ${pad(fmtTok(r.est), 6)} ${pad(r.inTok === undefined ? "—" : fmtTok(r.inTok), 9)} ${pad(gap, 6)} ${pad(cache, 19)} ${pad(r.out === undefined ? "—" : fmtTok(r.out), 4)} ${pad(fmtMs(r.latencyMs), 8)}  ${r.error ? `✗ ${r.error}` : (r.stop ?? "—")}${r.retries > 0 ? `  retries ${r.retries}` : ""}${prefix}`,
     );
   }
-  out.push("");
+  out.push(
+    "",
+    "  est: initial message estimate or usage-based estimate; prefix ≈ excludes tools and provider formatting.",
+    "",
+  );
   for (const k of c.checks) {
     out.push(
       `  ${k.status === "pass" ? "PASS" : k.status === "fail" ? "FAIL" : "····"}  ${k.id}  ${k.title}`,
@@ -366,7 +384,7 @@ export function reportLines(
   const failed = c.checks.filter((k) => k.status === "fail").length;
   out.push(
     "",
-    `${c.checks.filter((k) => k.status === "pass").length} passed · ${failed} failed · ${c.checks.filter((k) => k.status === "skip").length} not applicable`,
+    `${c.checks.filter((k) => k.status === "pass").length} passed · ${failed} failed · ${c.checks.filter((k) => k.status === "skip").length} skipped (not applicable or insufficient evidence)`,
     "",
   );
   return out;

@@ -1,11 +1,19 @@
 // 内核与工具的低分支(重构块 7):配置文件的每种坏形态与写回、模型解析的猜测与报错、key 的三条路;
 // bash 的 shell 不可用 / 打断 / 非零退出 / 截断落盘;grep 的 rg 路径与 JS 回退、glob 上限;参数解析的每个开关。
 
-import { spawnSync } from "node:child_process";
+import * as childProcess from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("node:child_process", async (original) => ({
+  ...(await original<typeof import("node:child_process")>()),
+  spawnSync: vi.fn((...args: Parameters<typeof childProcess.spawnSync>) =>
+    require("node:child_process").spawnSync(...args),
+  ),
+}));
+
 import { applyPreset, parseCommonArgs, resolveApproval } from "../cli/args.js";
 import { createBashTool } from "../cli/tools/bash.js";
 import { createGrepTool, globTool, grepFiles, walkFiles } from "../cli/tools/search.js";
@@ -239,14 +247,25 @@ describe("搜索工具的回退与上限", () => {
     expect(all.scanned).toBe(2);
   });
 
-  const hasRg = spawnSync("rg", ["--version"]).status === 0;
-
-  it.skipIf(!hasRg)(
-    "grep 工具走 rg:路径前缀、无匹配、ignoreCase;非法正则落到 JS 回退并报错",
-    async () => {
-      tmp = mkdtempSync(join(tmpdir(), "clari-search-"));
-      mkdirSync(join(tmp, "src"));
-      writeFileSync(join(tmp, "src", "a.ts"), "Needle here\nneedle again");
+  it("grep 适配 rg 输出:路径前缀、无匹配与非法正则回退;不依赖宿主安装", async () => {
+    tmp = mkdtempSync(join(tmpdir(), "clari-search-"));
+    mkdirSync(join(tmp, "src"));
+    writeFileSync(join(tmp, "src", "a.ts"), "Needle here\nneedle again");
+    const result = (stdout: string, status: number) => ({
+      pid: 0,
+      output: [],
+      stdout,
+      stderr: "",
+      status,
+      signal: null,
+    });
+    const spawn = vi
+      .mocked(childProcess.spawnSync)
+      .mockReturnValueOnce(result("src/a.ts:1:Needle here\nsrc/a.ts:2:needle again\n", 0))
+      .mockReturnValueOnce(result("a.ts:2:needle again\n", 0))
+      .mockReturnValueOnce(result("", 1))
+      .mockReturnValueOnce(result("", 2));
+    try {
       const rg = createGrepTool({ useRipgrep: true });
       const out = await rg.execute({ pattern: "needle", path: tmp, ignoreCase: true }, ctx());
       expect(out).toContain("a.ts:1:Needle here");
@@ -255,8 +274,12 @@ describe("搜索工具的回退与上限", () => {
       expect(inFile).toContain(":2:needle again");
       expect(await rg.execute({ pattern: "zzz", path: tmp }, ctx())).toBe("(no matches)");
       await expect(rg.execute({ pattern: "(", path: tmp }, ctx())).rejects.toThrow();
-    },
-  );
+    } finally {
+      spawn
+        .mockReset()
+        .mockImplementation((...args) => require("node:child_process").spawnSync(...args));
+    }
+  });
 
   it("grep 工具 JS 回退:ignoreCase、根是文件时的前缀、结果上限、非法正则报错、rg 不在时自动回退", async () => {
     tmp = mkdtempSync(join(tmpdir(), "clari-search-"));
@@ -294,7 +317,6 @@ describe("参数解析的每个开关", () => {
       "--append-system-prompt",
       "more.md",
       "--subagent",
-      "--no-trace",
       "--fold",
       "--steering",
       "turn",
@@ -326,8 +348,7 @@ describe("参数解析的每个开关", () => {
       appendSystemPromptFile: "more.md",
       subagent: true,
       subagentExplicit: true,
-      trace: false,
-      traceExplicit: true,
+
       fold: true,
       foldExplicit: true,
       steering: "turn",

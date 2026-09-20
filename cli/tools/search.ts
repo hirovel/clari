@@ -123,7 +123,7 @@ export function createGrepTool(opts: { useRipgrep?: boolean; maxResults?: number
       ignoreCase: Type.Optional(Type.Boolean({ description: "case-insensitive" })),
     }),
     concurrency: "parallel",
-    async execute(args) {
+    async execute(args, ctx) {
       const root = resolve(args.path ?? ".");
       const rootIsFile = statSync(root).isFile();
       // 给模型的路径 = 用户给的 path + 相对于它的文件路径,原样可再喂给 read;path 缺省或为 . 时不加前缀。
@@ -168,6 +168,7 @@ export function createGrepTool(opts: { useRipgrep?: boolean; maxResults?: number
                 const rel = rootIsFile ? given : file.split(sep).join("/").replace(/^\.\//, "");
                 return withBase(rel) + l.slice(file.length);
               });
+            ctx.output?.write(rg.stdout);
             const shown = lines.slice(0, maxResults);
             const tail =
               lines.length > maxResults
@@ -187,6 +188,7 @@ export function createGrepTool(opts: { useRipgrep?: boolean; maxResults?: number
       const body = r.matches
         .map((m) => `${rootIsFile ? given : withBase(m.file)}:${m.line}:${m.text}`)
         .join("\n");
+      ctx.output?.write(body);
       return (
         capLine(body) +
         (r.truncated

@@ -1,10 +1,10 @@
 // 审批策略:规则裁决、cwd 之外、拒绝附理由;日志半行恢复;统一入口。
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { ftruncateSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createTuiApp } from "../cli/tui-app.js";
 import { Agent } from "../src/agent.js";
 import { DEFAULT_APPROVAL, decide, describeApproval, policyApprove } from "../src/approval.js";
@@ -12,6 +12,11 @@ import { EventLog } from "../src/log.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
 import { defineTool } from "../src/tools.js";
 import { VirtualTerminal } from "./helpers/virtual-terminal.js";
+
+vi.mock("node:fs", async (original) => {
+  const fs = await original<typeof import("node:fs")>();
+  return { ...fs, ftruncateSync: vi.fn(fs.ftruncateSync) };
+});
 
 const ansi = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
 const plain = (s: string) => s.replace(ansi, "");
@@ -106,7 +111,13 @@ describe("界面:策略提示、r 附理由、/approve 规则", () => {
       async complete(): Promise<AssistantTurn> {
         n++;
         return n % 2 === 1
-          ? { text: "", toolCalls: [call("echo", { text: "hi" })], stopReason: "tool" }
+          ? {
+              text: "",
+              toolCalls: [
+                call("echo", { text: `review-start ${"long argument ".repeat(100)}review-end` }),
+              ],
+              stopReason: "tool",
+            }
           : { text: "ok", toolCalls: [], stopReason: "end" };
       },
     };
@@ -119,8 +130,9 @@ describe("界面:策略提示、r 附理由、/approve 规则", () => {
       },
     });
     const log = new EventLog();
+    const term = new VirtualTerminal(60, 24);
     const app = createTuiApp({
-      terminal: new VirtualTerminal(120, 30),
+      terminal: term,
       log,
       provider,
       tools: [echo],
@@ -138,6 +150,19 @@ describe("界面:策略提示、r 附理由、/approve 规则", () => {
     expect(lines).toContain("1. Allow once");
     expect(lines).toContain("no rule for echo");
     expect(lines).toContain("3. Deny and tell the model why");
+    expect(plain(app.lines(60).join("\n"))).toContain("Waiting for approval");
+    term.feed("\x12");
+    term.feed("\x05");
+    expect(app.inspector.isOpen()).toBe(false);
+    app.tui.renderNow(true);
+    expect((await term.screen()).join("\n")).toContain("Enter confirm");
+    term.feed("\x1b[6~");
+    term.feed("\x1b[6~");
+    app.tui.renderNow(true);
+    const reviewed = await term.screen();
+    expect(reviewed.length).toBeLessThanOrEqual(24);
+    expect(reviewed.join("\n")).toContain("review-end");
+    expect(reviewed.join("\n")).toContain("Enter confirm");
     app.approvalInput("r");
     for (const ch of "not now") app.approvalInput(ch);
     lines = plain(app.approvalLines().join("\n"));
@@ -164,22 +189,61 @@ describe("界面:策略提示、r 附理由、/approve 规则", () => {
 });
 
 describe("日志半行恢复", () => {
-  it("末尾半行截掉并记 session/recovered,文件被修正;中间坏行仍报错", () => {
+  it("恢复保留完整末行并隔开新事件,半行明确恢复;中间坏行仍报错", () => {
     const dir = mkdtempSync(join(tmpdir(), "clari-log-"));
     const file = join(dir, "s.jsonl");
     const good = JSON.stringify({ type: "session/start", at: "t", model: "m", system: "s" });
-    const half = '{"type":"user/message","at":"t","te';
-    writeFileSync(file, `${good}\n${half}`);
-    const log = EventLog.load(file, { attach: true });
-    expect(log.events.map((e) => e.type)).toEqual(["session/start", "session/recovered"]);
-    expect(log.events[1]).toMatchObject({ droppedBytes: Buffer.byteLength(half), preview: half });
-    const rewritten = readFileSync(file, "utf8").split("\n").filter(Boolean);
-    expect(rewritten).toHaveLength(2);
-    expect(JSON.parse(rewritten[1] as string).type).toBe("session/recovered");
+    const attached: EventLog[] = [];
+    try {
+      const complete = join(dir, "complete.jsonl");
+      for (const ending of ["", "\r\n"]) {
+        const original = good + ending;
+        writeFileSync(complete, original);
+        const before = EventLog.load(complete).events;
+        expect(readFileSync(complete, "utf8")).toBe(original);
+        const resumed = EventLog.load(complete, { attach: true });
+        attached.push(resumed);
+        resumed.append({ type: "user/message", at: "next", text: "继续工作" });
+        resumed.recording?.flush();
+        expect(EventLog.load(complete).events).toEqual([
+          ...before,
+          { type: "user/message", at: "next", text: "继续工作" },
+        ]);
+        expect(readFileSync(complete, "utf8").startsWith(original)).toBe(true);
+        resumed.recording?.dispose();
+      }
+      const half = '{"type":"user/message","at":"t","te';
+      writeFileSync(file, `${good}\n${half}`);
+      vi.mocked(ftruncateSync).mockImplementationOnce(() => {
+        throw new Error("repair disk unavailable");
+      });
+      const log = EventLog.load(file, { attach: true });
+      attached.push(log);
+      expect(log.events.map((e) => e.type)).toEqual(["session/start", "session/recovered"]);
+      expect(log.events[1]).toMatchObject({ droppedBytes: Buffer.byteLength(half), preview: half });
+      expect(log.recording?.error).toBe("repair disk unavailable");
+      expect(readFileSync(file, "utf8")).toBe(`${good}\n${half}`);
+      log.append({ type: "user/message", at: "next", text: "continue during repair" });
+      expect(log.events).toHaveLength(3);
+      log.recording?.flush();
+      expect(log.recording?.error).toBeUndefined();
+      expect(EventLog.load(file).events).toEqual(log.events);
+      expect(readFileSync(file, "utf8").startsWith(`${good}\n`)).toBe(true);
+      const rewritten = readFileSync(file, "utf8").split("\n").filter(Boolean);
+      expect(rewritten).toHaveLength(3);
+      expect(JSON.parse(rewritten[1] as string).type).toBe("session/recovered");
 
-    const bad = join(dir, "bad.jsonl");
-    writeFileSync(bad, `{"broken\n${good}\n`);
-    expect(() => EventLog.load(bad)).toThrow(/corrupt event log .*:1/);
+      const bad = join(dir, "bad.jsonl");
+      writeFileSync(bad, `{"broken\n${good}\n`);
+      expect(() => EventLog.load(bad)).toThrow(/corrupt event log .*:1/);
+      // 合法 JSON 但不是事件不能当成崩溃尾行删除。
+      writeFileSync(bad, `${good}\nnull`);
+      expect(() => EventLog.load(bad, { attach: true })).toThrow("Invalid event record");
+      expect(readFileSync(bad, "utf8")).toBe(`${good}\nnull`);
+    } finally {
+      for (const log of attached) log.recording?.dispose();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

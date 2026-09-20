@@ -163,5 +163,14 @@ describe("界面命令", () => {
     expect(doc).toContain("edit #2.reasoning");
     expect(doc).toContain("drop #2");
     a.stop();
+
+    const replay = app(log);
+    const restored = text(replay);
+    expect(restored).toContain("· edited event #2.reasoning");
+    expect(restored).toContain("· dropped event #2 with its 1 tool results");
+    expect(restored).toContain("original kept · Ctrl+E current context");
+    expect(doc.match(/· edited event #2.reasoning/g)).toHaveLength(1);
+    expect(doc.match(/· dropped event #2 with its 1 tool results/g)).toHaveLength(1);
+    replay.stop();
   });
 });

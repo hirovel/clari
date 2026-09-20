@@ -1,7 +1,7 @@
 // MCP 客户端与桥接:双时代探测、分页、命名、白黑名单、isError 与协议错误、图片落盘、stderr 事件、
 // list_changed 刷新、启动失败与 required、HTTP 传输、审批规则、配置合并与变量展开。
-import { existsSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
-import { createServer, type Server } from "node:http";
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { createServer, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -14,14 +14,23 @@ import {
   mcpEvent,
   toolAllowed,
 } from "../cli/mcp/bridge.js";
+import type { JsonRpcMessage } from "../cli/mcp/client.js";
 import { expandVars, loadMcpServers, type ResolvedServer } from "../cli/mcp/config.js";
+import { McpConnections } from "../cli/mcp/connections.js";
+import { Agent } from "../src/agent.js";
 import { decide } from "../src/approval.js";
 import type { AgentEvent } from "../src/events.js";
+import { priorFailures } from "../src/facts.js";
 import { EventLog } from "../src/log.js";
+import { recordUnresolvedCalls, unresolvedCalls } from "../src/recovery.js";
 import type { Tool } from "../src/tools.js";
 import { createLogic } from "./helpers/mcp-server.mjs";
 
 const helper = resolve("tests/helpers/mcp-server.mjs");
+const tempDirs: string[] = [];
+afterAll(() => {
+  for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
+});
 const ctx = { signal: new AbortController().signal, callId: "call_1" } as never;
 const mcpEvents = (events: readonly AgentEvent[]): McpEvent[] =>
   events.flatMap((e) => {
@@ -49,9 +58,11 @@ describe("stdio · modern", () => {
     const log = new EventLog();
     const tools: Tool[] = [];
     const dir = mkdtempSync(join(tmpdir(), "clari-mcp-"));
+    tempDirs.push(dir);
+    const connections = new McpConnections();
     const bridge = await connectMcpServers(
       [stdioServer("fake", ["--era", "modern", "--tools", "3", "--page", "2", "--stderr-noise"])],
-      { log, tools, artifactsDir: dir },
+      { log, tools, artifactsDir: dir, connections },
     );
     const [s] = bridge.statuses();
     expect(s).toMatchObject({
@@ -88,8 +99,56 @@ describe("stdio · modern", () => {
     expect(img).toContain("here is a picture");
     expect(img).toContain("saved to");
     expect(readdirSync(dir)).toEqual(["call_1-1.png"]);
+    const nextLog = new EventLog();
+    const nextTools: Tool[] = [];
+    const servers = [
+      stdioServer("fake", ["--era", "modern", "--tools", "3", "--page", "2", "--stderr-noise"]),
+    ];
+    const next = await connectMcpServers(servers, {
+      log: nextLog,
+      tools: nextTools,
+      artifactsDir: join(dir, "next"),
+      connections,
+      activate: false,
+    });
+    expect(next.statuses()[0]?.connection).toBe("reused");
+    await expect(
+      connectMcpServers(
+        [
+          ...servers,
+          {
+            name: "broken",
+            config: { command: "clari-no-such-command-xyz", required: true },
+            missing: [],
+            source: "test",
+          },
+        ],
+        { log: new EventLog(), tools: [], connections, activate: false },
+      ),
+    ).rejects.toThrow(/required but failed/);
+    expect(await find(tools, "mcp__fake__echo").execute({ text: "still alive" }, ctx)).toBe(
+      "echo: still alive",
+    );
+    next.activate();
     await bridge.close();
     expect(bridge.statuses()[0]?.phase).toBe("closed");
+    const oldCount = log.events.length;
+    expect(await find(nextTools, "mcp__fake__image").execute({}, ctx)).toContain(join(dir, "next"));
+    expect(log.events).toHaveLength(oldCount);
+    expect(readdirSync(join(dir, "next"))).toEqual(["call_1-1.png"]);
+    const separate = await connectMcpServers(servers, {
+      log: new EventLog(),
+      tools: [],
+      connections,
+      reconnect: ["fake"],
+    });
+    expect(separate.statuses()[0]?.connection).toBe("reconnected");
+    await separate.close();
+    expect(await find(nextTools, "mcp__fake__echo").execute({ text: "independent" }, ctx)).toBe(
+      "echo: independent",
+    );
+    await next.close();
+    await connections.close();
   });
 
   it("legacy:initialize 握手;第一次调用后 list_changed → 工具表原地刷新并记 mcp/tools", async () => {
@@ -99,6 +158,18 @@ describe("stdio · modern", () => {
       [stdioServer("old", ["--era", "legacy", "--tools", "1", "--list-changed"])],
       { log, tools },
     );
+    let sent: string[] = [];
+    const agent = new Agent({
+      log,
+      tools: () => tools,
+      provider: {
+        model: "fake",
+        async complete(_messages, definitions) {
+          sent = definitions.map((definition) => definition.name);
+          return { text: "done", toolCalls: [], stopReason: "end" };
+        },
+      },
+    });
     expect(bridge.statuses()[0]).toMatchObject({
       phase: "ready",
       era: "legacy",
@@ -115,6 +186,8 @@ describe("stdio · modern", () => {
       (m) => m.kind === "tools" && m.added.includes("mcp__old__t_new"),
     );
     expect(change).toMatchObject({ removed: [], total: 6 });
+    await agent.prompt("Use the refreshed tool catalog.");
+    expect(sent).toContain("mcp__old__t_new");
     await bridge.close();
   });
 
@@ -182,6 +255,7 @@ describe("Streamable HTTP · modern", () => {
   let server: Server;
   let url = "";
   const seen: Record<string, string>[] = [];
+  let intercept: ((message: JsonRpcMessage, res: ServerResponse) => boolean) | undefined;
   beforeAll(async () => {
     const handle = createLogic({ era: "modern", tools: 1 });
     server = createServer((req, res) => {
@@ -192,6 +266,7 @@ describe("Streamable HTTP · modern", () => {
       req.on("end", () => {
         seen.push(req.headers as Record<string, string>);
         const msg = JSON.parse(body);
+        if (intercept?.(msg, res)) return;
         const out = handle(msg);
         if (msg.id === undefined) {
           res.writeHead(202);
@@ -235,6 +310,14 @@ describe("Streamable HTTP · modern", () => {
     expect(await find(tools, "mcp__web__echo").execute({ text: "via http" }, ctx)).toBe(
       "echo: via http",
     );
+    const callsBeforeAbort = seen.filter((h) => h["mcp-method"] === "tools/call").length;
+    await expect(
+      find(tools, "mcp__web__echo").execute(
+        { text: "must not be sent" },
+        { signal: AbortSignal.abort() },
+      ),
+    ).rejects.toThrow(/aborted before sending; not executed/);
+    expect(seen.filter((h) => h["mcp-method"] === "tools/call")).toHaveLength(callsBeforeAbort);
     const call = seen.find((h) => h["mcp-method"] === "tools/call");
     expect(call).toMatchObject({
       "mcp-protocol-version": "2026-07-28",
@@ -243,6 +326,107 @@ describe("Streamable HTTP · modern", () => {
     });
     expect(JSON.stringify(log.events)).not.toContain("secret-token");
     await bridge.close();
+  });
+
+  it("远端执行后超时、取消或断线:结果未知回喂,Esc 停止;释放 HTTP 等待且迟到结果不串会话", async () => {
+    const connections = new McpConnections();
+    const servers: ResolvedServer[] = [
+      { name: "uncertain", config: { url, toolTimeoutMs: 500 }, missing: [], source: "test" },
+    ];
+    try {
+      for (const mode of ["timeout", "cancel", "disconnect"] as const) {
+        let received!: () => void;
+        let disconnected!: () => void;
+        const arrived = new Promise<void>((resolve) => {
+          received = resolve;
+        });
+        const closed = new Promise<void>((resolve) => {
+          disconnected = resolve;
+        });
+        let replyLate = () => {};
+        let executions = 0;
+        intercept = (message, res) => {
+          if (
+            message.method !== "tools/call" ||
+            (message.params as { arguments: { text: string } }).arguments.text !== mode
+          )
+            return false;
+          executions++;
+          res.once("close", disconnected);
+          replyLate = () =>
+            res.end(
+              JSON.stringify({
+                jsonrpc: "2.0",
+                id: message.id,
+                result: { content: [{ type: "text", text: "late remote completion" }] },
+              }),
+            );
+          received();
+          if (mode === "disconnect") res.destroy();
+          return true;
+        };
+        const log = new EventLog();
+        const tools: Tool[] = [];
+        const bridge = await connectMcpServers(servers, { log, tools, connections });
+        let requests = 0;
+        const call = { id: mode, name: "mcp__uncertain__echo", args: { text: mode } };
+        const agent = new Agent({
+          log,
+          tools,
+          provider: {
+            model: "fake",
+            async complete(messages) {
+              if (requests++ === 0) return { text: "", toolCalls: [call], stopReason: "tool" };
+              const response = messages.find((m) => m.role === "tool");
+              expect(response?.content).toContain("Execution outcome unknown:");
+              expect(response?.content).toContain("Check the actual state");
+              return {
+                text: "I will check the actual state before retrying.",
+                toolCalls: [],
+                stopReason: "end",
+              };
+            },
+          },
+        });
+        const running = agent.prompt("Run the remote operation.");
+        await arrived;
+        if (mode === "cancel") agent.interrupt();
+        await running;
+        await closed;
+        expect(requests).toBe(mode === "cancel" ? 1 : 2);
+        expect(executions).toBe(1);
+        const result = log.events.find((e) => e.type === "tool/result");
+        expect(result).toMatchObject({ callId: mode, outcome: "unknown", isError: true });
+        expect(result?.content).toContain(
+          mode === "timeout" ? "timed out" : mode === "cancel" ? "aborted" : "fetch failed",
+        );
+        expect(priorFailures(log.events, call)).toBe(0);
+        recordUnresolvedCalls(log);
+        expect(log.events.some((e) => e.type === "tool/unresolved")).toBe(false);
+        expect(unresolvedCalls(log.events)).toMatchObject([
+          { call, result: { content: result?.content } },
+        ]);
+        const nextLog = new EventLog();
+        const nextTools: Tool[] = [];
+        const next = await connectMcpServers(servers, {
+          log: nextLog,
+          tools: nextTools,
+          connections,
+        });
+        const oldLength = log.events.length;
+        replyLate();
+        expect(await find(nextTools, call.name).execute({ text: "next session" }, ctx)).toBe(
+          "echo: next session",
+        );
+        expect(log.events).toHaveLength(oldLength);
+        expect(JSON.stringify(nextLog.events)).not.toContain("late remote completion");
+        await bridge.close();
+        await next.close();
+      }
+    } finally {
+      intercept = undefined;
+      await connections.close();
+    }
   });
 });
 
@@ -283,6 +467,7 @@ describe("命名、白黑名单、内容转换、审批规则、配置", () => {
 
   it("配置合并:.mcp.json 与 config.json 同名以后者为准;${VAR} 展开与缺失记录;enabled:false 跳过", () => {
     const dir = mkdtempSync(join(tmpdir(), "clari-mcpcfg-"));
+    tempDirs.push(dir);
     writeFileSync(
       join(dir, ".mcp.json"),
       JSON.stringify({

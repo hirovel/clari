@@ -55,6 +55,7 @@ export function eventTokens(e: AgentEvent): number {
     case "assistant/message":
       return estimateTokens(e.text) + toolCallTokens(e.toolCalls);
     case "tool/result":
+    case "tool/unresolved":
       return estimateTokens(e.content);
     default:
       return 0;

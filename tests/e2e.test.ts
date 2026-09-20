@@ -5,7 +5,8 @@ import * as http from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { readRequestRecording } from "../cli/session-records.js";
 import { createTuiApp } from "../cli/tui-app.js";
 import { keepRecentTokens, llmSummarize } from "../src/compaction.js";
 import { createProvider } from "../src/config.js";
@@ -13,6 +14,7 @@ import { EventLog } from "../src/log.js";
 import { runTurn } from "../src/loop.js";
 import { deriveMessages } from "../src/messages.js";
 import { defineTool } from "../src/tools.js";
+import { testImage } from "./helpers/image.js";
 import { stripAnsi, VirtualTerminal } from "./helpers/virtual-terminal.js";
 
 type Recorded = { body: Record<string, unknown>; headers: http.IncomingHttpHeaders; url: string };
@@ -134,12 +136,12 @@ describe("端到端(假服务器)", () => {
       "test-key",
     );
     const term = new VirtualTerminal(110, 40);
-    const traceLines: string[] = [];
     const app = createTuiApp({
       terminal: term,
       log,
       provider,
       tools: [big],
+      readClipboard: async () => ({ image: testImage }),
       // 这条测的是内核链路,每一步都要在屏幕上看得到:关掉账簿折叠。
       foldSteps: 0,
       // 保留策略只留最近 50 tok,溢出恢复才有东西可摘要(缺省保留 20000,小会话下无事可做)。
@@ -153,11 +155,17 @@ describe("端到端(假服务器)", () => {
       info: { model: "m", providerName: "fake", sessionFile },
       systemPrompt: "你是助手。",
       onExit: () => {},
-      trace: true,
-      onRaw: (i, line) => traceLines.push(JSON.stringify({ request: i, line })),
     });
 
-    await app.submit("看一下大文件");
+    app.setDraft("看一下大文件");
+    term.feed("\x1bv");
+    await vi.waitFor(() =>
+      expect(app.lines(110).map(stripAnsi).join("\n")).toContain("1 image(s) attached"),
+    );
+    expect(server.calls).toHaveLength(0);
+    term.feed("\r");
+    await vi.waitFor(() => expect(server.calls.length).toBeGreaterThan(0));
+    await app.agent.waitForIdle();
     const doc = app.lines(110).map(stripAnsi).join("\n");
 
     // 服务器视角:5 次调用,带 Bearer,第一条消息是系统提示词,摘要请求也走了同一条线
@@ -165,6 +173,19 @@ describe("端到端(假服务器)", () => {
     expect(server.calls[0]?.headers.authorization).toBe("Bearer test-key");
     const firstSent = (server.calls[1]?.body.messages ?? []) as { role: string }[];
     expect(firstSent[0]?.role).toBe("system");
+    expect(server.calls[1]?.body.messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: "user",
+          content: [
+            { type: "text", text: "看一下大文件" },
+            { type: "image_url", image_url: { url: `data:image/png;base64,${testImage.data}` } },
+          ],
+        }),
+      ]),
+    );
+    expect(doc).toContain("Image 1: pixel.png");
+    expect(doc).not.toContain(testImage.data);
     expect(server.calls[4]?.body.messages).toBeDefined();
 
     // 日志视角:四次请求,原因依次为 正常步 / 正常步(失败)/ 压缩 / 溢出重发
@@ -193,7 +214,7 @@ describe("端到端(假服务器)", () => {
     expect(doc).toContain("≈ overflow retry");
     expect(doc).not.toContain("Response #");
     expect(doc).not.toContain("expected ≤");
-    expect(doc).toContain("○ idle");
+    expect(app.agent.running).toBe(false);
 
     // 检视器视角:四条记录,压缩请求有自己的一行,接收分区有原始流
     app.inspector.open();
@@ -204,6 +225,8 @@ describe("端到端(假服务器)", () => {
     expect(insp).toContain("overflow retry");
     app.inspector.key("\r");
     app.inspector.key("6");
+    app.inspector.key("\x1b[B"); // 选 HTTP 原文,仅展开当前块。
+    app.inspector.key("\r");
     insp = app.inspector.lines(110).map(stripAnsi).join("\n");
     expect(insp).toContain("data: [DONE]");
     app.inspector.key("[");
@@ -211,14 +234,19 @@ describe("端到端(假服务器)", () => {
     expect(insp).toContain("摘要:用户要看大文件");
     app.inspector.close();
 
-    // trace 旁路:每行 JSON,带请求下标
-    expect(traceLines.length).toBeGreaterThan(5);
-    expect(traceLines.every((l) => typeof JSON.parse(l).request === "number")).toBe(true);
-    expect(existsSync(traceFile)).toBe(false); // 旁路由入口决定去向,界面层不写文件
+    const saved = log.events.flatMap((e, i) =>
+      e.type === "request" ? [readRequestRecording(sessionFile, log.events, i)] : [],
+    );
+    expect(saved).toHaveLength(4);
+    expect(saved.every((r) => r?.bodies.length && r.attempts?.length && !r.error)).toBe(true);
+    expect(existsSync(traceFile)).toBe(false);
 
     // 回放视角:磁盘日志与内存一致,摘要已进入投影
     const loaded = EventLog.load(sessionFile);
     expect(loaded.events).toEqual(log.events);
+    expect(loaded.events.find((e) => e.type === "user/message")).toMatchObject({
+      images: [testImage],
+    });
     const messages = deriveMessages(loaded.events);
     expect(
       messages.some(

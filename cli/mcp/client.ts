@@ -64,6 +64,9 @@ export class McpProtocolError extends Error {
   }
 }
 
+/** 请求已经交给传输层,但没有收到可确认结果的协议应答。 */
+export class McpOutcomeUnknownError extends Error {}
+
 export type McpClientOptions = {
   clientVersion?: string;
   /** 我们愿意说的版本,优先级从前到后。 */
@@ -71,6 +74,8 @@ export type McpClientOptions = {
   /** 单个请求的超时毫秒数(工具调用可另给)。 */
   requestTimeoutMs?: number;
   onRpc?: (direction: "send" | "receive", message: JsonRpcMessage) => void;
+  /** 请求结束后释放适配器持有的调用归属,包含取消、超时和传输失败。 */
+  onRequestSettled?: (id: number) => void;
   onLog?: (line: string) => void;
   onNotification?: (method: string, params: unknown) => void;
   onExit?: (code: number | null, signal: string | null) => void;
@@ -81,7 +86,6 @@ export type McpClientOptions = {
 type Pending = {
   resolve: (v: unknown) => void;
   reject: (e: Error) => void;
-  timer: ReturnType<typeof setTimeout>;
 };
 
 const DEFAULT_ENV_WHITELIST = [
@@ -241,53 +245,86 @@ export class McpClient {
     signal?: AbortSignal,
     toolName?: string,
   ): Promise<unknown> {
+    if (signal?.aborted)
+      throw new Error(`mcp ${this.name}: ${method} aborted before sending; not executed`);
     if (this.closed) throw new Error(`mcp ${this.name}: connection closed`);
     const id = this.nextId++;
     const message: JsonRpcMessage = { jsonrpc: "2.0", id, method, params: this.params(params) };
     return new Promise<unknown>((resolve, reject) => {
+      let dispatched = false;
+      const transport = new AbortController();
       const finish = () => {
+        clearTimeout(timer);
         this.pending.delete(id);
         signal?.removeEventListener("abort", onAbort);
+        this.opts.onRequestSettled?.(id);
+        transport.abort();
       };
       const cancel = (reason: string) => {
-        finish();
-        void this.notify("notifications/cancelled", { requestId: id, reason }).catch(() => {});
-        reject(new Error(`mcp ${this.name}: ${method} ${reason}`));
+        const pending = this.pending.get(id);
+        if (!pending) return;
+        pending.reject(new Error(`mcp ${this.name}: ${method} ${reason}`));
+        if (dispatched)
+          void this.notify("notifications/cancelled", { requestId: id, reason }).catch(() => {});
       };
       const onAbort = () => cancel("aborted");
       const timer = setTimeout(() => cancel(`timed out after ${timeoutMs}ms`), timeoutMs);
       this.pending.set(id, {
         resolve: (v) => {
-          clearTimeout(timer);
+          if (!this.pending.has(id)) return;
           finish();
           resolve(v);
         },
         reject: (e) => {
-          clearTimeout(timer);
+          if (!this.pending.has(id)) return;
           finish();
-          reject(e);
+          reject(
+            method === "tools/call" && dispatched && !(e instanceof McpProtocolError)
+              ? new McpOutcomeUnknownError(e.message, { cause: e })
+              : e,
+          );
         },
-        timer,
       });
       signal?.addEventListener("abort", onAbort, { once: true });
-      this.send(message, toolName).catch((err) => this.pending.get(id)?.reject(err as Error));
+      this.send(message, toolName, transport.signal, () => {
+        dispatched = true;
+      }).catch((err) => this.pending.get(id)?.reject(err as Error));
     });
   }
 
   async notify(method: string, params: unknown): Promise<void> {
     if (this.closed) return;
-    await this.send({ jsonrpc: "2.0", method, params: this.params(params) });
+    await this.send(
+      { jsonrpc: "2.0", method, params: this.params(params) },
+      undefined,
+      AbortSignal.timeout(this.opts.requestTimeoutMs ?? 60000),
+    );
   }
 
-  private async send(message: JsonRpcMessage, toolName?: string): Promise<void> {
-    this.opts.onRpc?.("send", message);
-    if (this.isHttp) return this.sendHttp(message, toolName);
+  private async send(
+    message: JsonRpcMessage,
+    toolName?: string,
+    signal?: AbortSignal,
+    onDispatch?: () => void,
+  ): Promise<void> {
+    signal?.throwIfAborted();
     const child = this.child;
-    if (!child?.stdin?.writable) throw new Error(`mcp ${this.name}: process is not running`);
-    child.stdin.write(`${JSON.stringify(message)}\n`);
+    if (!this.isHttp && !child?.stdin?.writable)
+      throw new Error(`mcp ${this.name}: process is not running`);
+    const body = JSON.stringify(message);
+    this.opts.onRpc?.("send", message);
+    signal?.throwIfAborted();
+    onDispatch?.();
+    if (this.isHttp) return this.sendHttp(message, body, toolName, signal);
+    child?.stdin?.write(`${body}\n`);
   }
 
-  private async sendHttp(message: JsonRpcMessage, toolName?: string): Promise<void> {
+  private async sendHttp(
+    message: JsonRpcMessage,
+    body: string,
+    toolName?: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
     const t = this.transport as { url: string; headers?: Record<string, string> };
     const headers: Record<string, string> = {
       "content-type": "application/json",
@@ -298,7 +335,7 @@ export class McpClient {
       ...(this.sessionId && { "mcp-session-id": this.sessionId }),
       ...t.headers,
     };
-    const res = await fetch(t.url, { method: "POST", headers, body: JSON.stringify(message) });
+    const res = await fetch(t.url, { method: "POST", headers, body, ...(signal && { signal }) });
     const sid = res.headers.get("mcp-session-id");
     if (sid) this.sessionId = sid;
     if (message.id === undefined) {
@@ -429,7 +466,7 @@ export class McpClient {
     this.pending.clear();
   }
 
-  /** 关闭:先关 stdin,1 秒后 SIGTERM,再 1 秒 SIGKILL。HTTP 没有要关的东西。 */
+  /** 关闭:停止等待 HTTP 应答;stdio 先关 stdin,1 秒后 SIGTERM,再 1 秒 SIGKILL。 */
   async close(): Promise<void> {
     this.closed = true;
     this.failAll(new Error(`mcp ${this.name}: closed`));

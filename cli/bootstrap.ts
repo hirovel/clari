@@ -14,7 +14,6 @@ import {
   modelNames,
   resolveApiKey,
   resolveModel,
-  type SubagentsConfig,
   saveConfig,
   setApiKey,
   setDefaultModel,
@@ -22,13 +21,11 @@ import {
 } from "../src/config.js";
 import { now } from "../src/events.js";
 import type { EventLog } from "../src/log.js";
-import type { CompactionConfig, TurnDeps } from "../src/loop.js";
 import { planTool } from "../src/plan.js";
-import type { Provider } from "../src/provider.js";
-import { setSetting } from "../src/settings.js";
-import { type ChildInfo, createTaskTool } from "../src/subagent.js";
+import { defaultPreset, setSetting } from "../src/settings.js";
+import { replaceSetup } from "../src/setup.js";
 import type { Tool } from "../src/tools.js";
-import { applyPreset, type CommonArgs, PROMPT_SECTION_NAMES } from "./args.js";
+import { applyPreset, type CommonArgs, PROMPT_SECTION_NAMES, parseCommonArgs } from "./args.js";
 import {
   buildSystemPrompt,
   type DiscoverOptions,
@@ -46,7 +43,7 @@ import {
 } from "./registry.js";
 import { openSession, SESSIONS_DIR } from "./sessions.js";
 import { applyToolPrompts } from "./tool-prompts.js";
-import { bashTool } from "./tools/bash.js";
+import { createBashTool } from "./tools/bash.js";
 import { createFetchTool, type FetchConfig } from "./tools/fetch.js";
 import { editTool, readTool, writeTool } from "./tools/fs.js";
 import { createRememberTool, type MemoryFiles } from "./tools/memory.js";
@@ -135,6 +132,7 @@ export function bootstrap(): Bootstrap {
     }
   };
   const settings: TuiSettings = {
+    defaultModel: () => config.default,
     priceFor: (model) => {
       try {
         return resolveModel(config, model).price;
@@ -181,8 +179,41 @@ export function bootstrap(): Bootstrap {
     },
     // /settings:只改 defaults 下的那一个键,其余原样落盘。
     saveSetting: (key, value) => {
-      config = { ...config, defaults: setSetting(config.defaults, key, value) };
-      saveConfig(config);
+      if (key === "model" && value != null) resolveModel(config, String(value));
+      const next = { ...config, defaults: setSetting(config.defaults, key, value) };
+      saveConfig(next);
+      config = next;
+    },
+    listPresets: () =>
+      Object.entries(config.presets ?? {}).map(([name, values]) => ({
+        name,
+        values: structuredClone(values),
+      })),
+    savePreset: (name, values) => {
+      if (
+        !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(name) ||
+        ["recommended", "__proto__", "constructor", "prototype"].includes(name)
+      ) {
+        throw new Error(
+          "Use 1–64 letters, digits, hyphens or underscores; choose a name other than recommended.",
+        );
+      }
+      if (Object.hasOwn(config.presets ?? {}, name))
+        throw new Error(`Preset ${name} already exists. Choose a new name.`);
+      const next = { ...config, presets: { ...config.presets, [name]: structuredClone(values) } };
+      const args = applyPreset(parseCommonArgs(["--preset", name]), next);
+      if (args.model) resolveModel(next, args.model);
+      saveConfig(next);
+      config = next;
+    },
+    usePreset: (name) => {
+      const values = name === "recommended" ? defaultPreset() : config.presets?.[name];
+      if (!values) throw new Error(`No preset named ${name}.`);
+      const next = { ...config, defaults: replaceSetup(config.defaults, values) };
+      const args = applyPreset(parseCommonArgs([]), next);
+      if (args.model) resolveModel(next, args.model);
+      saveConfig(next);
+      config = next;
     },
     capabilityNote: async (providerName, modelId) => {
       const p = config.providers[providerName];
@@ -219,60 +250,31 @@ export function memoryFiles(cwd = process.cwd(), home = clariHome()): MemoryFile
   return { project: join(projectRoot, "AGENTS.md"), user: join(home, "AGENTS.md") };
 }
 
+/** 创建内置工具。会话和子任务的资源装配由 session-runtime 负责。 */
 export function buildTools(
-  log: EventLog,
-  choice: ModelChoice,
-  compaction: CompactionConfig,
-  subagent: boolean,
-  onChild?: (child: ChildInfo) => void,
-  memory?: MemoryFiles,
-  /** skills.load = tool 时给:装一个 skill 工具,模型点名即拿到正文。 */
-  skills?: Skill[],
-  /** fetch 工具的安全边界;不给用缺省(拒私网、30 秒、5 MB)。 */
-  fetchConfig?: FetchConfig,
-  /** 工具描述风格;不给就是工具文件里写的 guided。 */
-  toolPrompts?: ToolPromptsConfig,
-  /** 子 agent 的设置与接线:配置块、取父当前槽的函数、按模型名取 provider。 */
-  subagents?: {
-    config?: SubagentsConfig;
-    slots?: () => TurnDeps["slots"] | undefined;
-    providerFor?: (model: string) => Provider;
-  },
-  /** 总开关:plan 工具(配置 plan;缺省开)。关了定义不发、复述不做。 */
-  opts: { plan?: boolean } = {},
+  opts: {
+    memory?: MemoryFiles;
+    skills?: Skill[];
+    fetchConfig?: FetchConfig;
+    toolPrompts?: ToolPromptsConfig;
+    plan?: boolean;
+  } = {},
 ): Tool[] {
   // 每次组装复制一份工具对象:描述风格槽原地改描述,不能碰模块级单例。
   const base: Tool[] = [
     readTool,
     writeTool,
     editTool,
-    bashTool,
+    createBashTool(),
     grepTool,
     globTool,
-    createFetchTool({ ...(fetchConfig && { config: fetchConfig }) }),
+    createFetchTool({ ...(opts.fetchConfig && { config: opts.fetchConfig }) }),
     ...((opts.plan ?? true) ? [planTool] : []),
   ].map((t) => ({ ...t }));
-  applyToolPrompts(base, toolPrompts);
-  if (memory) base.push(createRememberTool(memory));
-  if (skills?.some((s) => !s.disableModelInvocation)) base.push(createSkillTool(skills));
-  if (!subagent) return base;
-  const cfg = subagents?.config;
-  const task = createTaskTool({
-    parent: log,
-    provider: choice.provider,
-    tools: base,
-    compaction,
-    ...(onChild && { onChild }),
-    ...(subagents?.slots && { slots: subagents.slots }),
-    ...(subagents?.providerFor && { providerFor: subagents.providerFor }),
-    ...(cfg?.approval !== undefined && { approval: cfg.approval }),
-    ...(cfg?.maxSteps !== undefined && { maxSteps: cfg.maxSteps }),
-    ...(cfg?.depth !== undefined && { depth: cfg.depth }),
-    ...(cfg?.defaultType !== undefined && { defaultType: cfg.defaultType }),
-    ...(cfg?.types && { types: cfg.types }),
-  });
-  applyToolPrompts([task], toolPrompts);
-  return [...base, task];
+  if (opts.memory) base.push(createRememberTool(opts.memory));
+  if (opts.skills?.some((s) => !s.disableModelInvocation)) base.push(createSkillTool(opts.skills));
+  applyToolPrompts(base, opts.toolPrompts);
+  return base;
 }
 
 /** 系统提示词:--system-prompt 整段替换,--append-system-prompt 追加;否则 角色 → 环境 → 项目指令。 */

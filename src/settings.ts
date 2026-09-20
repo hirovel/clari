@@ -38,6 +38,15 @@ export const GROUP_ORDER: readonly SettingGroup[] = [
 const onOff: readonly SettingValue[] = [{ label: "on" }, { label: "off" }];
 
 export const SETTINGS: readonly SettingDef[] = [
+  {
+    key: "saveInputs",
+    group: "context",
+    type: "bool",
+    values: onOff,
+    builtin: true,
+    scope: "now",
+    note: "save drafts and pending inputs locally; restored inputs wait for you",
+  },
   // ---------- display ----------
   {
     key: "screen",
@@ -155,13 +164,13 @@ export const SETTINGS: readonly SettingDef[] = [
     group: "context",
     type: "number",
     values: [
-      { label: "0", note: "never restate" },
+      { label: "0", note: "off; recovery after compaction is separate" },
       { label: "4" },
       { label: "8" },
       { label: "16" },
     ],
     note: "restate the plan after this many steps without an update · 0 never",
-    builtin: 8,
+    builtin: 0,
     scope: "now",
   },
   {
@@ -218,15 +227,6 @@ export const SETTINGS: readonly SettingDef[] = [
     builtin: "read",
     scope: "next start",
   },
-  {
-    key: "trace",
-    group: "context",
-    type: "bool",
-    values: onOff,
-    note: "record the raw stream to <session>.trace.jsonl",
-    builtin: true,
-    scope: "next start",
-  },
   // ---------- tools ----------
   {
     key: "tools.disable",
@@ -248,6 +248,14 @@ export const SETTINGS: readonly SettingDef[] = [
     note: "how much of each tool description the model sees",
     builtin: "explain",
     scope: "now",
+  },
+  {
+    key: "mcpReconnect",
+    group: "tools",
+    type: "list",
+    builtin: [],
+    scope: "now",
+    note: "MCP servers to reconnect when switching sessions; other healthy connections are reused.",
   },
   {
     key: "subagent",
@@ -284,7 +292,7 @@ export const SETTINGS: readonly SettingDef[] = [
   {
     key: "compaction",
     group: "strategy",
-    type: "enum",
+    type: "text",
     values: [
       { label: "llm", note: "the model summarises the older part" },
       { label: "clear", note: "drop old tool results" },
@@ -360,6 +368,14 @@ export const SETTINGS: readonly SettingDef[] = [
     scope: "now",
   },
   // ---------- model ----------
+  {
+    key: "model",
+    group: "model",
+    type: "text",
+    note: "provider/model to use; unset follows the configured default model",
+    builtin: undefined,
+    scope: "now",
+  },
   {
     key: "effort",
     group: "model",

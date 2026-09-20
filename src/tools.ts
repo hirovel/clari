@@ -1,5 +1,6 @@
 import { Kind, type Static, type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
+import type { ToolOutput } from "./exchange.js";
 
 /**
  * 可执行工具:ToolDef(wire 层纯描述)加 execute。
@@ -10,7 +11,19 @@ export type ToolContext = {
   signal: AbortSignal;
   /** 本次调用在模型响应里的 id;工具据此把自己派生的东西(如子 agent 会话)关联回调用行。 */
   callId?: string;
+  /** 在截断、转义、格式转换之前写入实际输出;不改变工具的读取与执行范围。 */
+  output?: ToolOutput;
 };
+
+/** 本地等待结束不等于外部执行失败。适配器仅在缺少结果证据时抛出。 */
+export class ToolOutcomeUnknownError extends Error {
+  constructor(reason: string, options?: ErrorOptions) {
+    super(
+      `Execution outcome unknown: ${reason}\nThe tool may have produced side effects or may still be running. No automatic retry was performed. Check the actual state before deciding whether to retry or continue, using the existing tool permissions.`,
+      options,
+    );
+  }
+}
 
 /**
  * 描述的分段:core 说做什么、参数含义与硬限制;guidance 说什么时候该换别的工具、失败原因、省 token 的用法;

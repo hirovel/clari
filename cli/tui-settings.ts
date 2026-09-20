@@ -1,30 +1,34 @@
-// /settings:一屏所有开关,按用途分组,每行是名字、当前值、一句话、来源;Enter 翻值(布尔直接翻,
-// 枚举与数字开编号选单,数字末行"type a value"把命令填进输入框);改完当场生效(能的都生效,
-// 要重启的行尾写 next start)并写回配置 defaults。与 /set 的分工:/set 改这一会话的策略并记事件,
-// /settings 改每一次会话的行为并写进文件。开关表在 src/settings.ts,这里只画与落地。
-import { type Component, Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
+// 设置的读写语义与终端布局分离。运行值来自现有状态;保存值来自配置;变化进入事件日志。
+
+import { keepRecentTokens } from "../src/compaction.js";
 import type { Preset, ResultView } from "../src/config.js";
+import { now } from "../src/events.js";
+import { DEFAULT_PLAN_REMINDER } from "../src/plan.js";
 import {
   formatSetting,
-  GROUP_ORDER,
   getSetting,
   parseSetting,
-  SETTINGS,
   type SettingDef,
   type SettingLayers,
   settingDef,
   settingSource,
 } from "../src/settings.js";
+import { configuredValue, type SetupScope, sameSetting } from "../src/setup.js";
 import { parsePreservation } from "./args.js";
-import { c, G } from "./theme.js";
+import { DEFAULT_RESULT_VIEWS } from "./cards.js";
 import type { TuiContext } from "./tui-context.js";
 
-/** 会话里生效的值:能从运行时读到的读运行时,读不到的读配置层。 */
 export function effectiveSetting(ctx: TuiContext, def: SettingDef): unknown {
-  const layers = ctx.deps.settings?.settingLayers?.() ?? {};
-  const fromLayers = () =>
-    getSetting(layers.preset, def.key) ?? getSetting(layers.defaults, def.key) ?? def.builtin;
+  const initial = () => getSetting(ctx.setupInitial, def.key) ?? def.builtin;
   switch (def.key) {
+    case "saveInputs":
+      return ctx.deps.inputs?.saving ?? ctx.deps.saveInputs ?? true;
+    case "model":
+      return `${ctx.model.info.providerName}/${ctx.model.info.model}`;
+    case "mcpReconnect":
+      return ctx.deps.mcpReconnect ?? [];
+    case "screen":
+      return ctx.deps.screen ?? "alt";
     case "fold":
       return ctx.view.foldResults;
     case "foldLines":
@@ -36,18 +40,17 @@ export function effectiveSetting(ctx: TuiContext, def: SettingDef): unknown {
     case "notify":
       return ctx.deps.notify ?? "unfocused";
     case "compactionReserve":
-      return ctx.compaction.reserveTokens;
+      return ctx.compaction.reserveTokens ?? def.builtin;
     case "facts.repeats":
     case "facts.slow":
     case "facts.date": {
-      const f = ctx.agent.facts;
-      const k = def.key.slice("facts.".length) as "repeats" | "slow" | "date";
-      return f ? (f[k] ?? true) : true;
+      const key = def.key.slice(6) as "repeats" | "slow" | "date";
+      return ctx.agent.facts?.[key] ?? true;
     }
     case "plan":
       return ctx.tools.some((t) => t.name === "plan") && !ctx.slots.disabledTools.has("plan");
     case "planReminder":
-      return ctx.agent.planReminder ?? 8;
+      return ctx.agent.planReminder ?? DEFAULT_PLAN_REMINDER;
     case "tools.disable": {
       const off = [...ctx.slots.disabledTools].filter((n) => n !== "plan");
       return off.length > 0 ? off : undefined;
@@ -57,11 +60,17 @@ export function effectiveSetting(ctx: TuiContext, def: SettingDef): unknown {
     case "approve":
       return ctx.approval.mode;
     case "compaction":
-      return ctx.slots.state.compaction ?? fromLayers();
+      return ctx.slots.state.compaction?.split(" · ")[0] ?? initial();
     case "compactionTrigger":
       return ctx.compaction.trigger ?? "threshold";
-    case "preservation":
-      return ctx.slots.state.preservation ?? fromLayers();
+    case "preservation": {
+      const label = ctx.slots.state.preservation ?? "";
+      const tokens = label.match(/^keepRecentTokens\(([\d.]+)\)$/);
+      const ratio = label.match(/^keepRatio\(([\d.]+)\)$/);
+      if (tokens) return `tokens ${tokens[1]}`;
+      if (ratio) return `ratio ${ratio[1]}`;
+      return label.startsWith("keepRecentTokens (min") ? undefined : initial();
+    }
     case "execution":
       return ctx.agent.slots.execution ?? "sequential";
     case "steering":
@@ -69,19 +78,71 @@ export function effectiveSetting(ctx: TuiContext, def: SettingDef): unknown {
     case "effort":
       return ctx.agent.effort;
     default:
-      return fromLayers();
+      return initial();
   }
 }
 
-/** 一个开关的来源词。 */
 export function sourceOf(ctx: TuiContext, def: SettingDef, effective: unknown): string {
+  for (let i = ctx.log.events.length - 1; i >= 0; i--) {
+    const e = ctx.log.events[i];
+    if (
+      e?.type === "ext/event" &&
+      e.source === "setup" &&
+      e.kind === "setting" &&
+      e.payload.key === def.key &&
+      e.payload.scope === "session"
+    ) {
+      if (sameSetting(e.payload.value, effective)) return "this session";
+      break;
+    }
+  }
   const layers: SettingLayers = ctx.deps.settings?.settingLayers?.() ?? {};
-  return settingSource(def, effective, layers);
+  const source = settingSource(def, effective, layers);
+  return source === "flag" ? "runtime" : source === "built-in" ? "built-in" : source;
 }
 
-/**
- * 当场生效。返回说明(或 next start 的提示)。会话内能落的槽走已有的槽命令(记 session/slot)。
- */
+export function setupRead(ctx: TuiContext, def: SettingDef, scope: SetupScope): unknown {
+  if (def.key === "model" && scope === "defaults")
+    return (
+      getSetting(ctx.deps.settings?.settingLayers?.().defaults, "model") ??
+      ctx.deps.settings?.defaultModel?.()
+    );
+  return scope === "session"
+    ? effectiveSetting(ctx, def)
+    : configuredValue(def, ctx.deps.settings?.settingLayers?.().defaults);
+}
+
+const SLOT_SETTINGS = new Set([
+  "model",
+  "approve",
+  "compaction",
+  "compactionTrigger",
+  "preservation",
+  "execution",
+  "steering",
+  "toolPrompts",
+]);
+const DISPLAY_SETTINGS = new Set(["fold", "foldLines", "foldSteps", "results", "notify"]);
+
+export function settingTiming(ctx: TuiContext, def: SettingDef, scope: SetupScope): string {
+  if (scope === "defaults") return "Saved for future starts; this session stays unchanged.";
+  if (def.key === "saveInputs")
+    return "Changes local input saving now. Turning off removes the saved snapshot, keeping inputs in memory.";
+  if (def.key === "mcpReconnect") return "Applies when the next session connection is prepared.";
+  if (def.scope === "next start")
+    return "Requires a restart. Switch to Saved defaults to change it.";
+  if (def.key === "plan" && !ctx.tools.some((t) => t.name === "plan"))
+    return "Plan tool is not loaded. Enable it in Saved defaults and restart.";
+  if (ctx.agent.running && SLOT_SETTINGS.has(def.key))
+    return "This strategy cannot change mid-turn. Wait, or close setup and press Esc to interrupt.";
+  if (DISPLAY_SETTINGS.has(def.key)) return "Changes the interface immediately.";
+  if (def.key === "effort") return "Used by the next model request.";
+  if (["compaction", "compactionTrigger", "compactionReserve", "preservation"].includes(def.key))
+    return "Used by the next compaction check; existing history stays unchanged.";
+  return "Used by the next turn. An in-flight request keeps its current settings.";
+}
+
+/** 实际修改运行状态;调用前由 changeSetting 验证作用域和生效条件。 */
 export async function applySettingNow(
   ctx: TuiContext,
   def: SettingDef,
@@ -90,54 +151,65 @@ export async function applySettingNow(
 ): Promise<string | undefined> {
   const { view } = ctx;
   switch (def.key) {
+    case "saveInputs":
+      ctx.deps.inputs?.configure(value as boolean);
+      ctx.deps.saveInputs = value as boolean;
+      return;
+    case "mcpReconnect":
+      ctx.deps.mcpReconnect = value as string[];
+      break;
+    case "model": {
+      const name = value ?? ctx.deps.settings?.defaultModel?.();
+      if (!name)
+        throw new Error("No default model is configured. Choose a model or use /login first.");
+      return slot("model", String(name));
+    }
     case "fold":
       view.foldResults = value as boolean;
       ctx.redrawResults?.();
-      return undefined;
+      return;
     case "foldLines":
       view.foldLines = value as number;
       ctx.redrawResults?.();
-      return undefined;
+      return;
     case "foldSteps":
       view.foldSteps = value as number;
-      return undefined;
+      return;
     case "results":
-      view.results = { ...view.results, ...((value as Record<string, ResultView>) ?? {}) };
+      view.results = { ...DEFAULT_RESULT_VIEWS, ...((value as Record<string, ResultView>) ?? {}) };
       ctx.redrawResults?.();
-      return undefined;
+      return;
     case "notify":
       ctx.deps.notify = value as "unfocused" | "always" | "off";
-      return undefined;
+      return;
     case "compactionReserve":
       ctx.compaction.reserveTokens = value as number;
       ctx.updateStatus();
-      return undefined;
+      return;
     case "facts.repeats":
     case "facts.slow":
-    case "facts.date": {
-      const k = def.key.slice("facts.".length);
-      ctx.agent.configure({ facts: { ...ctx.agent.facts, [k]: value as boolean } });
-      return undefined;
-    }
+    case "facts.date":
+      ctx.agent.configure({ facts: { ...ctx.agent.facts, [def.key.slice(6)]: value as boolean } });
+      return;
     case "planReminder":
       ctx.agent.configure({ planReminder: value as number });
-      return undefined;
-    case "plan": {
-      const has = ctx.tools.some((t) => t.name === "plan");
-      if (!has) return "the plan tool is not loaded in this session · next start";
+      return;
+    case "plan":
+      if (!ctx.tools.some((t) => t.name === "plan"))
+        throw new Error(
+          "the plan tool is not loaded in this session; enable it in Saved defaults and restart",
+        );
       if (value) ctx.slots.disabledTools.delete("plan");
       else ctx.slots.disabledTools.add("plan");
       ctx.applyTools?.();
-      return undefined;
-    }
+      return;
     case "tools.disable": {
-      const names = (value as string[] | undefined) ?? [];
       const plan = ctx.slots.disabledTools.has("plan");
       ctx.slots.disabledTools.clear();
-      for (const n of names) ctx.slots.disabledTools.add(n);
+      for (const name of (value as string[] | undefined) ?? []) ctx.slots.disabledTools.add(name);
       if (plan) ctx.slots.disabledTools.add("plan");
       ctx.applyTools?.();
-      return undefined;
+      return;
     }
     case "toolPrompts":
       return slot("toolprompts", String(value));
@@ -148,7 +220,11 @@ export async function applySettingNow(
     case "compactionTrigger":
       return slot("trigger", String(value));
     case "preservation":
-      if (value === undefined) return undefined;
+      if (value === undefined) {
+        ctx.compaction.preservation = keepRecentTokens(Math.min(20000, ctx.compaction.window / 4));
+        ctx.slots.state.preservation = "keepRecentTokens (min(20000, window/4))";
+        return;
+      }
       parsePreservation(String(value));
       return slot("preservation", String(value));
     case "execution":
@@ -156,302 +232,106 @@ export async function applySettingNow(
     case "steering":
       return slot("steering", String(value));
     case "effort":
-      return slot("effort", value === undefined ? "off" : String(value));
+      return slot("effort", value === undefined ? "auto" : String(value));
     default:
-      return `takes effect at the next start`;
+      return "takes effect at the next start";
   }
 }
 
-/** 键列按最长的键定宽:短一格,最长的那一行就会把右边所有列顶歪。 */
-const KEY_WIDTH = Math.max(...SETTINGS.map((s) => s.key.length)) + 1;
+export type SettingChange = { ok: boolean; message: string };
 
-export type SettingsRow = { def: SettingDef; group: boolean } | { group: true; name: string };
-
-type Mode =
-  | { kind: "list" }
-  | {
-      kind: "values";
-      def: SettingDef;
-      index: number;
-      items: { label: string; value: unknown; note?: string }[];
-    }
-  | { kind: "map"; def: SettingDef; index: number; names: string[] }
-  | { kind: "listItems"; def: SettingDef; index: number; items: string[] };
-
-export type SettingsDeps = {
-  ctx: TuiContext;
-  /** 落一个值:当场生效并写回配置;返回一句说明。 */
-  set: (def: SettingDef, value: unknown) => Promise<string>;
-  /** 把打字形态填进输入框。 */
-  fill: (text: string) => void;
-  onClose: () => void;
-  onChange: () => void;
-};
-
-/** 全屏的设置表。 */
-export class SettingsView implements Component {
-  private index = 0;
-  private mode: Mode = { kind: "list" };
-  private note: string | undefined;
-
-  constructor(private deps: SettingsDeps) {}
-
-  invalidate(): void {}
-
-  private rows(): ({ kind: "group"; name: string } | { kind: "def"; def: SettingDef })[] {
-    const out: ({ kind: "group"; name: string } | { kind: "def"; def: SettingDef })[] = [];
-    for (const g of GROUP_ORDER) {
-      const defs = SETTINGS.filter((s) => s.group === g);
-      if (defs.length === 0) continue;
-      out.push({ kind: "group", name: g });
-      for (const def of defs) out.push({ kind: "def", def });
-    }
-    return out;
+function validate(def: SettingDef, value: unknown): void {
+  if (value === undefined) {
+    if (def.builtin !== undefined)
+      throw new Error(`${def.key} needs a value; choose its recommended value to reset it.`);
+    return;
   }
+  if (def.type === "bool" && typeof value !== "boolean")
+    throw new Error(`${def.key} takes on or off`);
+  if (def.type === "number") parseSetting(def, String(value));
+  if (def.type === "enum") parseSetting(def, String(value));
+  if (def.key === "preservation") parsePreservation(String(value));
+}
 
-  private defs(): SettingDef[] {
-    return this.rows().flatMap((r) => (r.kind === "def" ? [r.def] : []));
-  }
-
-  /** 光标当前的开关。 */
-  current(): SettingDef {
-    return this.defs()[this.index] as SettingDef;
-  }
-
-  /** 定位到某个键(/settings key)。 */
-  focus(key: string): boolean {
-    const i = this.defs().findIndex((d) => d.key === key);
-    if (i < 0) return false;
-    this.index = i;
-    return true;
-  }
-
-  private openValues(def: SettingDef): void {
-    const { ctx } = this.deps;
-    const cur = effectiveSetting(ctx, def);
-    if (def.type === "bool") {
-      void this.commit(def, !cur);
-      return;
-    }
-    if (def.type === "map") {
-      const names = ctx.tools.map((t) => t.name);
-      this.mode = { kind: "map", def, index: 0, names };
-      return;
-    }
-    if (def.type === "list") {
-      const items = def.items
-        ? [...def.items]
-        : ctx.tools.filter((t) => t.name !== "plan").map((t) => t.name);
-      this.mode = { kind: "listItems", def, index: 0, items };
-      return;
-    }
-    const items: { label: string; value: unknown; note?: string }[] = (def.values ?? []).map(
-      (v) => ({
-        label: v.label,
-        value: def.type === "number" ? Number(v.label) : v.label,
-        ...(v.note && { note: v.note }),
-      }),
-    );
-    if (def.type === "number" || def.type === "text") {
-      if (def.builtin === undefined) items.push({ label: "none", value: undefined, note: "unset" });
-      items.push({
-        label: "type a value",
-        value: Symbol.for("type"),
-        note: `fills /settings ${def.key} into the input`,
-      });
-    }
-    const at = items.findIndex((i) => String(i.value) === String(cur));
-    this.mode = { kind: "values", def, index: at >= 0 ? at : 0, items };
-  }
-
-  private async commit(def: SettingDef, value: unknown): Promise<void> {
-    this.note = await this.deps.set(def, value);
-    this.mode = { kind: "list" };
-    this.deps.onChange();
-  }
-
-  handleInput(data: string): void {
-    const m = this.mode;
-    if (m.kind === "list") {
-      const n = this.defs().length;
-      if (matchesKey(data, Key.escape) || data === "q") {
-        this.deps.onClose();
-        return;
-      }
-      if (matchesKey(data, Key.up)) this.index = Math.max(0, this.index - 1);
-      else if (matchesKey(data, Key.down)) this.index = Math.min(n - 1, this.index + 1);
-      else if (matchesKey(data, Key.pageUp)) this.index = Math.max(0, this.index - 10);
-      else if (matchesKey(data, Key.pageDown)) this.index = Math.min(n - 1, this.index + 10);
-      else if (matchesKey(data, Key.home)) this.index = 0;
-      else if (matchesKey(data, Key.end)) this.index = n - 1;
-      else if (matchesKey(data, Key.enter)) {
-        this.note = undefined;
-        this.openValues(this.current());
-      }
-      this.deps.onChange();
-      return;
-    }
-    if (matchesKey(data, Key.escape)) {
-      this.mode = { kind: "list" };
-      this.deps.onChange();
-      return;
-    }
-    const len =
-      m.kind === "values" ? m.items.length : m.kind === "map" ? m.names.length : m.items.length;
-    if (matchesKey(data, Key.up)) m.index = Math.max(0, m.index - 1);
-    else if (matchesKey(data, Key.down)) m.index = Math.min(len - 1, m.index + 1);
-    else if (/^[1-9]$/.test(data) && Number(data) <= len) m.index = Number(data) - 1;
-    else if (matchesKey(data, Key.enter)) {
-      if (m.kind === "values") {
-        const it = m.items[m.index];
-        if (!it) return;
-        if (it.value === Symbol.for("type")) {
-          this.deps.fill(`/settings ${m.def.key} `);
-          this.deps.onClose();
-          return;
-        }
-        void this.commit(m.def, it.value);
-        return;
-      }
-      if (m.kind === "listItems") {
-        const name = m.items[m.index] as string;
-        const cur = (
-          (effectiveSetting(this.deps.ctx, m.def) as string[] | undefined) ?? []
-        ).slice();
-        const next = cur.includes(name) ? cur.filter((x) => x !== name) : [...cur, name];
-        // 段列表按登记顺序;工具名按字母。
-        const ordered = m.def.items ? m.def.items.filter((x) => next.includes(x)) : next.sort();
-        void this.deps.set(m.def, ordered.length > 0 ? ordered : undefined).then((note) => {
-          this.note = note;
-          this.deps.onChange();
-        });
-        return;
-      }
-      if (m.kind === "map") {
-        // 每个工具在四个可见度之间轮转。
-        const name = m.names[m.index] as string;
-        const cur = (effectiveSetting(this.deps.ctx, m.def) as Record<string, string>) ?? {};
-        const values = (m.def.values ?? []).map((v) => v.label);
-        const at = values.indexOf(cur[name] ?? "head");
-        const nextValue = values[(at + 1) % values.length] as string;
-        void this.deps.set(m.def, { ...cur, [name]: nextValue }).then((note) => {
-          this.note = note;
-          this.deps.onChange();
-        });
-        return;
-      }
-    }
-    this.deps.onChange();
-  }
-
-  render(width: number): string[] {
-    const inner = Math.max(20, width) - 2;
-    const pad = (s: string) => ` ${truncateToWidth(s, inner, "…", true)} `;
-    const rule = c.faint("─".repeat(inner));
-    const { ctx } = this.deps;
-    const m = this.mode;
-    if (m.kind === "values") {
-      const cur = effectiveSetting(ctx, m.def);
-      const lines = [
-        pad(
-          `${c.bold(c.ink(m.def.key))}  ${c.soft(`now ${formatSetting(m.def, cur)} (${sourceOf(ctx, m.def, cur)})`)}  ${c.faint(m.def.note)}`,
-        ),
-      ];
-      m.items.forEach((it, i) => {
-        const label = `${i + 1}  ${it.label.padEnd(14)}`;
-        lines.push(
-          pad(
-            i === m.index
-              ? `  ${c.zhu(G.cursor)} ${c.bold(c.ink(label))} ${c.faint(it.note ?? "")}`
-              : `    ${c.soft(label)} ${c.faint(it.note ?? "")}`,
-          ),
+/** session 只改运行态;defaults 先可靠落盘;both 保留已有打字命令的应用并保存语义。 */
+export async function changeSetting(
+  ctx: TuiContext,
+  def: SettingDef,
+  value: unknown,
+  scope: SetupScope | "both",
+  slot: (name: string, value: string) => Promise<string>,
+): Promise<SettingChange> {
+  try {
+    validate(def, value);
+    const save = ctx.deps.settings?.saveSetting;
+    if (scope === "defaults") {
+      if (!save)
+        throw new Error(
+          "Saving is not available here. Use This session to make a temporary change.",
         );
+      await save(def.key, value);
+      ctx.log.append({
+        type: "ext/event",
+        at: now(),
+        source: "setup",
+        kind: "setting",
+        payload: { key: def.key, value, scope: "defaults" },
       });
-      lines.push(pad(""));
-      lines.push(
-        pad(
-          `${c.soft("If you do this")}  ${c.faint(`${m.def.scope === "now" ? "takes effect now" : "takes effect at the next start"} · written to config defaults.${m.def.key}`)}`,
-        ),
-      );
-      lines.push(
-        pad(rule),
-        pad(c.faint(`↑↓ or 1–${Math.min(9, m.items.length)} choose · Enter set · Esc back`)),
-      );
-      return lines;
+      const layers = ctx.deps.settings?.settingLayers?.();
+      const overridden = getSetting(layers?.preset, def.key) !== undefined;
+      return {
+        ok: true,
+        message: `${def.key} → ${formatSetting(def, value)} · saved for future starts; this session unchanged${overridden ? ` · preset ${layers?.presetName ?? ""} still overrides defaults` : ""}`,
+      };
     }
-    if (m.kind === "map" || m.kind === "listItems") {
-      const cur = effectiveSetting(ctx, m.def);
-      const names = m.kind === "map" ? m.names : m.items;
-      const lines = [
-        pad(
-          `${c.bold(c.ink(m.def.key))}  ${c.soft(formatSetting(m.def, cur))}  ${c.faint(m.def.note)}`,
-        ),
-      ];
-      names.forEach((name, i) => {
-        let state: string;
-        if (m.kind === "map")
-          state = ((cur as Record<string, string> | undefined)?.[name] ?? "head").padEnd(6);
-        else state = ((cur as string[] | undefined) ?? []).includes(name) ? "on " : "off";
-        const label = `${i + 1}  ${name.padEnd(14)} ${state}`;
-        lines.push(
-          pad(
-            i === m.index ? `  ${c.zhu(G.cursor)} ${c.bold(c.ink(label))}` : `    ${c.soft(label)}`,
-          ),
-        );
-      });
-      lines.push(pad(""));
-      lines.push(
-        pad(
-          `${c.soft("If you do this")}  ${c.faint(`${m.kind === "map" ? "Enter cycles count · head · tail · all" : "Enter flips it"} · ${m.def.scope === "now" ? "takes effect now" : "takes effect at the next start"} · written to config defaults.${m.def.key}`)}`,
-        ),
-      );
-      lines.push(
-        pad(rule),
-        pad(c.faint(`↑↓ or 1–${Math.min(9, names.length)} choose · Enter change · Esc back`)),
-      );
-      return lines;
+    if (def.scope === "next start") {
+      if (scope === "session") throw new Error(settingTiming(ctx, def, "session"));
+      if (!save)
+        throw new Error("This setting requires a restart, and saving is not available here.");
+      await save(def.key, value);
+      return { ok: true, message: describeChange(def, value, undefined, true) };
     }
-    const lines = [
-      pad(
-        `${c.bold(c.ink("Settings"))}  ${c.soft("every session · saved to the config file")}   ${c.faint("this session's strategy slots are in /set")}`,
-      ),
-      pad(rule),
-    ];
-    let k = 0;
-    for (const r of this.rows()) {
-      if (r.kind === "group") {
-        lines.push(pad(c.faint(r.name)));
-        continue;
+    if (ctx.agent.running && SLOT_SETTINGS.has(def.key))
+      throw new Error(settingTiming(ctx, def, "session"));
+    const applied = await applySettingNow(ctx, def, value ?? def.builtin, slot);
+    // 老槽函数把错误返回成文案;设置入口必须识别失败,不能继续保存或显示成功。
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: 槽返回的终端文案需要先去掉 SGR。
+    const plain = (applied ?? "").replace(/\u001b\[[0-9;]*m/g, "");
+    if (/^(✗|Cannot |cannot |unknown |Usage:)/.test(plain)) throw new Error(plain);
+    ctx.log.append({
+      type: "ext/event",
+      at: now(),
+      source: "setup",
+      kind: "setting",
+      payload: { key: def.key, value, scope: "session" },
+    });
+    ctx.persistSetup();
+    if (scope === "both" && save) {
+      try {
+        await save(def.key, value);
+      } catch (err) {
+        return {
+          ok: false,
+          message: `${def.key} changed for this session, but was not saved: ${(err as Error).message}. Retry saving in Saved defaults.`,
+        };
       }
-      const def = r.def;
-      const value = effectiveSetting(ctx, def);
-      const src = sourceOf(ctx, def, value);
-      const shown = formatSetting(def, value);
-      const selected = k === this.index;
-      const noteWidth = Math.max(10, inner - 4 - KEY_WIDTH - 1 - 14 - 26);
-      const body = `${def.key.padEnd(KEY_WIDTH)} ${truncateToWidth(shown, 13, "…", true)} ${truncateToWidth(def.note, noteWidth, "…", true)} ${src}${def.scope === "next start" ? " · next start" : ""}`;
-      lines.push(
-        pad(selected ? `  ${c.zhu(G.cursor)} ${c.bold(c.ink(body))}` : `    ${c.soft(body)}`),
-      );
-      k++;
     }
-    lines.push(pad(rule));
-    lines.push(
-      pad(this.note ? c.soft(`  ${this.note}`) : c.faint("↑↓ move · Enter change · Esc close")),
-    );
-    return lines;
+    return {
+      ok: true,
+      message: `${def.key} → ${formatSetting(def, value)} · ${settingTiming(ctx, def, "session")}${scope === "both" ? (save ? " · saved to config" : " · not saved: no config here") : " · this session only"}`,
+    };
+  } catch (err) {
+    return { ok: false, message: (err as Error).message };
   }
 }
 
-/** 打字形态:/settings key value。返回一句说明或错误。 */
 export function parseTyped(arg: string): { def: SettingDef; value: unknown } | string {
   const [key = "", ...rest] = arg.trim().split(/\s+/);
   const def = settingDef(key);
   if (!def) return `unknown setting ${key} · /settings lists them`;
-  const text = rest.join(" ");
-  if (!text) return `usage: /settings ${def.key} <value> · ${def.note}`;
+  if (rest.length === 0) return `usage: /settings ${def.key} <value> · ${def.note}`;
   try {
-    return { def, value: parseSetting(def, text) };
+    return { def, value: parseSetting(def, rest.join(" ")) };
   } catch (err) {
     return (err as Error).message;
   }
@@ -463,11 +343,11 @@ export function describeChange(
   applied: string | undefined,
   saved: boolean,
 ): string {
-  const parts = [`${def.key} → ${formatSetting(def, value)}`];
-  if (applied) parts.push(applied);
-  else parts.push(def.scope === "now" ? "in effect now" : "takes effect at the next start");
-  parts.push(saved ? "saved to config" : "not saved: no config here");
-  return parts.join(" · ");
+  return [
+    `${def.key} → ${formatSetting(def, value)}`,
+    applied || (def.scope === "now" ? "in effect now" : "takes effect at the next start"),
+    saved ? "saved to config" : "not saved: no config here",
+  ].join(" · ");
 }
 
 export type { Preset };

@@ -11,6 +11,7 @@ import {
 } from "../src/config.js";
 import { COMPACTION_TRIGGERS, type CompactionTrigger, type ExecutionPolicy } from "../src/loop.js";
 import { EFFORT_LEVELS, type EffortLevel, parseEffort } from "../src/provider.js";
+import { SETTINGS, setSetting } from "../src/settings.js";
 import { isToolPromptStyle } from "./tool-prompts.js";
 
 export const PROMPT_SECTION_NAMES: PromptSectionName[] = [
@@ -28,7 +29,6 @@ export type CommonArgs = {
   /** 内置名 llm | clear | pipeline,或一个导出 CompactionStrategy 的模块路径(.mjs/.js/.ts)。 */
   compaction: string;
   subagent: boolean;
-  trace: boolean;
   fold: boolean;
   /** 折叠时保留的结果行数(配置 foldLines)。 */
   foldLines?: number;
@@ -86,6 +86,8 @@ export type CommonArgs = {
   execution?: ExecutionPolicy;
   /** 扩展模块路径(可多个):default 导出一个函数,返回要加的工具与槽实现。 */
   extensions: string[];
+  mcpReconnect?: string[];
+  saveInputs?: boolean;
   /** 一次性模式:把每条事件以 JSON 行写到 stdout(事件流输出)。 */
   events: boolean;
   /** 非选项参数(一次性模式的任务文本)。 */
@@ -94,9 +96,28 @@ export type CommonArgs = {
   compactionExplicit?: boolean;
   approveExplicit?: boolean;
   subagentExplicit?: boolean;
-  traceExplicit?: boolean;
   foldExplicit?: boolean;
 };
+
+/** 给设置工作台一份解析后的启动快照,不把配置文件的后来变化当成运行中的值。 */
+export function settingsFromArgs(args: CommonArgs): Preset {
+  const values: Record<string, unknown> = {
+    ...args,
+    "tools.disable": args.disabledTools,
+    "facts.repeats": args.facts?.repeats,
+    "facts.slow": args.facts?.slow,
+    "facts.date": args.facts?.date,
+    "prompt.sections": args.promptSections,
+    "prompt.instructionsAs": args.instructionsAs,
+    "prompt.memory": args.memory,
+    "prompt.skills.list": args.skillsList,
+    "prompt.skills.load": args.skillsLoad,
+  };
+  let snapshot: Preset = {};
+  for (const def of SETTINGS)
+    snapshot = setSetting(snapshot, def.key, values[def.key] ?? def.builtin);
+  return snapshot;
+}
 
 /** 保留策略的文字形态 → 实现与显示名:配置、预设、命令行、/preservation 共用一种写法。 */
 export function parsePreservation(spec: string): { policy: PreservationPolicy; label: string } {
@@ -136,7 +157,6 @@ export function parseCommonArgs(argv: string[]): CommonArgs {
   const out: CommonArgs = {
     compaction: "llm",
     subagent: false,
-    trace: true,
     fold: true,
     continue: false,
     json: false,
@@ -190,13 +210,10 @@ export function parseCommonArgs(argv: string[]): CommonArgs {
         out.subagentExplicit = true;
         break;
       case "--trace":
-        out.trace = true;
-        out.traceExplicit = true;
-        break;
       case "--no-trace":
-        out.trace = false;
-        out.traceExplicit = true;
-        break;
+        throw new Error(
+          "trace switches were removed; session request and response recording is always enabled",
+        );
       case "--fold":
         out.fold = true;
         out.foldExplicit = true;
@@ -305,6 +322,18 @@ export function parseCommonArgs(argv: string[]): CommonArgs {
       case "--extension":
         out.extensions.push(takeValue(i++, a));
         break;
+      case "--mcp-reconnect":
+        out.mcpReconnect = takeValue(i++, a)
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+        break;
+      case "--save-inputs":
+        out.saveInputs = true;
+        break;
+      case "--no-save-inputs":
+        out.saveInputs = false;
+        break;
       case "--events":
         out.events = true;
         break;
@@ -345,7 +374,7 @@ Options
   --extension <module.mjs>       load an extension module (repeatable): add tools, replace slot implementations
   --max-steps N                  termination guard (default: no limit)
   --subagent                     add the task tool (sub-agents)
-  --no-trace                     do not record the raw stream (default: every received line is written to <session>.trace.jsonl; view with /raw N)
+  --no-save-inputs               disable local draft and pending-input saving (default: on)
   --fold                         tool results start folded (the default; config fold: false starts unfolded; Ctrl+O toggles)
   --screen alt|main              alt (default): fixed header and status, own scrolling, mouse, search; main keeps the terminal scrollback
   --notify unfocused|always|off  desktop notification when a turn ends or approval is needed (default: only while the terminal is unfocused)
@@ -374,11 +403,17 @@ export function applyPreset(args: CommonArgs, config: KernelConfig): CommonArgs 
   const settled = new Set<string>();
   const open = (field: string, explicit: boolean | undefined) => !explicit && !settled.has(field);
   const applyLayer = (layer: Preset, label: string) => {
-    if (out.model === undefined && layer.model) out.model = layer.model;
-    if (out.effort === undefined && layer.effort) {
-      const level = parseEffort(layer.effort);
-      if (!level) throw new Error(`${label} has invalid effort "${layer.effort}"`);
-      out.effort = level;
+    if (out.model === undefined && !settled.has("model") && layer.model !== undefined) {
+      if (layer.model !== null) out.model = layer.model;
+      settled.add("model");
+    }
+    if (out.effort === undefined && !settled.has("effort") && layer.effort !== undefined) {
+      settled.add("effort");
+      if (layer.effort !== null) {
+        const level = parseEffort(layer.effort);
+        if (!level) throw new Error(`${label} has invalid effort "${layer.effort}"`);
+        out.effort = level;
+      }
     }
     if (open("compaction", args.compactionExplicit) && layer.compaction) {
       out.compaction = layer.compaction;
@@ -392,10 +427,6 @@ export function applyPreset(args: CommonArgs, config: KernelConfig): CommonArgs 
       out.subagent = layer.subagent;
       settled.add("subagent");
     }
-    if (open("trace", args.traceExplicit) && layer.trace !== undefined) {
-      out.trace = layer.trace;
-      settled.add("trace");
-    }
     if (open("fold", args.foldExplicit) && layer.fold !== undefined) {
       out.fold = layer.fold;
       settled.add("fold");
@@ -407,6 +438,10 @@ export function applyPreset(args: CommonArgs, config: KernelConfig): CommonArgs 
     if (out.plan === undefined && layer.plan !== undefined) out.plan = layer.plan;
     if (out.disabledTools === undefined && layer.tools?.disable)
       out.disabledTools = layer.tools.disable;
+    if (out.mcpReconnect === undefined && layer.mcpReconnect !== undefined)
+      out.mcpReconnect = [...layer.mcpReconnect];
+    if (out.saveInputs === undefined && layer.saveInputs !== undefined)
+      out.saveInputs = layer.saveInputs;
     if (out.planReminder === undefined && layer.planReminder !== undefined)
       out.planReminder = layer.planReminder;
     if (out.foldSteps === undefined && layer.foldSteps !== undefined)
@@ -419,12 +454,22 @@ export function applyPreset(args: CommonArgs, config: KernelConfig): CommonArgs 
       out.systemPromptFile = layer.systemPromptFile;
     if (out.appendSystemPromptFile === undefined && layer.appendSystemPromptFile)
       out.appendSystemPromptFile = layer.appendSystemPromptFile;
-    if (out.maxSteps === undefined && layer.maxSteps !== undefined) out.maxSteps = layer.maxSteps;
+    if (out.maxSteps === undefined && !settled.has("maxSteps") && layer.maxSteps !== undefined) {
+      if (layer.maxSteps !== null) out.maxSteps = layer.maxSteps;
+      settled.add("maxSteps");
+    }
     if (out.execution === undefined && layer.execution) out.execution = layer.execution;
     if (out.steering === undefined && layer.steering) out.steering = layer.steering;
-    if (out.preservation === undefined && layer.preservation) {
-      parsePreservation(layer.preservation);
-      out.preservation = layer.preservation;
+    if (
+      out.preservation === undefined &&
+      !settled.has("preservation") &&
+      layer.preservation !== undefined
+    ) {
+      settled.add("preservation");
+      if (layer.preservation !== null) {
+        parsePreservation(layer.preservation);
+        out.preservation = layer.preservation;
+      }
     }
     if (out.compactionTrigger === undefined && layer.compactionTrigger)
       out.compactionTrigger = layer.compactionTrigger;

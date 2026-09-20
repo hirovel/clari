@@ -1,14 +1,20 @@
-// /settings:一屏所有开关,Enter 翻值,当场生效并写回配置;打字形态给脚本;来源列写谁定的值。
+// 验证用户能完成的调整流程:作用域、真实请求、恢复、错误、窄屏与长列表。
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
 import { createTuiApp, type TuiAppDeps } from "../cli/tui-app.js";
+import type { Preset } from "../src/config.js";
 import { EventLog } from "../src/log.js";
+import { planTool } from "../src/plan.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
+import { setSetting } from "../src/settings.js";
 import { defineTool } from "../src/tools.js";
 import { stripAnsi, VirtualTerminal } from "./helpers/virtual-terminal.js";
 
 const tick = () => new Promise((r) => setTimeout(r, 5));
-
+const DOWN = "\x1b[B",
+  ENTER = "\r",
+  ESC = "\x1b",
+  TAB = "\t";
 const echo = defineTool({
   name: "echo",
   description: "Echo the text back.",
@@ -18,20 +24,25 @@ const echo = defineTool({
   },
 });
 
-function boot(over: Partial<TuiAppDeps> = {}) {
+function boot(over: Partial<TuiAppDeps> = {}, size = [120, 40]) {
   const saved: [string, unknown][] = [];
+  let defaults: Preset = { foldSteps: 5 };
+  const presets: { name: string; values: Preset }[] = [];
+  const requests: string[][] = [];
   const provider: Provider = {
     model: "m",
-    async complete(): Promise<AssistantTurn> {
+    async complete(_messages, tools): Promise<AssistantTurn> {
+      requests.push(tools.map((t) => t.name));
       return { text: "ok", toolCalls: [], stopReason: "end" };
     },
   };
-  const term = new VirtualTerminal(120, 40);
+  const term = new VirtualTerminal(size[0], size[1]);
+  const log = new EventLog();
   const app = createTuiApp({
     terminal: term,
-    log: new EventLog(),
+    log,
     provider,
-    tools: [echo],
+    tools: [echo, planTool],
     compaction: { strategy: async () => null, window: 100000, reserveTokens: 1000 },
     reserveTokens: 1000,
     info: { model: "m", providerName: "p", sessionFile: "s" },
@@ -44,124 +55,293 @@ function boot(over: Partial<TuiAppDeps> = {}) {
       },
       setKey: () => {},
       setDefault: () => {},
-      settingLayers: () => ({
-        defaults: { foldSteps: 5, notify: "always" },
-        presetName: "long",
-        preset: { notify: "off" },
-      }),
-      saveSetting: (key, value) => saved.push([key, value]),
+      settingLayers: () => ({ defaults }),
+      saveSetting: (key, value) => {
+        saved.push([key, value]);
+        defaults = setSetting(defaults, key, value);
+      },
+      listPresets: () => presets,
+      savePreset: (name, values) => {
+        presets.push({ name, values });
+      },
+      usePreset: (name) => {
+        defaults = presets.find((p) => p.name === name)?.values ?? {};
+      },
     },
     onExit: () => {},
     ...over,
   });
-  const doc = () => app.lines(120).map(stripAnsi).join("\n");
+  const doc = () => app.lines(size[0]).map(stripAnsi).join("\n");
   const menu = () => app.dialogLines().map(stripAnsi).join("\n");
-  return { app, doc, menu, saved };
+  return { app, term, doc, menu, saved, presets, requests, log, defaults: () => defaults };
 }
 
-describe("/settings", () => {
-  it("全屏表:分组、当前值、一句话、来源;Enter 开值选单,选中即生效并写回;Esc 逐级回", async () => {
-    const { app, doc, menu, saved } = boot();
+describe("Agent setup", () => {
+  it("同一模型入口区分当前切换与默认值保存,保存默认值不会创建供应商", async () => {
+    let chosen = 0;
+    let defaults: Preset = {};
+    const { app, menu, log } = boot({
+      settings: {
+        listModels: () => ["p/m", "p/other"],
+        defaultModel: () => "p/m",
+        switchModel: (name) => {
+          chosen++;
+          return {
+            provider: {
+              model: name.split("/")[1] as string,
+              async complete() {
+                return { text: "ok", toolCalls: [], stopReason: "end" };
+              },
+            },
+            providerName: "p",
+            model: name.split("/")[1] as string,
+            contextWindow: 64000,
+          };
+        },
+        setKey: () => {},
+        setDefault: () => {},
+        settingLayers: () => ({ defaults }),
+        saveSetting: (key, value) => {
+          defaults = setSetting(defaults, key, value);
+        },
+      },
+    });
+    await app.command("/settings model");
+    app.dialogInput(ENTER);
+    app.dialogInput("3");
+    app.dialogInput(ENTER);
+    await tick();
+    expect(chosen).toBe(1);
+    expect(app.agent.provider.model).toBe("other");
+    expect(log.events.some((e) => e.type === "session/model" && e.model === "other")).toBe(true);
+    app.dialogInput(TAB);
+    app.dialogInput(ENTER);
+    app.dialogInput("2");
+    app.dialogInput(ENTER);
+    await tick();
+    expect(chosen).toBe(1);
+    expect(defaults.model).toBe("p/m");
+    expect(menu()).toContain("this session unchanged");
+    app.stop();
+  });
+  it("按组成导航,搜索后可以修改当前会话,不偷偷保存", async () => {
+    const { app, menu, saved } = boot();
     await app.command("/settings");
-    let m = menu();
-    expect(m).toContain("Settings");
-    expect(m).toContain("every session");
-    for (const g of ["display", "context", "tools", "strategy", "notifications", "model"])
-      expect(m).toContain(g);
-    // 来源列:foldSteps 5 来自 config;notify 的生效值是内置的 unfocused(界面没收到预设 off 与配置 always)
-    expect(m).toMatch(/foldSteps\s+5\s+.*config/);
-    expect(m).toMatch(/notify\s+unfocused\s+.*built-in/);
-    expect(m).toMatch(/fold\s+on\s+.*built-in/);
-    // 最长的键(compactionReserve)不把值列顶歪:键列按最长的键定宽
-    const col = (key: string, value: string) => {
-      const line = m.split("\n").find((l) => l.includes(key)) as string;
-      return line.indexOf(value, line.indexOf(key) + key.length);
-    };
-    expect(col("compactionReserve", "1000")).toBe(col("screen", "alt"));
-    expect(m).toMatch(/screen\s+alt\s+.*next start/);
-    // 光标缺省在第一行 screen;↓↓↓ 到 foldSteps,Enter 开值选单
-    app.dialogInput("\x1b[B");
-    app.dialogInput("\x1b[B");
-    app.dialogInput("\x1b[B");
-    app.dialogInput("\r");
-    m = menu();
-    expect(m).toContain("foldSteps");
-    expect(m).toContain("now 5 (config)");
-    expect(m).toContain("type a value");
-    expect(m).toContain("written to config defaults.foldSteps");
-    app.dialogInput("4"); // 10
-    app.dialogInput("\r");
+    expect(menu()).toContain("Agent setup");
+    for (const name of [
+      "Model",
+      "Instructions & memory",
+      "Tools & delegation",
+      "Context management",
+      "Execution & control",
+      "Save as preset",
+    ])
+      expect(menu()).toContain(name);
+    app.dialogInput("/");
+    app.dialogInput("foldLines");
+    expect(menu()).toContain("Output preview lines");
+    app.dialogInput(ENTER);
+    app.dialogInput("e");
+    app.dialogInput("\x15");
+    app.dialogInput("9");
+    app.dialogInput(ENTER);
     await tick();
-    expect(app.tui).toBeDefined();
-    expect(saved).toEqual([["foldSteps", 10]]);
-    m = menu();
-    expect(m).toContain("foldSteps → 10 · in effect now · saved to config");
-    expect(m).toMatch(/foldSteps\s+10\s+.*flag/); // 生效值与各层都不等:来源是这次改动
-    // 布尔:Enter 直接翻
-    app.dialogInput("\x1b[A"); // foldLines
-    app.dialogInput("\x1b[A"); // fold
-    app.dialogInput("\r");
-    await tick();
-    expect(saved.at(-1)).toEqual(["fold", false]);
-    expect(menu()).toMatch(/fold\s+off/);
-    app.dialogInput("\x1b");
+    expect(menu()).toContain("this session only");
+    expect(saved).toEqual([]);
+    expect(menu()).toContain("9");
+    app.dialogInput(ESC);
+    app.dialogInput(ESC);
     expect(app.dialogLines()).toEqual([]);
-    expect(doc()).not.toContain("Settings");
     app.stop();
   });
 
-  it("打字形态:/settings key value 直接落;策略类走槽命令并记事件;错值与未知键说明", async () => {
-    const { app, doc, saved } = boot();
+  it("保存默认值不改当前会话;重新打开仍区分实际值与保存值", async () => {
+    const { app, menu, saved } = boot();
+    await app.command("/settings foldSteps");
+    app.dialogInput(TAB);
+    app.dialogInput(ENTER);
+    app.dialogInput("5");
+    app.dialogInput(ENTER);
+    await tick();
+    expect(saved).toEqual([["foldSteps", 10]]);
+    expect(menu()).toContain("this session unchanged");
+    app.dialogInput(TAB);
+    expect(menu()).toMatch(/Expanded recent steps\s+5/);
+    app.dialogInput(ESC);
+    app.dialogInput(ESC);
+    await app.command("/settings foldSteps");
+    expect(menu()).toMatch(/Expanded recent steps\s+5/);
+    app.stop();
+  });
+
+  it("工具显示 Enabled/Disabled,开关改变下一轮实际发送的工具,并保留未知工具配置", async () => {
+    const { app, menu, requests } = boot({ disabledTools: ["missing-mcp-tool"] });
+    await app.command("/settings tools.disable");
+    app.dialogInput(ENTER);
+    expect(menu()).toMatch(/echo\s+Enabled/);
+    expect(menu()).toMatch(/missing-mcp-tool\s+Disabled/);
+    app.dialogInput(ENTER);
+    await tick();
+    expect(menu()).toMatch(/echo\s+Disabled/);
+    app.dialogInput(ESC);
+    app.dialogInput(ESC);
+    app.dialogInput(ESC);
+    await app.submit("hi");
+    expect(requests[0]).not.toContain("echo");
+    expect(requests[0]).toContain("plan");
+    app.stop();
+  });
+
+  it("自定义值报错留在编辑器,推荐值恢复有明确预览且可以取消", async () => {
+    const { app, menu } = boot();
+    await app.command("/settings planReminder");
+    app.dialogInput(ENTER);
+    app.dialogInput("e");
+    app.dialogInput("\x15");
+    app.dialogInput("many");
+    app.dialogInput(ENTER);
+    await tick();
+    expect(menu()).toContain("takes a whole number");
+    app.dialogInput("\x15");
+    app.dialogInput("12");
+    app.dialogInput(ENTER);
+    await tick();
+    expect(app.agent.planReminder).toBe(12);
+    app.dialogInput("r");
+    expect(menu()).toContain("Restore recommended value");
+    app.dialogInput(ESC);
+    expect(app.agent.planReminder).toBe(12);
+    app.dialogInput("r");
+    app.dialogInput(ENTER);
+    await tick();
+    expect(app.agent.planReminder).toBe(0);
+    app.stop();
+  });
+
+  it("需要重启的设置不冒充当前已生效;空段列表可以真的保存为空", async () => {
+    const { app, menu, saved } = boot();
+    await app.command("/settings prompt.sections");
+    app.dialogInput(ENTER);
+    expect(menu()).toContain("Requires a restart");
+    expect(saved).toEqual([]);
+    app.dialogInput(TAB);
+    app.dialogInput(ENTER);
+    for (let i = 0; i < 6; i++) {
+      app.dialogInput(ENTER);
+      await tick();
+      app.dialogInput(DOWN);
+    }
+    expect(saved.at(-1)).toEqual(["prompt.sections", []]);
+    app.dialogInput(ESC);
+    app.dialogInput(TAB);
+    expect(menu()).toMatch(/Prompt sections\s+6 selected/);
+    app.stop();
+  });
+
+  it("运行中策略切换失败不会把拒绝的值保存;界面设置仍可改", async () => {
+    let finish: ((turn: AssistantTurn) => void) | undefined;
+    const provider: Provider = {
+      model: "m",
+      complete: () =>
+        new Promise((r) => {
+          finish = r;
+        }),
+    };
+    const { app, doc, saved } = boot({ provider });
+    const pending = app.submit("wait");
+    await tick();
+    await app.command("/settings execution parallel");
+    expect(doc()).toContain("cannot change mid-turn");
+    expect(saved).toEqual([]);
     await app.command("/settings foldLines 9");
-    expect(doc()).toContain("foldLines → 9 · in effect now · saved to config");
+    expect(saved).toEqual([["foldLines", 9]]);
+    finish?.({ text: "ok", toolCalls: [], stopReason: "end" });
+    await pending;
+    app.stop();
+  });
+
+  it("持久化失败有恢复说明,保留编辑状态,不关闭工作台", async () => {
+    const { app, menu } = boot({
+      settings: {
+        listModels: () => [],
+        switchModel: () => {
+          throw new Error("unused");
+        },
+        setKey: () => {},
+        setDefault: () => {},
+        saveSetting: () => {
+          throw new Error("disk full");
+        },
+      },
+    });
+    await app.command("/settings fold");
+    app.dialogInput(TAB);
+    app.dialogInput(ENTER);
+    app.dialogInput("2");
+    app.dialogInput(ENTER);
+    await tick();
+    expect(menu()).toContain("disk full");
+    expect(menu()).toContain("Fold tool output");
+    expect(menu()).toContain("Enter apply");
+    app.stop();
+  });
+
+  it("方案保存包含当前注册设置与模型,加载先预览再修改默认值", async () => {
+    const { app, menu, presets } = boot();
+    await app.command("/settings");
+    app.dialogInput("8");
+    app.dialogInput(ENTER);
+    app.dialogInput("my-agent");
+    app.dialogInput(ENTER);
+    await tick();
+    expect(presets[0]?.name).toBe("my-agent");
+    expect(presets[0]?.values.model).toBe("p/m");
+    expect(presets[0]?.values.planReminder).toBe(0);
+    app.dialogInput("9");
+    app.dialogInput(ENTER);
+    app.dialogInput(DOWN);
+    app.dialogInput(ENTER);
+    expect(menu()).toContain("Load my-agent");
+    expect(menu()).toContain("Use for saved defaults");
+    app.dialogInput(ENTER);
+    await tick();
+    expect(menu()).toContain("my-agent saved as defaults");
+    expect(menu()).toContain("[Saved defaults]");
+    app.stop();
+  });
+
+  it("窄终端与长工具列表:视口有边界,选中最后一项仍可见且可操作", async () => {
+    const tools = Array.from({ length: 40 }, (_, i) => ({
+      ...echo,
+      name: `tool_${String(i).padStart(2, "0")}`,
+    }));
+    const { app, menu, term } = boot({ tools }, [60, 24]);
+    await app.command("/settings tools.disable");
+    app.dialogInput(ENTER);
+    app.dialogInput("\x1b[F");
+    expect(menu()).toMatch(/▸\s+tool_39/);
+    expect(menu()).toContain("of 40");
+    expect(app.dialogLines().length).toBeLessThanOrEqual(22);
+    expect(app.dialogLines().every((line) => stripAnsi(line).length <= 60)).toBe(true);
+    app.dialogInput(ENTER);
+    await tick();
+    expect(menu()).toMatch(/tool_39\s+Disabled/);
+    // 经过真实 TUI→ANSI→xterm 渲染链后,底部操作提示仍在可见窗口。
+    app.tui.requestRender();
+    await tick();
+    expect((await term.screen()).slice(-24).join("\n")).toContain("Esc back");
+    app.stop();
+  });
+
+  it("打字入口保留应用并保存语义,错误与恢复都明确", async () => {
+    const { app, doc, saved, log } = boot();
+    await app.command("/settings foldLines 9");
     expect(saved.at(-1)).toEqual(["foldLines", 9]);
-    await app.command("/settings approve ask");
-    expect(app.agent.slots.approve).toBeDefined();
-    expect(app.tui).toBeDefined();
-    expect(saved.at(-1)).toEqual(["approve", "ask"]);
-    await app.command("/settings notify off");
-    expect(saved.at(-1)).toEqual(["notify", "off"]);
     await app.command("/settings screen main");
     expect(doc()).toContain("screen → main · takes effect at the next start");
-    await app.command("/settings foldLines many");
-    expect(doc()).toContain("foldLines takes a whole number");
     await app.command("/settings nope 1");
     expect(doc()).toContain("unknown setting nope");
-    await app.command("/settings plan off");
-    expect(doc()).toContain("the plan tool is not loaded in this session");
-    await app.command("/settings tools.disable echo");
-    expect(saved.at(-1)).toEqual(["tools.disable", ["echo"]]);
-    await app.command("/settings tools.disable none");
-    expect(saved.at(-1)).toEqual(["tools.disable", undefined]);
-    app.stop();
-  });
-
-  it("/settings key 定位到那一行;列表与映射型开关有自己的子选单", async () => {
-    const { app, menu, saved } = boot();
-    await app.command("/settings results");
-    let m = menu();
-    expect(m).toMatch(/▸\s+results/);
-    app.dialogInput("\r");
-    m = menu();
-    expect(m).toContain("Enter cycles count · head · tail · all");
-    expect(m).toMatch(/1\s+echo\s+head/);
-    app.dialogInput("\r");
-    await tick();
-    const last = saved.at(-1);
-    expect(last?.[0]).toBe("results");
-    expect((last?.[1] as Record<string, string> | undefined)?.echo).toBe("tail");
-    app.dialogInput("\x1b");
-    await app.command("/settings prompt.sections");
-    app.dialogInput("\r");
-    m = menu();
-    expect(m).toMatch(/4\s+memory\s+on/);
-    app.dialogInput("4");
-    app.dialogInput("\r");
-    await tick();
-    expect(saved.at(-1)).toEqual([
-      "prompt.sections",
-      ["role", "env", "instructions", "skills", "append"],
-    ]);
+    expect(log.events.some((e) => e.type === "ext/event" && e.source === "setup")).toBe(true);
     app.stop();
   });
 });

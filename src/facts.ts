@@ -23,7 +23,7 @@ export function priorFailures(events: readonly AgentEvent[], call: ToolCall): nu
   for (const e of events) {
     if (e.type === "assistant/message") {
       for (const tc of e.toolCalls) calls.set(tc.id, { name: tc.name, key: argsKey(tc.args) });
-    } else if (e.type === "tool/result" && e.isError) {
+    } else if (e.type === "tool/result" && e.isError && e.outcome !== "unknown") {
       const c = calls.get(e.callId);
       if (c && c.name === call.name && c.key === key) n += 1;
     }

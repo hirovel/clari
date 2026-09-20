@@ -1,3 +1,4 @@
+import { Value } from "@sinclair/typebox/value";
 import type { ApproveDecision } from "./approval.js";
 import {
   type CompactionStrategy,
@@ -6,6 +7,7 @@ import {
   type PreservationPolicy,
 } from "./compaction.js";
 import { type AgentEvent, now, type ToolCall } from "./events.js";
+import { recordEvent, recordInput, toolOutput } from "./exchange.js";
 import { annotateResult, DEFAULT_FACTS, dateNote, type FactsConfig } from "./facts.js";
 import type { EventLog } from "./log.js";
 import { deriveMessages, type Message } from "./messages.js";
@@ -17,7 +19,7 @@ import {
   ProviderError,
   providerMessage,
 } from "./providers/errors.js";
-import { type Tool, validateArgs } from "./tools.js";
+import { type Tool, ToolOutcomeUnknownError, validateArgs } from "./tools.js";
 
 // ---------- 策略槽(全部是开放接口,内置实现无特权,自定义实现从外部注入) ----------
 
@@ -67,7 +69,7 @@ export type TurnOutcome = "idle" | "aborted" | { stopped: string };
 export type TurnDeps = {
   log: EventLog;
   provider: Provider;
-  tools: Tool[];
+  tools: Tool[] | (() => readonly Tool[]);
   slots?: {
     termination?: TerminationPolicy;
     steering?: SteeringPolicy;
@@ -80,12 +82,15 @@ export type TurnDeps = {
     assemble?: (events: readonly AgentEvent[]) => Message[];
   };
   /** 排空留言队列,返回待注入的用户消息。注入时点由 steering 决定;边界告诉队列该放哪些。 */
-  drainQueue?: (boundary: "step" | "turn") => string[];
+  drainQueue?: (
+    boundary: "step" | "turn",
+  ) => (string | { text: string; inputId: string; images?: import("./images.js").ImageInput[] })[];
   signal?: AbortSignal;
   onDelta?: (textDelta: string) => void;
   onReasoning?: (reasoningDelta: string) => void;
-  /** 原始流逐行回调(trace)。不进日志:体量大且可由 provider 重放,由 CLI 决定是否写旁路文件。 */
+  /** 非空 SSE 行的实时观察回调;完整响应独立保存到会话附件。 */
   onRaw?: (line: string) => void;
+  onRequest?: (body: string) => void;
   /** 强度级别。给函数则每次请求前取值,会话中切换下一请求即生效。缺省不传。 */
   effort?: EffortLevel | (() => EffortLevel | undefined);
   /** 压缩配置:给了就启用自动触发与溢出恢复。 */
@@ -94,7 +99,7 @@ export type TurnDeps = {
   agent?: string;
   /** 事实附注的开关(重复失败、慢调用、日期变化);缺省全开。 */
   facts?: FactsConfig;
-  /** 计划复述:连续这么多步没碰计划且还有未完成项就复述一次;0 = 从不。缺省 8。 */
+  /** 计划复述:连续这么多步没碰计划且还有未完成项就复述一次;0 = 关闭超时复述(缺省)。 */
   planReminder?: number;
 };
 
@@ -139,7 +144,11 @@ const defaultIsOverflow = (err: Error): boolean => isContextOverflow(err);
 export function recordingProvider(
   log: EventLog,
   provider: Provider,
-  opts: { threshold?: number; onRaw?: (line: string) => void } = {},
+  opts: {
+    threshold?: number;
+    onRaw?: (line: string) => void;
+    onRequest?: (body: string) => void;
+  } = {},
 ): Provider {
   return {
     model: provider.model,
@@ -157,9 +166,12 @@ export function recordingProvider(
         body: describeRequestBody(log.events, messages),
       });
       try {
+        const record = await recordInput(log, messages, tools, callOpts.signal);
         return await provider.complete(messages, tools, {
           ...callOpts,
+          ...(record && { record }),
           ...(opts.onRaw && { onRaw: opts.onRaw }),
+          ...(opts.onRequest && { onRequest: opts.onRequest }),
           onRetry: (info) => {
             callOpts.onRetry?.(info);
             logRetry(log, info);
@@ -190,6 +202,7 @@ async function compactIfNeeded(
     provider: recordingProvider(deps.log, deps.provider, {
       threshold,
       ...(deps.onRaw && { onRaw: deps.onRaw }),
+      ...(deps.onRequest && { onRequest: deps.onRequest }),
     }),
     ...(cfg.preservation && { preservation: cfg.preservation }),
     ...(deps.signal && { signal: deps.signal }),
@@ -198,18 +211,20 @@ async function compactIfNeeded(
   // 进展门:压缩必须真的变小,否则不落盘也不许重试。
   if (estimateAfter(deps.log.events, payload) >= before) return false;
   deps.log.append({ type: "compaction", at: now(), ...payload });
+  await deps.log.checkpoint(deps.signal);
   return true;
 }
 
 const LENGTH_NOTICE =
   "Not executed: the response was cut off by the output token limit, so the arguments may be incomplete. Issue this tool call again.";
+const INTERRUPTED_NOTICE = "Interrupted by the user; not executed.";
 
 /**
  * 跑一个 turn:从当前日志出发,循环 step 直到无事可欠(模型不调工具且队列为空)、
  * 被打断、或终止策略叫停。所有状态变化都以事件落盘,函数本身不持有状态。
  */
 export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
-  const { log, provider, tools, signal, onDelta, onReasoning } = deps;
+  const { log, provider, signal, onDelta, onReasoning } = deps;
   const termination = deps.slots?.termination ?? untilIdle;
   const steering = deps.slots?.steering ?? steer;
   const approve = deps.slots?.approve ?? allowAll;
@@ -217,15 +232,11 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   const drainQueue = deps.drainQueue ?? (() => []);
   const facts = { ...DEFAULT_FACTS, ...deps.facts };
   const planReminder = deps.planReminder ?? DEFAULT_PLAN_REMINDER;
-  const defs: ToolDef[] = tools.map((t) => ({
-    name: t.name,
-    description: t.description,
-    parameters: t.parameters,
-  }));
   let steps = 0;
 
   let overflowRecovered = false;
   while (true) {
+    if (signal?.aborted) return "aborted";
     // 自动压缩检查:每次模型请求前,占用超阈值即压;manual 与 remind 不在这里动手,溢出时另有兜底。
     if (deps.compaction && (deps.compaction.trigger ?? "threshold") === "threshold") {
       if (await compactIfNeeded(deps, deps.compaction, false)) restatePlan(log, "compacted", steps);
@@ -241,6 +252,16 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
 
     // 请求事件:正文不落盘,它就是此刻的投影;记下规模与口径,检视器按需原样重建。
     // 组装槽换了投影时,差异部分记进 body,重建仍然逐字节。
+    // 定义与执行器取同一版快照,服务端在请求中途更新清单不会替换已发出调用的实现。
+    const tools = (typeof deps.tools === "function" ? deps.tools() : deps.tools).map((tool) => ({
+      ...tool,
+      parameters: Value.Clone(tool.parameters),
+    }));
+    const defs: ToolDef[] = tools.map(({ name, description, parameters }) => ({
+      name,
+      description,
+      parameters,
+    }));
     const assemble = deps.slots?.assemble;
     const messages = assemble ? assemble(log.events) : deriveMessages(log.events);
     const body = assemble ? describeRequestBody(log.events, messages) : undefined;
@@ -262,16 +283,20 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
 
     let turn: AssistantTurn;
     try {
+      const record = await recordInput(log, messages, defs, signal);
       turn = await provider.complete(messages, defs, {
+        ...(record && { record }),
         ...(onDelta && { onDelta }),
         ...(onReasoning && { onReasoning }),
         ...(signal && { signal }),
         ...(deps.onRaw && { onRaw: deps.onRaw }),
+        ...(deps.onRequest && { onRequest: deps.onRequest }),
         ...(effort && { effort }),
         onRetry: (info) => logRetry(log, info),
       });
     } catch (err) {
       logRequestError(log, err);
+      if (signal?.aborted) return "aborted";
       // 溢出恢复:压缩取得进展才许重试,且只重试一次。
       const overflow = cfg && (cfg.isOverflow ?? defaultIsOverflow)(err as Error);
       if (!overflow || overflowRecovered) throw err;
@@ -287,6 +312,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
       ...turn,
       latencyMs: Date.now() - startedAt,
     });
+    await log.checkpoint(signal?.aborted ? undefined : signal);
     steps += 1;
 
     if (turn.stopReason === "aborted") return "aborted";
@@ -341,17 +367,29 @@ function restatePlan(log: EventLog, reason: "compacted" | "stale", steps: number
 }
 
 /** 注入留言。决定先于内容落盘:检视器读到 decision 就知道随后几条 user/message 是插话而非新 turn。 */
-function inject(log: EventLog, boundary: "step" | "turn", texts: string[]): number {
+function inject(
+  log: EventLog,
+  boundary: "step" | "turn",
+  texts: (
+    | string
+    | { text: string; inputId: string; images?: import("./images.js").ImageInput[] }
+  )[],
+): number {
   if (texts.length === 0) return 0;
   log.append({ type: "decision", at: now(), slot: "steering", boundary, injected: texts.length });
-  for (const text of texts) log.append({ type: "user/message", at: now(), text });
+  for (const text of texts)
+    log.append({
+      type: "user/message",
+      at: now(),
+      ...(typeof text === "string" ? { text } : text),
+    });
   return texts.length;
 }
 
 /**
  * 把一次请求的消息表示成"前缀投影 + 尾部":找最长的事件前缀,其投影是 messages 的前缀,
  * 剩下的消息原样记为 tail。正常步的 tail 为空;压缩摘要请求的 tail 是那条摘要指示。
- * 记这个而不是记全文,是为了不让日志膨胀成 O(n²),同时仍能逐字节重建。
+ * 紧凑描述用于投影比较;实际适配器输入另存附件,不依赖未来投影实现重建。
  */
 export function describeRequestBody(
   events: readonly AgentEvent[],
@@ -405,6 +443,7 @@ function appendResult(
   content: string,
   isError: boolean,
   durationMs?: number,
+  outcome?: "unknown",
 ): void {
   log.append({
     type: "tool/result",
@@ -414,6 +453,7 @@ function appendResult(
     content,
     isError,
     ...(durationMs !== undefined && { durationMs }),
+    ...(outcome && { outcome }),
   });
 }
 
@@ -421,19 +461,70 @@ type Prepared =
   | { call: ToolCall; immediate: string }
   | { call: ToolCall; tool: Tool; args: unknown };
 
-type Executed = { content: string; isError: boolean; durationMs: number };
+type Executed = { content: string; isError: boolean; durationMs?: number; outcome?: "unknown" };
 
 async function runOne(
   p: Extract<Prepared, { tool: Tool }>,
   signal: AbortSignal,
+  log: EventLog,
 ): Promise<Executed> {
+  // 审批与前一批执行都可能等待;真正调用执行器前重新检查取消。
+  if (signal.aborted) return { content: INTERRUPTED_NOTICE, isError: true };
   const startedAt = Date.now();
+  const output = toolOutput(log, p.call.id, p.call.name);
+  if (log.recording)
+    recordEvent(log, "tool/start", { callId: p.call.id, name: p.call.name, args: p.args });
   try {
-    const content = await p.tool.execute(p.args as never, { signal, callId: p.call.id });
-    return { content, isError: false, durationMs: Date.now() - startedAt };
+    await log.checkpoint(signal);
+  } catch (error) {
+    if (!signal.aborted) throw error;
+  }
+  if (signal.aborted) return { content: INTERRUPTED_NOTICE, isError: true };
+  const finish = async (result: Executed): Promise<Executed> => {
+    if (output) {
+      await log.checkpoint();
+      // 并行工具各自完成即保存;模型结果仍按派发顺序追加,不让慢工具吞掉已完成证据。
+      recordEvent(log, "tool/finished", {
+        callId: p.call.id,
+        bytes: output.bytes,
+        ...result,
+        ...(output.ref.missingFrom !== undefined && { missingFrom: output.ref.missingFrom }),
+      });
+      await log.checkpoint();
+    }
+    return result;
+  };
+  try {
+    const content = await p.tool.execute(p.args as never, {
+      signal,
+      callId: p.call.id,
+      ...(output && { output }),
+    });
+    if (output && !output.written) {
+      output.write(content);
+      recordEvent(log, "tool/output-source", {
+        callId: p.call.id,
+        source: "returned text",
+        note: "No separate original output was provided by this tool",
+      });
+    }
+    return finish({ content, isError: false, durationMs: Date.now() - startedAt });
   } catch (err) {
+    if (output && !output.written) {
+      output.write((err as Error).message);
+      recordEvent(log, "tool/output-source", {
+        callId: p.call.id,
+        source: "error text",
+        note: "No separate original output was provided by this tool",
+      });
+    }
     //:执行失败也是结果。打断导致的失败同样如实记录。
-    return { content: (err as Error).message, isError: true, durationMs: Date.now() - startedAt };
+    return finish({
+      content: (err as Error).message,
+      isError: true,
+      durationMs: Date.now() - startedAt,
+      ...(err instanceof ToolOutcomeUnknownError && { outcome: "unknown" as const }),
+    });
   }
 }
 
@@ -484,20 +575,31 @@ async function executeCalls(
         tools: items.map((p) => p.call.name),
       });
     }
-    const results = await Promise.all(items.map((p) => runOne(p, signal)));
+    const results = await Promise.all(items.map((p) => runOne(p, signal, ctx.log)));
+    await ctx.log.checkpoint(signal?.aborted ? undefined : signal);
     items.forEach((p, i) => {
       const r = results[i] as Executed;
       // 事实附注贴在这条结果上:此前同样的失败有几次、这次比中位耗时慢多少。附注进日志,模型看到的就是它。
-      const content = annotateResult(ctx.log.events, p.call, r, ctx.facts);
-      appendResult(ctx.log, p.call, content, r.isError, r.durationMs);
+      const content =
+        r.durationMs === undefined || r.outcome === "unknown"
+          ? r.content
+          : annotateResult(ctx.log.events, p.call, r, ctx.facts);
+      appendResult(ctx.log, p.call, content, r.isError, r.durationMs, r.outcome);
+      if (ctx.log.recording)
+        recordEvent(ctx.log, "tool/end", {
+          callId: p.call.id,
+          isError: r.isError,
+          ...(r.outcome && { outcome: r.outcome }),
+        });
     });
+    await ctx.log.checkpoint(signal?.aborted ? undefined : signal);
   };
 
   for (const call of calls) {
     // 打断后剩余调用不再执行,但必须逐个补应答。
     if (signal.aborted) {
       await flush();
-      appendResult(ctx.log, call, "Interrupted by the user; not executed.", true);
+      appendResult(ctx.log, call, INTERRUPTED_NOTICE, true);
       continue;
     }
     const p = await prepare(call);

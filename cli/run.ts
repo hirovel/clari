@@ -6,25 +6,16 @@ import { Agent } from "../src/agent.js";
 import { policyApprove } from "../src/approval.js";
 import { usageTotals } from "../src/cost.js";
 import type { AgentEvent } from "../src/events.js";
-import { maxSteps } from "../src/loop.js";
 import { expandFileRefs } from "./attachments.js";
 import {
   beginSession,
   bootstrap,
-  buildCompaction,
-  buildTools,
-  loadExtensions,
-  memoryFiles,
   parseCommonArgs,
-  parsePreservation,
   resolveApproval,
-  resolveToolPrompts,
   sessionsDir,
   USAGE,
 } from "./bootstrap.js";
-import { connectMcpServers, type McpBridge } from "./mcp/bridge.js";
-import { loadMcpServers, mcpConfigOf } from "./mcp/config.js";
-import { discoverSkills } from "./prompt.js";
+import { prepareSessionRuntime } from "./session-runtime.js";
 
 let args: ReturnType<typeof parseCommonArgs>;
 try {
@@ -61,73 +52,44 @@ try {
 const { log, sessionFile } = beginSession(args, choice, process.cwd(), sessionsDir(boot.config));
 // 事件流输出(--events):每条事件一行 JSON,与会话文件逐字节相同;给外部程序订阅内核的全部状态变化。
 if (args.events) log.subscribe((e) => process.stdout.write(`${JSON.stringify(e)}\n`));
-let compaction: Awaited<ReturnType<typeof buildCompaction>>;
-let ext: Awaited<ReturnType<typeof loadExtensions>>;
+let runtime: Awaited<ReturnType<typeof prepareSessionRuntime>>;
+let agent: Agent;
+const recordingOffs: (() => void)[] = [];
+const watchSaving = (source: typeof log) => {
+  const off = source.recording?.subscribe(() => {
+    if (source.recording?.error)
+      console.error(
+        `Saving failed (${source.path}): ${source.recording.error}. Work continues; retrying storage every second. Unsaved data may be lost on exit.`,
+      );
+  });
+  if (off) recordingOffs.push(off);
+};
+watchSaving(log);
 try {
-  compaction = await buildCompaction(
-    args.compaction,
-    choice.contextWindow,
-    args.compactionReserve,
-    args.compactionTrigger,
-  );
-  if (args.preservation) compaction.preservation = parsePreservation(args.preservation).policy;
-  ext = await loadExtensions(args.extensions, { cwd: process.cwd(), log });
-} catch (err) {
-  console.error((err as Error).message);
+  runtime = await prepareSessionRuntime({
+    boot,
+    args,
+    log,
+    sessionFile,
+    slots: () => agent.slots,
+    current: () => ({ provider: agent.provider, tools: agent.tools }),
+    onChild: (child) => watchSaving(child.log),
+  });
+  runtime.activate();
+} catch (error) {
+  console.error((error as Error).message);
   process.exit(2);
 }
-const toolPromptsCfg = resolveToolPrompts(args, boot.config);
-const baseTools = buildTools(
-  log,
-  choice,
-  compaction,
-  args.subagent,
-  undefined,
-  args.memory ? memoryFiles() : undefined,
-  args.skillsLoad === "tool" ? discoverSkills(process.cwd()) : undefined,
-  boot.config.fetch,
-  toolPromptsCfg,
-  {
-    ...(boot.config.subagents && { config: boot.config.subagents }),
-    slots: () => agent.slots,
-    providerFor: (model) => boot.choose(model).provider,
-  },
-  { plan: args.plan ?? true },
-);
-const tools = [
-  ...baseTools.filter((t) => !ext.tools?.some((x) => x.name === t.name)),
-  ...(ext.tools ?? []),
-].filter((t) => !args.disabledTools?.includes(t.name));
-// MCP 服务器:一次性模式也连,跑完关。
-const mcpCfg = mcpConfigOf(boot.config.mcp);
-const mcpServers = loadMcpServers(mcpCfg, process.cwd());
-let mcp: McpBridge | undefined;
-if (mcpServers.length > 0) {
-  try {
-    mcp = await connectMcpServers(mcpServers, {
-      log,
-      tools,
-      artifactsDir: sessionFile.replace(/.jsonl$/, ".mcp"),
-      ...(mcpCfg && { mcp: mcpCfg }),
-    });
-  } catch (err) {
-    console.error((err as Error).message);
-    process.exit(2);
-  }
-}
-
 const approvalCfg = resolveApproval(args, boot.config);
-const agent = new Agent({
+agent = new Agent({
   log,
-  provider: choice.provider,
-  tools,
-  compaction,
+  provider: runtime.choice.provider,
+  tools: () => runtime.tools.filter((tool) => !args.disabledTools?.includes(tool.name)),
+  compaction: runtime.compaction,
   ...(args.facts && { facts: args.facts }),
   ...(args.planReminder !== undefined && { planReminder: args.planReminder }),
-  // 一次性模式没有人在旁边点头:--approve ask 等于全部拒绝,模型会收到"用户拒绝"的结果。
   slots: {
-    ...ext.slots,
-    ...(args.maxSteps && { termination: maxSteps(args.maxSteps) }),
+    ...runtime.slots,
     ...(args.approve === "ask" && {
       approve: () => ({
         allowed: false,
@@ -135,19 +97,14 @@ const agent = new Agent({
       }),
     }),
     ...(typeof approvalCfg === "object" && { approve: policyApprove(approvalCfg, undefined) }),
-    ...(args.execution && { execution: args.execution }),
   },
   ...(args.effort && { effort: args.effort }),
-  ...(!args.json &&
-    !args.events && {
-      onDelta: (d: string) => process.stdout.write(d),
-    }),
+  ...(!args.json && !args.events && { onDelta: (d: string) => process.stdout.write(d) }),
 });
 
 const startIndex = log.events.length;
 try {
   const outcome = await agent.prompt(expandFileRefs(prompt).text);
-  await mcp?.close();
   const fresh = log.events.slice(startIndex);
   const last = [...fresh].reverse().find((e) => e.type === "assistant/message");
   const text = last?.type === "assistant/message" ? last.text : "";
@@ -170,7 +127,11 @@ try {
   if (args.json) {
     console.log(JSON.stringify({ ok: false, error: (err as Error).message, sessionFile }, null, 2));
   } else console.error(`request failed: ${(err as Error).message}`);
-  process.exit(1);
+  process.exitCode = 1;
+} finally {
+  await runtime.dispose();
+  await log.checkpoint();
+  for (const off of recordingOffs) off();
 }
 
 function summarize(

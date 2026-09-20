@@ -6,7 +6,12 @@ import { usageTotals } from "../src/cost.js";
 import type { AgentEvent } from "../src/events.js";
 
 const at = "2026-09-07T10:00:00.000Z";
-type Usage = { inputTokens: number; outputTokens: number; cacheReadTokens?: number };
+type Usage = {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens?: number;
+  reasoningTokens?: number;
+};
 
 const request = (
   messages: number,
@@ -44,7 +49,7 @@ const result = (callId: string, name: string, content: string, isError = false):
   durationMs: 5,
 });
 
-/** 四步的干净会话:每步只在末尾追加,估算差额固定在 2000,缓存随前缀长大。 */
+/** 首次纯估算遗漏工具定义;后续估算已有供应商用量作基准。 */
 function clean(): AgentEvent[] {
   return [
     { type: "session/start", at, model: "m", system: "s".repeat(8000) },
@@ -54,18 +59,18 @@ function clean(): AgentEvent[] {
       { id: "c1", name: "read" },
     ]),
     result("c1", "read", "file body"),
-    request(4, 2100),
+    request(4, 4030),
     reply("more", { inputTokens: 4100, outputTokens: 20, cacheReadTokens: 2000 }, [
       { id: "c2", name: "read" },
     ]),
     result("c2", "read", "another file"),
-    request(6, 2200),
+    request(6, 4130),
     reply("still", { inputTokens: 4200, outputTokens: 20, cacheReadTokens: 2100 }, [
       { id: "c3", name: "read" },
     ]),
     result("c3", "read", "a third file"),
-    request(8, 2300),
-    reply("done", { inputTokens: 4300, outputTokens: 30, cacheReadTokens: 2200 }),
+    request(8, 4230),
+    reply("done", { inputTokens: 4300, outputTokens: 30, cacheReadTokens: 3584 }),
   ];
 }
 
@@ -84,8 +89,16 @@ describe("会话对照", () => {
     const k = byId(events);
     for (const id of ["A", "B", "C", "D", "G"]) expect(k[id]?.status, id).toBe("pass");
     for (const id of ["E", "F", "H", "I"]) expect(k[id]?.status, id).toBe("skip");
-    expect(k.C?.detail).toContain("gap ≈2.0k");
-    expect(k.D?.detail).toContain("3 of 3 requests hit at least half");
+    expect(k.C?.detail).toContain("3 comparable");
+    expect(k.C?.detail).toContain("1 excluded");
+    expect(k.D?.detail).toContain("3 of 4 requests report cache hits");
+    // 同一模型与工具也不足以比较:压缩重置估算,策略请求可自带正文。
+    const reset = clean();
+    reset.splice(5, 0, { type: "compaction", at, cleared: [4], strategy: "clear" });
+    expect(byId(reset).C?.status).toBe("skip");
+    const corruptCache = clean();
+    (corruptCache[12] as { usage: Usage }).usage.cacheReadTokens = 5000;
+    expect(byId(corruptCache).D?.status).toBe("fail");
     const text = reportLines("s.jsonl", events.length, c, usageTotals(events)).join("\n");
     expect(text).toContain("4 requests");
     expect(text).toContain("PASS  A");
@@ -106,6 +119,13 @@ describe("会话对照", () => {
     expect(last.changedBefore).toBe(true);
     expect(last.keep).toBeLessThan(last.prevLen); // 前缀确实断了
     expect(c.checks.find((x) => x.id === "A")?.status).toBe("pass");
+    // 组装槽增加的临时尾部也属于请求正文,下一步删掉它确实打断前缀。
+    const custom = clean();
+    const first = custom[2] as Extract<AgentEvent, { type: "request" }>;
+    first.messages = 3;
+    first.body = { prefixEvents: 2, tail: [{ role: "user", content: "temporary reminder" }] };
+    expect(byId(custom).A?.status).toBe("fail");
+    expect(byId(custom).B?.status).toBe("pass");
   });
 
   it("日志重建不出发出去的东西:B 指出是第几次请求", () => {
@@ -146,14 +166,18 @@ describe("会话对照", () => {
     expect(text).toContain("FAIL  C");
   });
 
-  it("全文思考漏在带工具的回复上:H 数出来是几分之几", () => {
+  it("思考记录:零用量不是丢失,未知不能推断,明确的全文记录矛盾才失败", () => {
     const events = clean();
     const first = events[3] as Extract<AgentEvent, { type: "assistant/message" }>;
     first.reasoning = "why";
     first.reasoningKind = "full";
-    const h = byId(events).H;
-    expect(h?.status).toBe("fail");
-    expect(h?.detail).toContain("1 of 3 tool-calling replies carry thinking");
+    (events[6] as { usage: Usage }).usage.reasoningTokens = 0;
+    expect(byId(events).H?.status).toBe("pass");
+    const missing = events[9] as Extract<AgentEvent, { type: "assistant/message" }>;
+    missing.reasoningKind = "full";
+    missing.usage = { inputTokens: 4200, outputTokens: 20, reasoningTokens: 8 };
+    expect(byId(events).H?.status).toBe("fail");
+    expect(byId(clean()).H?.status).toBe("skip");
   });
 
   it("旁路文件:给了就判它覆盖每一次请求", () => {
@@ -163,6 +187,10 @@ describe("会话对照", () => {
     ).toMatchObject({ status: "pass", detail: "40 lines covering 4 of 4 requests" });
     expect(
       analyze(events, { lines: 9, requests: [2] }).checks.find((k) => k.id === "I")?.status,
+    ).toBe("fail");
+    expect(
+      analyze(events, { lines: 40, requests: [2, 5, 8, 99] }).checks.find((k) => k.id === "I")
+        ?.status,
     ).toBe("fail");
   });
 });

@@ -90,24 +90,3 @@ export class Block implements Component {
     return out;
   }
 }
-
-/** 一行两端:左边状态,右边用量;放不下时右边先让。 */
-export class SplitLine implements Component {
-  private left = "";
-  private right = "";
-
-  set(left: string, right: string): void {
-    this.left = left;
-    this.right = right;
-  }
-
-  invalidate(): void {}
-
-  render(width: number): string[] {
-    const inner = Math.max(1, width - 2);
-    const l = visibleWidth(this.left);
-    const r = visibleWidth(this.right);
-    if (l + 2 + r <= inner) return [` ${this.left}${" ".repeat(inner - l - r)}${this.right} `];
-    return [` ${this.left} `];
-  }
-}

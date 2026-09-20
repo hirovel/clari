@@ -1,6 +1,7 @@
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
 import { fmtMs, fmtTok, RequestInspector } from "../cli/inspector.js";
+import type { RequestRecording } from "../cli/session-records.js";
 import type { AgentEvent } from "../src/events.js";
 import { EventLog } from "../src/log.js";
 import { runTurn } from "../src/loop.js";
@@ -70,14 +71,28 @@ async function session(): Promise<{ log: EventLog; provider: Provider }> {
   return { log, provider };
 }
 
-function build(log: EventLog, provider: Provider, rows = 30) {
+function build(log: EventLog, provider: Provider, rows = 30, currentDefs = defs) {
   let closed = 0;
   const insp = new RequestInspector({
     events: () => log.events,
     providerFor: () => provider,
-    tools: () => defs,
+    tools: () => currentDefs,
     rows: () => rows,
-    rawFor: (i) => (i === 2 ? ["data: {}", "data: [DONE]"] : undefined),
+    sessions: () => [
+      {
+        name: "main",
+        events: log.events,
+        recordingFor: (i) =>
+          i === 2
+            ? {
+                bodies: [],
+                attempts: [
+                  { n: 1, status: 200, state: "complete", response: "data: {}\ndata: [DONE]" },
+                ],
+              }
+            : undefined,
+      },
+    ],
     onClose: () => {
       closed += 1;
     },
@@ -133,22 +148,27 @@ describe("请求检视器", () => {
     insp.handleInput("2");
     doc = text();
     expect(doc).toContain("[2 decisions]");
-    expect(doc).toContain("auto-compaction check");
-    expect(doc).toContain("not triggered");
-    expect(doc).toContain("Every decision the kernel made in this step. Nothing else happened.");
+    expect(doc).toContain("recorded threshold");
+    expect(doc).toContain("below threshold");
 
     insp.handleInput("3");
     doc = text();
     expect(doc).toContain("[3 sent]");
-    expect(doc).toContain("[1] system");
-    expect(doc).toContain("├ 角色与规则");
-    expect(doc).toContain("├ 环境  15 tok · 94%");
-    expect(doc).toContain("你是助手");
-    expect(doc).toContain("[2] user");
-    expect(doc).toContain("读一下");
-    expect(doc).toContain("full bodies (f to fold)");
-    insp.handleInput("f");
-    expect(text()).toContain("bodies folded (f to unfold)");
+    expect(doc).toContain("1. system");
+    expect(doc).toContain("2. user");
+    expect(doc).toContain("reconstructed from events");
+    expect(doc).not.toContain("├ 角色与规则");
+    insp.handleInput("\r");
+    expect(text()).toContain("├ 角色与规则");
+    expect(text()).toContain("├ 环境  15 tok · 94%");
+    expect(text()).toContain("[−] 1. system");
+    expect(text()).toContain("[+] 2. user");
+    insp.handleInput("\x1b[B");
+    insp.handleInput("\r");
+    expect(text()).toContain("[−] 2. user");
+    expect(text()).toContain("[−] 1. system");
+    insp.handleInput("f"); // 普通字符不能触发展开、编辑或发送。
+    expect(text()).toContain("[−] 2. user");
 
     insp.handleInput("4");
     doc = text();
@@ -160,21 +180,24 @@ describe("请求检视器", () => {
     insp.handleInput("5");
     doc = text();
     expect(doc).toContain("[5 wire JSON]");
-    expect(doc).toContain("byte-identical to what was sent");
+    expect(doc).toContain("Reconstructed preview");
     expect(doc).toContain('"model": "fake"');
     expect(doc).toContain('"stream": true');
 
     insp.handleInput("6");
     doc = text();
     expect(doc).toContain("[6 received]");
-    expect(doc).toContain("stop reason tool");
-    expect(doc).toContain("thinking");
-    expect(doc).toContain("用户想读内容");
     expect(doc).toContain("先看看");
-    expect(doc).toContain("» echo");
-    expect(doc).toContain('"text": "hi"');
-    expect(doc).toContain("raw stream");
-    expect(doc).toContain("data: [DONE]");
+    expect(doc).toContain("Call · echo");
+    expect(doc).toContain("HTTP attempt 1");
+    expect(doc).not.toContain("data: [DONE]");
+    insp.handleInput("\x1b[B");
+    insp.handleInput("\r");
+    expect(text()).toContain('"text": "hi"');
+    insp.handleInput("\x1b[B");
+    insp.handleInput("\r");
+    expect(text()).toContain("data: [DONE]");
+    expect(text()).toContain("用户想读内容");
   });
 
   it("按键:方向切分区、[ ] 切请求、滚动有位置提示、Esc 逐级返回并关闭", async () => {
@@ -322,5 +345,54 @@ describe("请求检视器", () => {
     insp.handleInput("\r");
     insp.handleInput("5");
     expect(text()).toContain("This provider has no wire()");
+    // 历史请求有工具,当前已找不到定义:不能伪造一份少工具的历史线路正文。
+    const missing = build(log, scripted([]), 30, []);
+    missing.insp.handleInput("\r");
+    missing.insp.handleInput("4");
+    expect(missing.text()).toContain("Unavailable definitions: echo");
+    expect(missing.text()).not.toContain("No tools were sent");
+    missing.insp.handleInput("5");
+    expect(missing.text()).not.toContain('"stream": true');
+    expect(missing.text()).toContain("Cannot reconstruct");
+
+    // 请求尚未返回时,旁路记录会变化而事件数不变;不能让缓存一直显示未捕获。
+    const events = log.events.slice(0, 3);
+    const trace: RequestRecording = { bodies: [], attempts: [] };
+    const live = new RequestInspector({
+      events: () => events,
+      sessions: () => [{ name: "main", events, recordingFor: () => trace }],
+      providerFor: () => undefined,
+      tools: () => [],
+      rows: () => 30,
+      onClose: () => {},
+      requestRender: () => {},
+    });
+    live.showRequest(1, 5);
+    const render = () => live.render(100).map(stripAnsi).join("\n");
+    expect(render()).toContain("Cannot reconstruct");
+    trace.bodies.push('{"model":"historical","tools":[{"name":"echo"}]}');
+    expect(render()).toContain('"model": "historical"');
+    expect(render()).not.toContain("Cannot reconstruct");
+    live.handleInput("6");
+    expect(render()).toContain("No HTTP response captured");
+    trace.attempts?.push({ n: 1, state: "unfinished", response: "data: live-chunk" });
+    expect(render()).toContain("data: live-chunk");
+    // 翻页后正文块的标题已经滚出视口,固定头仍需说明 Enter 操作谁。
+    const attempt = trace.attempts?.[0];
+    if (!attempt) throw new Error("missing attempt");
+    attempt.response = Array.from({ length: 100 }, (_, i) => `data: chunk-${i}`).join("\n");
+    live.handleInput("\r");
+    render();
+    live.handleInput("\x1b[6~");
+    const page = live.render(60).map(stripAnsi).join("\n");
+    expect(page).toContain("Selected · HTTP attempt 1");
+    expect(page).not.toContain("data: chunk-0\n");
+    // 发送页不能把读取失败隐藏在重建标签背后。
+    trace.error = "Missing or unreadable recording: fixture input";
+    live.handleInput("3");
+    const damaged = live.render(60).map(stripAnsi).join("\n");
+    expect(damaged).toContain("Recording unavailable or damaged");
+    expect(damaged).toContain("Missing or unreadable recording");
+    expect(damaged).toContain("reconstructed from events");
   });
 });

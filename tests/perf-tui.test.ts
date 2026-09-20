@@ -118,7 +118,7 @@ describe("界面回放", () => {
         tools: [],
         compaction: { strategy: async () => null, window: 100000, reserveTokens: 1000 },
         reserveTokens: 1000,
-        info: { model: "m", providerName: "p", sessionFile: "s" },
+        info: { model: "m", providerName: "p", sessionFile: "s", resumed: true },
         onExit: () => {},
       });
     });

@@ -46,7 +46,7 @@ function messageKey(m: Message): string {
   return k;
 }
 
-/** 相同前缀有多长:逐条比 JSON(按对象缓存)。缓存命中的上限就是它。 */
+/** 相同消息前缀有多长:逐条比 JSON(按对象缓存),不含工具定义和供应商格式。 */
 export function unchangedPrefix(prev: Message[] | undefined, cur: Message[]): number {
   if (!prev) return 0;
   let i = 0;
@@ -65,7 +65,7 @@ function tokensOf(messages: Message[], upTo = messages.length): number {
   return s;
 }
 
-/** 发出前算出的缓存命中上限(相同前缀的 token),响应回来与实测对照。keep 已算过就传进来。 */
+/** 相同消息前缀的粗估 token;可与缓存实测并列查看,不能作为命中上限。 */
 export function predictedCache(
   previous: Message[] | undefined,
   messages: Message[],
@@ -260,9 +260,18 @@ const ERROR_LINES = 20;
  * 折叠按可见度:count 只有头;head 前 N 行;tail 后 N 行;all 全部。出错的结果不按 count 折。
  */
 export function resultLines(
-  r: { name: string; content: string; isError: boolean; durationMs?: number },
+  r: Pick<
+    Extract<AgentEvent, { type: "tool/result" }>,
+    "name" | "content" | "isError" | "durationMs" | "outcome"
+  >,
   opts: { folded: boolean; head: number; view: ResultView },
 ): string[] {
+  if (r.outcome === "unknown")
+    return [
+      `${c.faint(G.body)} ${c.jin("?")} ${c.soft(r.name)} ${c.jin("· result unknown")}`,
+      `  ${c.soft(r.content.split("\n")[0] ?? "")}`,
+      `  ${c.jin("/session recovery")} ${c.soft("· reason and original arguments")}`,
+    ];
   // 静成功、响失败:✓ 是次要色,只有 ✗ 用朱。
   const mark = r.isError ? c.zhu(G.err) : c.soft(G.ok);
   const trimmed = r.content.trim();
@@ -323,7 +332,9 @@ export function errorCardLines(
  */
 export function firstRunLines(): string[] {
   return [
-    c.faint("Ask anything · @path attaches a file · / commands · Ctrl+K palette · ? shortcuts"),
+    c.faint(
+      "Ask anything · @path attaches a file · /settings agent setup · Ctrl+K palette · /help",
+    ),
   ];
 }
 
@@ -335,22 +346,24 @@ export function thesisLines(): string[] {
   ];
 }
 
-/** ? 键:全部快捷键,一屏说完。 */
+/** 命令面板的快捷键说明。 */
 export function shortcutLines(): string[] {
   const k = (key: string, what: string) => `  ${c.ink(key.padEnd(12))} ${c.soft(what)}`;
   return [
     c.soft("Shortcuts"),
-    k("Enter", "send · Alt+Enter queue for after the current step · Shift+Enter new line"),
-    k("Esc", "interrupt the running turn · release the step cursor"),
-    k("Ctrl+K", "command palette: commands, models, skills, templates, login"),
+    k("Enter", "send; while running, queue as steering"),
+    k("Alt+Enter", "follow-up after the current turn"),
+    k("Shift+Enter", "new line"),
+    k("Alt+V", "paste clipboard image; Ctrl+V if terminal forwards it"),
+    k("Alt+I", "inspect or remove draft images"),
+    k("Esc", "close view / return live / interrupt"),
+    k("Ctrl+K", "search commands, models, skills and templates"),
     k("Ctrl+G", "write the message in $EDITOR"),
-    k("PgUp PgDn", "step cursor · Enter folds or unfolds the step · Ctrl+↑ ↓ jump between prompts"),
-    k(
-      "Ctrl+E",
-      "context: every message the model sees next, with tokens and state; Enter on a row for actions",
-    ),
-    k("Ctrl+R", "inspector: each request as sent and received · Tab cycles events · compactions"),
-    k("Ctrl+O", "unfold or fold tool results (and cycle sub-agent views)"),
+    k("PgUp PgDn", "select step · Enter folds or unfolds"),
+    k("Ctrl+↑ ↓", "jump between user prompts"),
+    k("Ctrl+E", "context workbench · inspect or edit messages"),
+    k("Ctrl+R", "request inspector · Tab switches views"),
+    k("Ctrl+O", "fold results · cycle sub-agent views"),
     k("Ctrl+T", "expand or collapse thinking"),
     k("Ctrl+C", "quit"),
     k("@path", "attach a file to the message"),

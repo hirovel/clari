@@ -10,6 +10,8 @@ export type Extension = {
   tools?: Tool[];
   slots?: TurnDeps["slots"];
   onEvent?: (e: AgentEvent) => void;
+  /** 释放此工厂实例持有的资源;共享资源由扩展自己管理其引用。 */
+  dispose?: () => void | Promise<void>;
 };
 
 /**
@@ -19,23 +21,50 @@ export type Extension = {
 export async function loadExtensions(
   paths: string[],
   ctx: { cwd: string; log: EventLog },
-): Promise<Extension> {
+): Promise<Extension & { dispose(): Promise<void> }> {
   const merged: Extension = { tools: [], slots: {} };
-  for (const p of paths) {
-    const mod = (await import(pathToFileURL(resolve(p)).href)) as { default?: unknown };
-    if (typeof mod.default !== "function") {
-      throw new Error(
-        `extension module ${p} must default-export a function (ctx) => ({ tools?, slots?, onEvent? })`,
+  const cleanup: (() => void | Promise<void>)[] = [];
+  let disposing: Promise<void> | undefined;
+  const dispose = (): Promise<void> =>
+    (disposing ??= (async () => {
+      const errors: unknown[] = [];
+      for (const release of cleanup.reverse()) {
+        try {
+          await release();
+        } catch (error) {
+          errors.push(error);
+        }
+      }
+      if (errors.length) throw new AggregateError(errors, "Extension cleanup failed");
+    })());
+  try {
+    for (const p of paths) {
+      const mod = (await import(pathToFileURL(resolve(p)).href)) as { default?: unknown };
+      if (typeof mod.default !== "function") {
+        throw new Error(
+          `extension module ${p} must default-export a function (ctx) => ({ tools?, slots?, onEvent? })`,
+        );
+      }
+      const ext = (await (mod.default as (c: typeof ctx) => Extension | Promise<Extension>)(
+        ctx,
+      )) as Extension;
+      if (ext.dispose) cleanup.push(() => ext.dispose?.());
+      for (const t of ext.tools ?? []) {
+        merged.tools = [...(merged.tools ?? []).filter((x) => x.name !== t.name), t];
+      }
+      merged.slots = { ...merged.slots, ...ext.slots };
+      if (ext.onEvent) cleanup.push(ctx.log.subscribe(ext.onEvent));
+    }
+  } catch (error) {
+    try {
+      await dispose();
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        `Extension initialization failed: ${(error as Error).message}`,
       );
     }
-    const ext = (await (mod.default as (c: typeof ctx) => Extension | Promise<Extension>)(
-      ctx,
-    )) as Extension;
-    for (const t of ext.tools ?? []) {
-      merged.tools = [...(merged.tools ?? []).filter((x) => x.name !== t.name), t];
-    }
-    merged.slots = { ...merged.slots, ...ext.slots };
-    if (ext.onEvent) ctx.log.subscribe(ext.onEvent);
+    throw error;
   }
-  return merged;
+  return { ...merged, dispose };
 }

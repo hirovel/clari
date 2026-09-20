@@ -1,34 +1,54 @@
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
 import type { AgentEvent } from "./events.js";
+import { Recording } from "./recording.js";
 
-/**
- * append-only 事件日志。三条纪律:
- * 1. 只能 append,永不改写 —— 压缩/视图变换都发生在投影层,历史不可变。
- * 2. 落盘用 JSONL 同步追加:进程崩溃最多丢正在写的一行,已写的行永远完整。
- * 3. 订阅是只读通道(观察与干预分离):UI/统计只许看,不许改。
- */
+// JSON 快照已与调用方解耦;冻结其对象和数组,读者不能悄悄修改历史。
+function seal<T>(value: T): T {
+  if (value && typeof value === "object" && !Object.isFrozen(value)) {
+    for (const child of Object.values(value)) seal(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+/** 一份追加式事实数组。编辑通过事件改变投影;文件格式与恢复完全归 Recording。 */
 export class EventLog {
-  readonly events: AgentEvent[] = [];
+  private entries: AgentEvent[] = [];
   private listeners = new Set<(e: AgentEvent) => void>();
+  readonly recording?: Recording;
 
-  constructor(private filePath?: string) {
-    if (filePath) mkdirSync(dirname(filePath), { recursive: true });
+  constructor(filePath?: string) {
+    if (filePath) {
+      this.recording = new Recording(filePath);
+      this.recording.onGap = (ref) =>
+        this.append({
+          type: "ext/event",
+          at: new Date().toISOString(),
+          source: "recording",
+          kind: "body/gap",
+          payload: { ref },
+        });
+    }
   }
 
-  /** 落盘路径;纯内存日志为 undefined。子会话据此派生自己的路径。 */
+  get events(): readonly AgentEvent[] {
+    return this.entries;
+  }
+
   get path(): string | undefined {
-    return this.filePath;
+    return this.recording?.journal;
   }
 
   append(e: AgentEvent): void {
-    this.events.push(e);
-    if (this.filePath) appendFileSync(this.filePath, `${JSON.stringify(e)}\n`);
+    // 内存与磁盘使用同一份 JSON 内容,原始对象的后续变化不会改写已捕获事实。
+    const json = JSON.stringify(e);
+    const snapshot = seal(JSON.parse(json) as AgentEvent);
+    this.recording?.appendEvent(json);
+    this.entries.push(snapshot);
     for (const fn of this.listeners) {
       try {
-        fn(e);
+        fn(snapshot);
       } catch (err) {
-        // 订阅者(界面、统计)出错不许污染数据流:事件已经落盘,错误另行抛给进程级处理。
+        // 观察者错误交给宿主,不能打断写入队列或其余观察者。
         queueMicrotask(() => {
           throw err;
         });
@@ -36,49 +56,19 @@ export class EventLog {
     }
   }
 
-  /** 只读订阅。返回退订函数。 */
+  async checkpoint(signal?: AbortSignal): Promise<void> {
+    await this.recording?.checkpoint(signal);
+  }
+
   subscribe(fn: (e: AgentEvent) => void): () => void {
     this.listeners.add(fn);
     return () => this.listeners.delete(fn);
   }
 
-  /**
-   * 从 JSONL 文件重建日志(回放的入口)。缺省不挂文件 = 纯内存回放;
-   * attach 则沿用同一文件继续追加(会话恢复,)。
-   */
   static load(filePath: string, opts: { attach?: boolean } = {}): EventLog {
-    const log = opts.attach ? new EventLog(filePath) : new EventLog();
-    const raw = readFileSync(filePath, "utf8");
-    const lines = raw.split("\n");
-    let lastIndex = -1;
-    for (let i = lines.length - 1; i >= 0; i--) {
-      if ((lines[i] ?? "").trim().length > 0) {
-        lastIndex = i;
-        break;
-      }
-    }
-    for (let i = 0; i < lines.length; i++) {
-      const trimmed = lines[i]?.trim();
-      if (!trimmed) continue;
-      try {
-        log.events.push(JSON.parse(trimmed) as AgentEvent);
-      } catch (err) {
-        // 中间的坏行要能定位并报错:历史是唯一真相,静默跳过等于篡改。
-        if (i !== lastIndex) {
-          throw new Error(`corrupt event log ${filePath}:${i + 1}: ${(err as Error).message}`);
-        }
-        // 末尾的半行是崩溃留下的(写到一半被杀),截掉它并记一条事件,会话照常继续。
-        const good = lines.slice(0, i).join("\n");
-        if (opts.attach)
-          writeFileSync(filePath, good.endsWith("\n") || good === "" ? good : `${good}\n`);
-        log.append({
-          type: "session/recovered",
-          at: new Date().toISOString(),
-          droppedBytes: Buffer.byteLength(lines[i] ?? "", "utf8"),
-          preview: trimmed.slice(0, 80),
-        });
-      }
-    }
+    const log = new EventLog(opts.attach ? filePath : undefined);
+    const events = (log.recording ?? new Recording(filePath)).loadEvents(opts.attach);
+    for (const event of events) log.entries.push(seal(event));
     return log;
   }
 }

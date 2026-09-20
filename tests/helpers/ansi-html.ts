@@ -42,7 +42,7 @@ export function ansiLineToHtml(line: string): string {
   let st = fresh();
   let out = "";
   // biome-ignore lint/suspicious/noControlCharactersInRegex: 终端控制序列
-  const re = /\x1b\[([0-9;]*)m|\x1b\[[0-9;?]*[A-Za-z]|\x1b_[^\x07]*\x07|\x1b\][^\x07]*\x07/g;
+  const re = /\x1b\[([0-9;]*)m|\x1b\[[0-9;?]*[A-Za-z]|\x1b[_\]][\s\S]*?(?:\x07|\x1b\\)/g;
   let last = 0;
   for (const m of line.matchAll(re)) {
     const text = line.slice(last, m.index);

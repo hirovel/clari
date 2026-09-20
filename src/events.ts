@@ -1,6 +1,7 @@
 // 事件即真相:凡是进入模型请求的内容,必须可以从事件日志重建。
 // 模型看到的消息永远是 deriveMessages(events) 的投影,没有第二份状态。
 
+import type { ImageInput } from "./images.js";
 import type { Message } from "./messages.js";
 
 export type ToolCall = {
@@ -38,7 +39,7 @@ export type AgentEvent =
       /** 系统提示词的分段构成(名称、来源、字符数),只给人看:检视器与 /context 据此按段拆分。 */
       sections?: { name: string; source?: string; chars: number }[];
     }
-  | { type: "user/message"; at: string; text: string }
+  | { type: "user/message"; at: string; text: string; inputId?: string; images?: ImageInput[] }
   | {
       type: "assistant/message";
       at: string;
@@ -78,10 +79,23 @@ export type AgentEvent =
       content: string;
       /** 错误也是结果:校验失败/执行异常/被打断,一律以 result 回喂,不抛出循环。 */
       isError: boolean;
-      /** 工具执行耗时;未执行(拒绝/校验失败/打断)时缺省。只给人看。 */
+      /** 本地调用已结束,外部执行结果未确认。缺省不表示没有副作用。 */
+      outcome?: "unknown";
+      /** 本地执行或等待耗时,不证明远端已停止;未执行时缺省。只给人看。 */
       durationMs?: number;
     }
   | { type: "session/interrupt"; at: string }
+  /** 用户请求强制退出的记录,不证明外部任务或进程已经停止。只给人看。 */
+  | { type: "session/exit"; at: string; phase: "stopping" | "cleanup"; error?: string }
+  /** 恢复时确认缺少结果;不是执行失败或未执行的证明。callEvent 区分历史中复用的调用 ID。 */
+  | {
+      type: "tool/unresolved";
+      at: string;
+      callEvent: number;
+      callId: string;
+      name: string;
+      content: string;
+    }
   /**
    * 恢复会话时发现日志末尾有一行没写完(进程被杀在写入中途),截掉了它。只给人看。
    * 半行只可能在末尾;中间的坏行仍然报错,因为那不是崩溃能造成的。
@@ -188,6 +202,8 @@ export type AgentEvent =
       field: "text" | "reasoning" | "content" | "system";
       value: string;
       note?: string;
+      /** 重新组装 system 时携带分段元数据;普通文本编辑不需要。 */
+      sections?: { name: string; source?: string; chars: number }[];
     }
   /** 丢弃一条消息:user/message,或 assistant/message 连同它的全部工具结果。投影跳过它们。 */
   | { type: "context/drop"; at: string; target: number; note?: string }

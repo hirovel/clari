@@ -14,6 +14,7 @@ import {
   type TurnDeps,
 } from "./loop.js";
 import type { Provider } from "./provider.js";
+import { recordUnresolvedCalls } from "./recovery.js";
 import {
   composeDescription,
   type DescriptionParts,
@@ -242,9 +243,9 @@ function lastAssistantText(events: readonly AgentEvent[]): string {
 
 export type TaskToolOptions = {
   parent: EventLog;
-  provider: Provider;
-  /** 子的候选工具集。task 工具本身按 depth 决定给不给。 */
-  tools: Tool[];
+  provider: Provider | (() => Provider);
+  /** 每次派发装配自己的资源,结束时释放。数组适用于无状态的内核工具。 */
+  tools: Tool[] | ((log: EventLog) => Promise<ChildTools>);
   runner?: SubagentRunner;
   scopes?: ScopeRegistry;
   defaultScope?: string;
@@ -272,6 +273,13 @@ export type TaskToolOptions = {
   compaction?: CompactionConfig;
   /** 子 agent 一开跑就通知:界面订阅子日志,实时显示。 */
   onChild?: (child: ChildInfo) => void;
+};
+
+export type ChildTools = {
+  tools: Tool[];
+  dispose(): Promise<void>;
+  /** 从本轮组合创建下一层资源,不重新读取根会话的开关。 */
+  fork?: (log: EventLog) => Promise<ChildTools>;
 };
 
 /** task 工具对象:描述分段,suffix 是注册表生成的类型与范围列表,任何风格都附在末尾。 */
@@ -356,6 +364,22 @@ export function createTaskTool(opts: TaskToolOptions): TaskTool {
       const scopeName = args.scope ?? type.scope ?? defaultScope;
       const entry = scopes[scopeName];
       if (!entry) throw new Error(`Unknown scope "${scopeName}"; one of: ${scopeNames.join(", ")}`);
+      let provider = typeof opts.provider === "function" ? opts.provider() : opts.provider;
+      if (type.model) {
+        if (!opts.providerFor && type.model !== provider.model)
+          throw new Error(
+            `Sub-agent type "${typeName}" asks for model ${type.model}, but no provider lookup is configured.`,
+          );
+        if (opts.providerFor) provider = opts.providerFor(type.model);
+      }
+      const inherited = parentSlots() ?? {};
+      const compaction = opts.compaction && { ...opts.compaction };
+      const limit = type.maxSteps ?? opts.maxSteps;
+      const slots: NonNullable<TurnDeps["slots"]> = {
+        ...inherited,
+        approve: childApprove(opts.approval, inherited.approve, cwd),
+        ...(limit !== undefined && { termination: maxSteps(limit) }),
+      };
 
       const parentPath = opts.parent.path;
       const pathFor = (id: string) =>
@@ -382,13 +406,18 @@ export function createTaskTool(opts: TaskToolOptions): TaskTool {
         }
         resumed = true;
       } else {
-        counter += 1;
-        id = `sub-${counter}`;
+        // 会话恢复会重建工具实例,内存计数不能覆盖已经存在的子日志。
+        let path: string | undefined;
+        do {
+          counter += 1;
+          id = `sub-${counter}`;
+          path = pathFor(id);
+        } while (children.has(id) || (path && existsSync(path)));
         const head = opts.parent.events[0];
         const parentSnapshot: ParentSnapshot = {
           events: opts.parent.events,
           system: head?.type === "session/start" ? head.system : "",
-          model: head?.type === "session/start" ? head.model : opts.provider.model,
+          model: provider.model,
         };
         const start = entry
           .scope(parentSnapshot)
@@ -397,44 +426,22 @@ export function createTaskTool(opts: TaskToolOptions): TaskTool {
               ? { ...e, system: type.system }
               : e,
           );
-        log = new EventLog(pathFor(id));
+        log = new EventLog(path);
         for (const e of start) log.append(e);
       }
 
-      // 工具集:类型子集,去掉 task 本身,深度允许时再挂一个下一层的 task。
-      let childTools = opts.tools.filter((t) => t.name !== "task");
-      if (type.tools) {
-        const want = new Set(type.tools);
-        childTools = childTools.filter((t) => want.has(t.name));
-      }
-      if (level < depth) {
-        // 下一层的 task 工具:父是这个子的日志;界面只订阅直接子,孙的过程留在孙的日志里。
-        const { onChild: _drop, ...rest } = opts;
-        childTools = [...childTools, createTaskTool({ ...rest, parent: log, level: level + 1 })];
-      }
-
-      let provider = opts.provider;
-      if (type.model && type.model !== opts.provider.model) {
-        if (!opts.providerFor) {
-          throw new Error(
-            `Sub-agent type "${typeName}" asks for model ${type.model}, but no provider lookup is configured.`,
-          );
-        }
-        provider = opts.providerFor(type.model);
-      }
-
-      const inherited = parentSlots() ?? {};
-      const limit = type.maxSteps ?? opts.maxSteps;
-      const slots: NonNullable<TurnDeps["slots"]> = {
-        ...inherited,
-        approve: childApprove(opts.approval, inherited.approve, cwd),
-        ...(limit !== undefined && { termination: maxSteps(limit) }),
-      };
+      const lastModel = [...log.events]
+        .reverse()
+        .find((e) => e.type === "session/start" || e.type === "session/model");
+      if (lastModel && "model" in lastModel && lastModel.model !== provider.model)
+        log.append({ type: "session/model", at: now(), model: provider.model });
 
       const task = opts.outputSchema
         ? `${args.task}\n\nWhen done, end with a \`\`\`json code block holding a result that matches this JSON Schema:\n${JSON.stringify(opts.outputSchema)}`
         : args.task;
 
+      // 续聊与主会话恢复采用同一事实:缺少结果不等于未执行,不自动重跑。
+      if (resumed) recordUnresolvedCalls(log);
       const info: ChildInfo = {
         log,
         id,
@@ -442,7 +449,7 @@ export function createTaskTool(opts: TaskToolOptions): TaskTool {
         scope: scopeName,
         type: typeName,
         resumed,
-        index: counter,
+        index: Number(id.slice(4)),
         state: { status: "running" },
         ...(ctx.callId && { callId: ctx.callId }),
       };
@@ -450,17 +457,61 @@ export function createTaskTool(opts: TaskToolOptions): TaskTool {
       children.set(id, record);
       let res: SubagentResult;
       try {
-        res = await runner({
-          task,
-          log,
-          provider,
-          tools: childTools,
-          signal: ctx.signal,
-          agent: id,
-          slots,
-          ...(opts.onChild && { onLog: () => opts.onChild?.(info) }),
-          ...(opts.compaction && { compaction: opts.compaction }),
-        });
+        const resources = Array.isArray(opts.tools)
+          ? { tools: opts.tools, dispose: async () => {}, fork: undefined }
+          : await opts.tools(log);
+        try {
+          let childTools = resources.tools.filter(
+            (t) => t.name !== "task" && (!type.tools || type.tools.includes(t.name)),
+          );
+          if (level < depth && (!type.tools || type.tools.includes("task"))) {
+            const { onChild: _drop, ...rest } = opts;
+            const allowed = new Set(childTools.map((t) => t.name));
+            const factory = resources.fork ?? opts.tools;
+            childTools = [
+              ...childTools,
+              createTaskTool({
+                ...rest,
+                parent: log,
+                provider,
+                slots,
+                level: level + 1,
+                tools:
+                  typeof factory === "function"
+                    ? async (nestedLog) => {
+                        const nested = await factory(nestedLog);
+                        return {
+                          ...nested,
+                          tools: nested.tools.filter((t) => allowed.has(t.name)),
+                        };
+                      }
+                    : childTools,
+              }),
+            ];
+          }
+          res = await runner({
+            task,
+            log,
+            provider,
+            tools: childTools,
+            signal: ctx.signal,
+            agent: id,
+            slots,
+            ...(opts.onChild && { onLog: () => opts.onChild?.(info) }),
+            ...(compaction && { compaction }),
+          });
+        } catch (error) {
+          try {
+            await resources.dispose();
+          } catch (cleanupError) {
+            throw new AggregateError(
+              [error, cleanupError],
+              `Sub-agent failed and cleanup failed: ${(error as Error).message}; ${(cleanupError as Error).message}`,
+            );
+          }
+          throw error;
+        }
+        await resources.dispose();
       } catch (err) {
         record.running = false;
         info.state = { status: "partial", reason: (err as Error).message };

@@ -1,9 +1,10 @@
 import { Type } from "@sinclair/typebox";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Agent } from "../src/agent.js";
 import { EventLog } from "../src/log.js";
 import type { Provider } from "../src/provider.js";
 import { defineTool } from "../src/tools.js";
+import { testImage } from "./helpers/image.js";
 
 const echoTool = defineTool({
   name: "echo",
@@ -51,18 +52,36 @@ describe("Agent", () => {
     await tick();
     expect(agent.running).toBe(true);
 
-    void agent.prompt("插话"); // 运行中 → 排队
+    void agent.prompt("插话", { images: [testImage] }); // 运行中 → 排队
+    const viewed = agent.pending[0]?.images;
+    if (!viewed?.[0]) throw new Error("missing queued image");
+    viewed[0].name = "changed by reader";
+    viewed.push({ ...testImage });
     release();
     const outcome = await first;
 
     expect(outcome).toBe("idle");
     const texts = log.events.filter((e) => e.type === "user/message").map((e) => e.text);
     expect(texts).toEqual(["第一条", "插话"]);
+    expect(log.events.filter((e) => e.type === "user/message")[1]).toMatchObject({
+      images: [testImage],
+    });
     // 插话位于工具结果之后(步边界),不在末尾游离
     const types = log.events.map((e) => e.type);
     expect(types.indexOf("user/message", types.indexOf("tool/result"))).toBeLessThan(
       types.lastIndexOf("assistant/message"),
     );
+    const restoredImage = { ...testImage };
+    const restored = new Agent({
+      log: newLog(),
+      provider,
+      tools: [],
+      pending: [
+        { id: "restored", text: "", deliverAs: "steer", paused: true, images: [restoredImage] },
+      ],
+    });
+    restoredImage.name = "changed after restore";
+    expect(restored.pending[0]?.images).toEqual([testImage]);
   });
 
   it("interrupt:记 session/interrupt 事件并让 turn 以 aborted 收场", async () => {
@@ -87,9 +106,18 @@ describe("Agent", () => {
     expect(log.events.some((e) => e.type === "session/interrupt")).toBe(true);
     expect(log.events.at(-1)).toMatchObject({ type: "assistant/message", stopReason: "aborted" });
     expect(agent.running).toBe(false);
+    const failing = agent.prompt("日志写入失败时仍须取消");
+    await tick();
+    const append = vi.spyOn(log, "append").mockImplementationOnce(() => {
+      throw new Error("disk unavailable");
+    });
+    expect(() => agent.interrupt()).toThrow("disk unavailable");
+    append.mockRestore();
+    expect(await failing).toBe("aborted");
+    expect(agent.running).toBe(false);
   });
 
-  it("空闲时 prompt:上次打断遗留的队列先注入,不静默丢弃(硬规矩)", async () => {
+  it("中断暂停待发送消息,新问题不夹带旧消息,可编辑移除并手动继续", async () => {
     const log = newLog();
     let firstRun = true;
     const provider: Provider = {
@@ -110,11 +138,27 @@ describe("Agent", () => {
     const running = agent.prompt("任务A");
     await tick();
     void agent.prompt("打断期间的留言"); // 排队
+    void agent.prompt("移除这条");
     agent.interrupt(); // aborted 返回,队列保留
     await running;
 
     await agent.prompt("任务B");
-    const texts = log.events.filter((e) => e.type === "user/message").map((e) => e.text);
-    expect(texts).toEqual(["任务A", "打断期间的留言", "任务B"]);
+    expect(log.events.filter((e) => e.type === "user/message").map((e) => e.text)).toEqual([
+      "任务A",
+      "任务B",
+    ]);
+    expect(agent.pending.every((p) => p.paused)).toBe(true);
+    const [kept, removed] = agent.pending;
+    if (!kept || !removed) throw new Error("missing queued inputs");
+    agent.editPending(kept.id, "修改后的留言");
+    agent.removePending(removed.id);
+    await agent.continuePending();
+    await agent.continuePending();
+    expect(log.events.filter((e) => e.type === "user/message").map((e) => e.text)).toEqual([
+      "任务A",
+      "任务B",
+      "修改后的留言",
+    ]);
+    expect(agent.queued).toBe(0);
   });
 });

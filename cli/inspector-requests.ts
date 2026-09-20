@@ -1,5 +1,5 @@
 // 请求视图:一行一请求 → 七分区(概要 / 决策 / 发送 / 工具定义 / 线路 JSON / 接收 / 写入),
-// 以及事件视图的行与详情。请求正文按 deriveMessages(请求之前的事件) 原样重建,wire 层正文由 provider.wire 重建。
+// 以及事件视图的行与详情。消息按请求边界重建;HTTP 正文优先读取实录,否则明确标记为当前适配器重建。
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import { estimateTokens } from "../src/context.js";
 import type { AgentEvent } from "../src/events.js";
@@ -11,6 +11,7 @@ import {
   type Message,
 } from "../src/messages.js";
 import { type Provider, parseEffort, type ToolDef } from "../src/provider.js";
+import { unchangedPrefix } from "./cards.js";
 import { renderExtEvent } from "./ext-events.js";
 import {
   clock,
@@ -22,6 +23,7 @@ import {
   pctOf,
   roleLabel,
 } from "./inspector-format.js";
+import type { RequestRecording } from "./session-records.js";
 import { c } from "./theme.js";
 
 type RequestEvent = Extract<AgentEvent, { type: "request" }>;
@@ -141,6 +143,53 @@ export function listRow(rec: RequestRecord, selected: boolean): string {
 
 // ---------- 请求详情的七个分区 ----------
 
+/** 只概括当前请求边界内的事实,不把工具结果冒充本次模型已经看到的内容。 */
+export function exchangeLines(
+  events: readonly AgentEvent[],
+  rec: RequestRecord,
+  messages: Message[],
+  previous: Message[] | undefined,
+  recording: RequestRecording | undefined,
+): string[] {
+  const next = events.findIndex((e, i) => i > rec.index && e.type === "request");
+  const after = events.slice(rec.index + 1, next < 0 ? events.length : next);
+  const results = after.filter((e) => e.type === "tool/result");
+  const unknown =
+    results.filter((e) => e.outcome === "unknown").length +
+    after.filter((e) => e.type === "tool/unresolved").length;
+  const keep = unchangedPrefix(previous, messages);
+  return [
+    c.bold(c.ink("Round trip")),
+    c.ink(
+      `Input: ${messages.length} ${recording?.input ? "saved messages" : "messages from the log"} · ${rec.request.tools.length} tools`,
+    ),
+    c.soft(
+      previous
+        ? `vs #${rec.n - 1}: ${keep}/${previous.length} previous messages kept as prefix · ${messages.length - keep} following messages`
+        : "First request: no earlier input to compare",
+    ),
+    c.ink(
+      `Response: ${rec.error ? "request failed" : rec.response ? `${rec.response.stopReason} · ${rec.response.toolCalls.length} tool calls` : rec.compaction ? "compaction result recorded" : "no result recorded yet"}`,
+    ),
+    c.soft(
+      `After response: ${results.length} tool results · ${unknown} unknown · ${next < 0 ? "no next request recorded" : `next input is #${rec.n + 1}`}`,
+    ),
+    c.faint(
+      `HTTP body: ${recording?.bodies.length ? `${recording.bodies.length} attempt(s) captured before dispatch` : "not captured; 5 shows reconstruction when possible"}`,
+    ),
+    c.faint(
+      `HTTP responses: ${recording?.attempts?.length ? `${recording.attempts.length} attempt(s) recorded` : "not available here"}`,
+    ),
+    ...(recording?.error ? [c.zhu(recording.error)] : []),
+    ...(recording?.attempts?.map((a) =>
+      c.soft(
+        `Attempt ${a.n}: ${a.status === undefined ? "no HTTP response" : `HTTP ${a.status}`} · capture ${a.state}`,
+      ),
+    ) ?? []),
+    c.soft("3 input · 4 tools · 5 HTTP body · 6 response · 7 recorded events"),
+  ];
+}
+
 export function summaryLines(rec: RequestRecord, messages: Message[]): string[] {
   const r = rec.request;
   const u = rec.response?.usage ?? rec.compaction?.usage;
@@ -167,10 +216,10 @@ export function summaryLines(rec: RequestRecord, messages: Message[]): string[] 
     const room = r.threshold - r.estimatedTokens;
     lines.push(
       row(
-        "auto-compact",
+        "threshold",
         room > 0
           ? `threshold ${r.threshold}, ${room} tok to go (${pctOf(room, r.threshold)})`
-          : `threshold ${r.threshold}, over by ${-room} tok; compaction should have run before sending`,
+          : `threshold ${r.threshold}, over by ${-room} tok; recorded compaction actions are in 2 decisions`,
       ),
     );
   }
@@ -217,11 +266,11 @@ export function decisionLines(rec: RequestRecord): string[] {
   if (auto !== undefined) {
     lines.push(
       rec.request.estimatedTokens > auto
-        ? `${c.soft("·")} auto-compaction check: estimated ${rec.request.estimatedTokens} > threshold ${auto}, triggered`
-        : `${c.faint("·")} auto-compaction check: estimated ${rec.request.estimatedTokens} ≤ threshold ${auto}, not triggered`,
+        ? `${c.soft("·")} recorded threshold: estimated ${rec.request.estimatedTokens} > ${auto}; above threshold`
+        : `${c.faint("·")} recorded threshold: estimated ${rec.request.estimatedTokens} ≤ ${auto}; below threshold`,
     );
   } else {
-    lines.push(`${c.faint("·")} no compaction configured, not checked`);
+    lines.push(`${c.faint("·")} no threshold recorded for this request`);
   }
   for (const e of rec.before) {
     switch (e.type) {
@@ -297,7 +346,9 @@ export function decisionLines(rec: RequestRecord): string[] {
   if (rec.response?.stopReason === "aborted")
     lines.push(`${c.zhu("·")} response interrupted: the partial text is in the log`);
   lines.push("");
-  lines.push(c.faint("Every decision the kernel made in this step. Nothing else happened."));
+  lines.push(
+    c.faint("Recorded decisions for this request; this is not a complete execution recording."),
+  );
   return lines;
 }
 
@@ -307,64 +358,130 @@ export function sentLines(
   messages: Message[],
   folded: boolean,
   sections?: PromptSectionMeta[],
+  previous?: Message[],
+  recorded = false,
 ): string[] {
   const total = messages.reduce((n, m) => n + messageTokens(m), 0);
   const lines: string[] = [
+    c.soft(
+      recorded
+        ? "Saved adapter input. Actual HTTP formatting is in 5 wire JSON."
+        : "Input reconstructed from recorded events. Provider formatting is shown in 5 wire JSON.",
+    ),
     c.faint(
-      `${messages.length} messages, estimated ${total} tok. ${folded ? "bodies folded (f to unfold)" : "full bodies (f to fold)"}`,
+      `${messages.length} messages, estimated ${total} tok. ${folded ? "body previews" : "full bodies"}`,
     ),
     "",
   ];
+  const keep = unchangedPrefix(previous, messages);
   messages.forEach((m, i) => {
     const tok = messageTokens(m);
     lines.push(
-      `${c.ink(`[${i + 1}] ${roleLabel(m)}`)}  ${c.soft(`${tok} tok · ${pctOf(tok, total)}`)}${m.edited ? c.jin("  ✎ edited (original in the events view)") : ""}`,
+      `${c.ink(`[${i + 1}] ${roleLabel(m)}`)}  ${c.soft(`~${tok} tok · ${pctOf(tok, total)}${previous ? (i < keep ? " · unchanged prefix" : " · after prefix") : ""}`)}${m.edited ? c.jin("  ✎ edited (original in the events view)") : ""}`,
     );
-    // 系统提示词按段拆开:角色、环境、项目指令各占多少。
-    if (m.role === "system" && sections && sections.length > 0) {
-      const chars = sections.reduce((n, s) => n + s.chars, 0);
-      for (const s of sections) {
-        lines.push(
-          c.faint(
-            `    ├ ${s.name}  ${Math.ceil(s.chars / 4)} tok · ${pctOf(s.chars, chars)}${s.source ? `  ${s.source}` : ""}`,
-          ),
-        );
-      }
-    }
-    if (m.role === "assistant" && m.reasoning) {
-      lines.push(
-        ...(folded
-          ? [c.faint(`    thinking ${firstLine(m.reasoning)}`)]
-          : indent(m.reasoning).map((l) => c.faint(c.italic(l)))),
-      );
-    }
-    if (m.content) {
-      lines.push(
-        ...(folded
-          ? [c.ink(`    ${truncateToWidth(firstLine(m.content), 120, "…")}`)]
-          : indent(m.content).map((l) => c.ink(l))),
-      );
-    }
-    if (m.role === "assistant") {
-      for (const tc of m.toolCalls) {
-        const args = JSON.stringify(tc.args);
-        lines.push(
-          c.soft(
-            `    » ${tc.name} ${folded ? truncateToWidth(args, 100, "…") : args}  ${c.faint(tc.id)}`,
-          ),
-        );
-      }
-    }
+    lines.push(...messageBodyLines(m, folded, sections));
     lines.push("");
   });
   return lines;
 }
 
-export function toolLines(defs: ToolDef[]): string[] {
-  if (defs.length === 0) return [c.faint("No tools were sent with this request.")];
+/** 输入正文的单一格式器;列表和文本回放共用。 */
+export function messageBodyLines(
+  m: Message,
+  folded: boolean,
+  sections?: PromptSectionMeta[],
+): string[] {
+  const lines: string[] = [];
+  if (m.role === "user" && m.images?.length)
+    lines.push(
+      ...m.images.map((image, i) =>
+        c.soft(
+          `Image ${i + 1}: ${image.name ?? image.mimeType} · ${Math.floor((image.data.length * 3) / 4)} bytes · full data in HTTP JSON`,
+        ),
+      ),
+    );
+  // 系统提示词按段拆开:角色、环境、项目指令各占多少。
+  if (m.role === "system" && sections && sections.length > 0) {
+    lines.push(c.faint("    Initial system-section metadata (may differ after edits):"));
+    const chars = sections.reduce((n, s) => n + s.chars, 0);
+    for (const s of sections) {
+      lines.push(
+        c.faint(
+          `    ├ ${s.name}  ${Math.ceil(s.chars / 4)} tok · ${pctOf(s.chars, chars)}${s.source ? `  ${s.source}` : ""}`,
+        ),
+      );
+    }
+  }
+  if (m.role === "assistant" && m.reasoning) {
+    lines.push(
+      c.soft(
+        m.reasoningKind === "summary"
+          ? "    Thinking summary (display only; provider data below carries state)"
+          : "    Thinking text (adapter decides how it is sent)",
+      ),
+    );
+    lines.push(
+      ...(folded
+        ? [c.faint(`    thinking ${firstLine(m.reasoning)}`)]
+        : indent(m.reasoning).map((l) => c.faint(c.italic(l)))),
+    );
+  }
+  if (m.role === "assistant" && m.opaque !== undefined) {
+    const value = JSON.stringify(m.opaque, null, 2);
+    lines.push(c.soft(`    Provider data · ${value.length} chars`));
+    if (!folded) lines.push(...indent(value).map((l) => c.faint(l)));
+  }
+  if (m.content) {
+    lines.push(
+      ...(folded
+        ? [c.ink(`    ${truncateToWidth(firstLine(m.content), 120, "…")}`)]
+        : indent(m.content).map((l) => c.ink(l))),
+    );
+  }
+  if (m.role === "assistant") {
+    for (const tc of m.toolCalls) {
+      const args = JSON.stringify(tc.args);
+      lines.push(
+        c.soft(
+          `    » ${tc.name} ${folded ? truncateToWidth(args, 100, "…") : args}  ${c.faint(tc.id)}`,
+        ),
+      );
+    }
+  }
+  return lines;
+}
+
+export function toolLines(
+  defs: ToolDef[],
+  names = defs.map((d) => d.name),
+  recording?: RequestRecording,
+): string[] {
+  if (recording?.bodies.length)
+    return recording.bodies.flatMap((body, i) => {
+      try {
+        const payload = JSON.parse(body) as { tools?: unknown };
+        return [
+          c.bold(c.ink(`Captured tools · HTTP attempt ${i + 1}`)),
+          ...JSON.stringify(payload.tools ?? null, null, 2)
+            .split("\n")
+            .map((l) => c.ink(l)),
+          c.faint("Provider format; complete body in 5 wire JSON."),
+          "",
+        ];
+      } catch {
+        return [c.zhu("Captured body is not readable JSON; see 5 wire JSON.")];
+      }
+    });
+  if (names.length === 0) return [c.faint("No tool names recorded for this request.")];
+  const missing = names.filter((name) => !defs.some((d) => d.name === name));
   const lines: string[] = [
+    c.soft(`Recorded tool names: ${names.join(", ")}`),
+    recording?.input
+      ? c.soft("Definitions saved with this request's adapter input.")
+      : c.jin("Historical definitions were not captured. Current definitions below may differ."),
+    ...(missing.length ? [c.zhu(`Unavailable definitions: ${missing.join(", ")}`)] : []),
     c.faint(
-      `${defs.length} tool definitions sent with the request, estimated ${defs.reduce((n, d) => n + estimateTokens(JSON.stringify(d)), 0)} tok.`,
+      `${defs.length} current tool definitions, estimated ${defs.reduce((n, d) => n + estimateTokens(JSON.stringify(d)), 0)} tok.`,
     ),
     "",
   ];
@@ -382,9 +499,37 @@ export function wireLines(
   messages: Message[],
   defs: ToolDef[],
   effort?: string,
+  recording?: RequestRecording,
+  missing: string[] = [],
 ): string[] {
+  const warnings = recording?.error ? [c.zhu(recording.error)] : [];
+  if (recording?.bodies.length)
+    return [
+      c.soft("Captured before HTTP dispatch; delivery is not proven. No auth headers captured."),
+      ...warnings,
+      ...recording.bodies.flatMap((body, i) => {
+        let json = body;
+        try {
+          json = JSON.stringify(JSON.parse(body), null, 2);
+        } catch {
+          /* 原文仍可查看。 */
+        }
+        return [
+          "",
+          c.bold(c.ink(`HTTP attempt ${i + 1} · ${body.length} chars · formatted for viewing`)),
+          ...json.split("\n").map((l) => c.ink(l)),
+        ];
+      }),
+    ];
+  if (missing.length)
+    return [
+      ...warnings,
+      c.zhu(`Cannot reconstruct: unavailable tool definitions: ${missing.join(", ")}`),
+      c.faint("3 sent still shows messages reconstructed from the log."),
+    ];
   if (!provider?.wire) {
     return [
+      ...warnings,
       c.faint(
         "This provider has no wire(); the wire body cannot be rebuilt. The sent section shows the kernel projection.",
       ),
@@ -394,97 +539,14 @@ export function wireLines(
   const body = provider.wire(messages, defs, level ? { effort: level } : {});
   const json = JSON.stringify(body, null, 2);
   return [
-    c.faint(
-      `Request body, byte-identical to what was sent (auth headers are not part of the body). ${json.length} chars.`,
+    ...warnings,
+    c.faint(`Reconstructed preview · ${json.length} chars · not a captured HTTP body.`),
+    c.jin(
+      "Uses available provider settings and current tool definitions; historical values may differ.",
     ),
     "",
     ...json.split("\n").map((l) => c.ink(l)),
   ];
-}
-
-export function receivedLines(rec: RequestRecord, raw: string[] | undefined): string[] {
-  const lines: string[] = [];
-  if (rec.error && !rec.response) {
-    lines.push(`${c.zhu("✗")} ${rec.error.status ?? ""} ${rec.error.error}`);
-  } else if (rec.compaction) {
-    const k = rec.compaction;
-    lines.push(
-      `${c.soft("latency")} ${c.ink(fmtMs(k.latencyMs))}   ${c.soft("covers events")} ${c.ink(`${k.coversFrom ?? 1}-${k.coversUpTo}`)}`,
-    );
-    if (k.usage) lines.push(`${c.soft("usage")} ${c.ink(JSON.stringify(k.usage))}`);
-    lines.push("");
-    lines.push(c.bold(c.soft("summary (enters later requests as one user message)")));
-    lines.push(...indent(k.summary ?? "(none)").map((l) => c.ink(l)));
-    lines.push("");
-  } else if (!rec.response) {
-    lines.push(
-      c.faint(
-        rec.request.reason === "compaction"
-          ? "The summary request produced no compaction (no progress, or the safety valve stopped it)."
-          : "No response yet.",
-      ),
-    );
-  } else {
-    const r = rec.response;
-    lines.push(
-      `${c.soft("stop reason")} ${c.ink(r.stopReason)}   ${c.soft("latency")} ${c.ink(fmtMs(r.latencyMs))}`,
-    );
-    if (r.usage) lines.push(`${c.soft("usage")} ${c.ink(JSON.stringify(r.usage))}`);
-    lines.push("");
-    if (r.reasoning) {
-      lines.push(
-        c.jin(
-          r.reasoningKind === "summary"
-            ? "thinking (summary: shown to people only; the model reads the opaque block; not editable)"
-            : r.reasoningKind === "full"
-              ? "thinking (full: echoed back to the model next turn; editable)"
-              : "thinking",
-        ),
-      );
-      lines.push(...indent(r.reasoning).map((l) => c.faint(c.italic(l))));
-      lines.push("");
-    }
-    if (r.extras && Object.keys(r.extras).length > 0) {
-      lines.push(c.bold(c.soft("extras (provider metadata, not interpreted)")));
-      lines.push(...indent(JSON.stringify(r.extras, null, 2)).map((l) => c.faint(l)));
-      lines.push("");
-    }
-    if (r.opaque !== undefined) {
-      const o = r.opaque as { kind?: string; blocks?: unknown[]; items?: unknown[] };
-      const n = o.blocks?.length ?? o.items?.length ?? 0;
-      lines.push(c.bold(c.soft("opaque (private echo-back)")));
-      lines.push(
-        c.faint(
-          `    ${o.kind ?? "unknown"} · ${n} items · ${JSON.stringify(r.opaque).length} chars · echoed back verbatim next turn, never interpreted; full JSON in the written section`,
-        ),
-      );
-      lines.push("");
-    }
-    lines.push(c.bold(c.soft("text")));
-    lines.push(...(r.text ? indent(r.text).map((l) => c.ink(l)) : [c.faint("    (empty)")]));
-    lines.push("");
-    if (r.toolCalls.length > 0) {
-      lines.push(c.bold(c.soft(`tool calls ${r.toolCalls.length}`)));
-      for (const tc of r.toolCalls) {
-        lines.push(`    ${c.zhu("»")} ${c.ink(tc.name)}  ${c.faint(tc.id)}`);
-        lines.push(...indent(JSON.stringify(tc.args, null, 2), "      ").map((l) => c.soft(l)));
-      }
-      lines.push("");
-    }
-  }
-  lines.push(c.bold(c.soft("raw stream")));
-  if (!raw)
-    lines.push(
-      c.faint(
-        "    raw capture is off (--no-trace). Restart without it to record every line received.",
-      ),
-    );
-  else if (raw.length === 0) lines.push(c.faint("    (empty)"));
-  else {
-    lines.push(c.faint(`    ${raw.length} lines`));
-    lines.push(...raw.map((l) => c.faint(`    ${l}`)));
-  }
-  return lines;
 }
 
 // ---------- 请求正文重建与写入视图 ----------
@@ -521,7 +583,7 @@ export function writtenLines(
 ): string[] {
   const lines: string[] = [
     c.faint(
-      `Events appended after request #${rec.n} (indices ${rec.index + 1} to ${until - 1}), raw JSON. This is all the kernel remembers.`,
+      `Events appended after request #${rec.n} (indices ${rec.index + 1} to ${until - 1}), recorded JSON.`,
     ),
     "",
   ];

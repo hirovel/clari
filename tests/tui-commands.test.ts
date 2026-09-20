@@ -4,13 +4,14 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { appendMemory } from "../cli/tools/memory.js";
 import { createTuiApp, type TuiApp, type TuiAppDeps, type TuiSettings } from "../cli/tui-app.js";
 import { DEFAULT_CONFIG_PATH } from "../src/config.js";
 import { EventLog } from "../src/log.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
 import { defineTool } from "../src/tools.js";
+import { testImage } from "./helpers/image.js";
 import { stripAnsi, VirtualTerminal } from "./helpers/virtual-terminal.js";
 
 function scripted(turns: AssistantTurn[]): Provider {
@@ -35,11 +36,15 @@ const echo = defineTool({
   },
 });
 
-function boot(provider: Provider, settings?: TuiSettings): { app: TuiApp; term: VirtualTerminal } {
+function boot(
+  provider: Provider,
+  settings?: TuiSettings,
+): { app: TuiApp; term: VirtualTerminal; log: EventLog } {
   const term = new VirtualTerminal(100, 40);
+  const log = new EventLog();
   const app = createTuiApp({
     terminal: term,
-    log: new EventLog(),
+    log,
     provider,
     tools: [echo],
     compaction: { strategy: async () => null, window: 100000, reserveTokens: 32000 },
@@ -49,7 +54,7 @@ function boot(provider: Provider, settings?: TuiSettings): { app: TuiApp; term: 
     systemPrompt: "sys",
     onExit: () => {},
   });
-  return { app, term };
+  return { app, term, log };
 }
 
 const text = (app: TuiApp) => app.lines(100).map(stripAnsi).join("\n");
@@ -88,7 +93,8 @@ afterEach(() => {
 });
 
 function bootB(provider: Provider, over: Partial<TuiAppDeps> = {}, log = new EventLog()) {
-  const term = new VirtualTerminal(120, 40);
+  const term =
+    over.terminal instanceof VirtualTerminal ? over.terminal : new VirtualTerminal(120, 40);
   const exits: number[] = [];
   const app = createTuiApp({
     terminal: term,
@@ -147,7 +153,7 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
   });
 
   it("Ctrl+R 打开请求检视器,检视器接管按键,Esc 关闭后回到编辑器", async () => {
-    const { app, term } = boot(
+    const { app, term, log } = boot(
       scripted([
         {
           text: "ok",
@@ -172,11 +178,19 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
     app.inspector.key("\x1b");
     expect(app.inspector.isOpen()).toBe(false);
     expect(app.inspector.lines(100)).toEqual([]);
-    // 命令入口同样可用
+    // 命令入口同样可用;检视与粘贴不改草稿,关闭后输入恢复。
+    app.setDraft("f? draft");
     await app.command("/inspect requests");
     expect(app.inspector.isOpen()).toBe(true);
+    const draft = app.draft();
+    const before = log.events.length;
+    term.feed("\x1b[200~f?123\r\n/quit\x1b[201~");
+    expect(app.draft()).toBe(draft);
+    expect(log.events).toHaveLength(before);
     term.feed("\x12");
     expect(app.inspector.isOpen()).toBe(false);
+    term.feed("f");
+    expect(app.draft()).toBe("f? draftf");
     // /events 直接进事件视图,/compactions 直接进压缩对照
     await app.command("/inspect events");
     expect(app.inspector.isOpen()).toBe(true);
@@ -339,10 +353,59 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
 });
 
 describe("按键", () => {
-  it("? 列快捷键;Ctrl+R 开关检视器;Ctrl+E 开组装视图;Ctrl+T 切思考;Ctrl+C 退出;检视器的三个入口", async () => {
-    const { app, term, exits } = bootB(scriptedB([]));
+  it("面板列快捷键,普通字符归草稿;Ctrl+R 开关检视器;Ctrl+E 开组装视图;Ctrl+T 切思考;Ctrl+C 退出;检视器的三个入口", async () => {
+    const { app, term, exits, log } = bootB(scriptedB([]), {
+      terminal: new VirtualTerminal(60, 24),
+      readClipboard: async () => ({ image: testImage }),
+    });
+    const before = log.events.length;
     term.feed("?");
-    expect(doc(app)).toContain("Ctrl+R");
+    expect(app.draft()).toBe("?");
+    term.feed("\x0b");
+    term.feed("Keyboard shortcuts");
+    term.feed("\r");
+    expect(plain(app.dialogLines().join("\n"))).toContain("Shortcuts");
+    app.tui.renderNow(true);
+    expect((await term.screen()).join("\n")).toContain("Esc close");
+    term.feed("\x1b[6~");
+    expect(plain(app.dialogLines().join("\n"))).toContain("/help");
+    // 帮助持有焦点,全局检视快捷键不能盖住它;查看帮助不改变会话记录。
+    term.feed("\x12");
+    term.feed("\x05");
+    expect(app.inspector.isOpen()).toBe(false);
+    expect(log.events).toHaveLength(before);
+    term.feed("\x1b");
+    term.feed("\x15");
+    term.feed("draft");
+    term.feed("?");
+    expect(app.dialogLines()).toEqual([]);
+    expect(doc(app)).toContain("draft?");
+    term.feed("\x1bv");
+    await vi.waitFor(() => expect(doc(app)).toContain("1 image(s) attached"));
+    expect(app.draft()).toBe("draft?");
+    expect(log.events).toHaveLength(before);
+    term.feed("\x1bi");
+    expect(plain(app.dialogLines().join("\n"))).toContain("pixel.png");
+    term.feed("\x1b[3~");
+    expect(plain(app.dialogLines().join("\n"))).toContain("No images attached");
+    term.feed("\x1b");
+    expect(app.draft()).toBe("draft?");
+    const imageDir = mkdtempSync(join(tmpdir(), "clari-paste-"));
+    try {
+      const imageFile = join(imageDir, "pasted image.png");
+      writeFileSync(imageFile, Buffer.from(testImage.data, "base64"));
+      term.feed(`\x1b[200~"${imageFile}"\x1b[201~`);
+      await vi.waitFor(() => expect(doc(app)).toContain("1 image(s) attached"));
+      expect(app.draft()).toBe("draft?");
+      expect(log.events).toHaveLength(before);
+      term.feed("\x1bi");
+      expect(plain(app.dialogLines().join("\n"))).toContain("pasted image.png");
+      term.feed("\x1b[3~");
+      term.feed("\x1b");
+    } finally {
+      rmSync(imageDir, { recursive: true, force: true });
+    }
+    term.feed("\x15");
     term.feed("\x12");
     expect(app.inspector.isOpen()).toBe(true);
     term.feed("\x12");
@@ -403,17 +466,36 @@ describe("提交", () => {
         return { text: `r${calls}`, toolCalls: [], stopReason: "end" };
       },
     };
-    const { app, term } = bootB(provider);
+    const { app, term } = bootB(provider, {
+      terminal: new VirtualTerminal(60, 24),
+      readClipboard: async () => ({ image: testImage }),
+      info: {
+        model: "m",
+        providerName: "p",
+        sessionFile: `sessions/${"long-directory/".repeat(12)}session.jsonl`,
+      },
+    });
     const first = app.submit("first");
     await tick();
-    expect(doc(app)).toContain("● running");
+    expect(doc(app)).toContain("Waiting for model");
     await app.submit("second");
     expect(doc(app)).toContain("queued as steering");
     await app.submit("third", { deliverAs: "followUp" });
-    expect(doc(app)).toContain("queued for after the current step");
-    expect(doc(app)).toContain("queued 2");
-    // Alt+Enter 走同一条后续留言通道;文本为空时什么也不做
+    expect(doc(app)).toContain("delivered after the current turn");
+    app.tui.renderNow(true);
+    const screen = await term.screen();
+    expect(screen.length).toBeLessThanOrEqual(24);
+    expect(screen.join("\n")).toContain("2 queued");
+    expect(screen.at(-1)).toContain("Esc interrupt");
+    expect(screen.at(-1)).toContain("Enter next step");
+    // 文字与图片都为空才不提交;纯图必须走同一个后续留言通道。
     term.feed("\x1b\r");
+    term.feed("\x1bv");
+    await vi.waitFor(() => expect(doc(app)).toContain("1 image(s) attached"));
+    term.feed("\x1b\r");
+    expect(app.agent.pending).toContainEqual(
+      expect.objectContaining({ text: "", deliverAs: "followUp", images: [testImage] }),
+    );
     release?.();
     await first;
     for (let i = 0; i < 20 && calls < 3; i++) await tick();
@@ -436,7 +518,7 @@ describe("命令的分支", () => {
     };
     const { app } = bootB(withFields, {
       sessionsDir: tmp,
-      trace: false,
+
       mcp: {
         statuses: () => [
           { name: "s1", phase: "ready", transport: "stdio", toolCount: 2, ms: 5, missingVars: [] },

@@ -1,6 +1,8 @@
 import type { StopReason, ToolCall, Usage } from "./events.js";
+import { imageDataUrl } from "./images.js";
 import type { Message } from "./messages.js";
 import { ProviderError, parseRetryAfter } from "./providers/errors.js";
+import { type HttpRecorder, recordedFetch } from "./providers/http.js";
 import { type RetryOptions, withRetry } from "./providers/retry.js";
 import { StreamStall, sseEvents } from "./providers/sse.js";
 
@@ -61,14 +63,18 @@ export function clampEffort(level: EffortLevel, supported?: readonly EffortLevel
 export type WireOptions = { effort?: EffortLevel };
 
 export type CompleteOptions = {
+  /** 宿主提供的会话记录,独立于 UI 与调试观察回调。 */
+  record?: HttpRecorder;
   /** 流式增量只进 UI 不进日志:增量拼完即最终消息,日志只记完整事件。 */
   onDelta?: (textDelta: string) => void;
   onReasoning?: (reasoningDelta: string) => void;
   signal?: AbortSignal;
   /** 每次重试前回调(循环据此记 retry 事件)。 */
   onRetry?: (info: { attempt: number; delayMs: number; error: Error }) => void;
-  /** 收到的每一行原始流(SSE 行,未解析)。透明度的最底层:开了 trace 就一字不漏。 */
+  /** 非空 SSE 行的实时诊断观察者;完整正文由 record 在解析前保存。 */
   onRaw?: (line: string) => void;
+  /** 每次 HTTP 尝试前交出同一份序列化正文;不含 URL、鉴权头,不证明服务器已接收。 */
+  onRequest?: (body: string) => void;
   /** 本次请求的强度级别;缺省不传。 */
   effort?: EffortLevel;
 };
@@ -313,7 +319,18 @@ export function toWire(m: Message, reasoningField?: string): Record<string, unkn
     case "system":
       return { role: "system", content: m.content };
     case "user":
-      return { role: "user", content: m.content };
+      return {
+        role: "user",
+        content: m.images?.length
+          ? [
+              ...(m.content ? [{ type: "text", text: m.content }] : []),
+              ...m.images.map((image) => ({
+                type: "image_url",
+                image_url: { url: imageDataUrl(image) },
+              })),
+            ]
+          : m.content,
+      };
     case "assistant":
       return {
         role: "assistant",
@@ -405,20 +422,32 @@ export function openaiCompat(opts: OpenAICompatOptions): Provider {
     // chat completions 一条投影消息就是一条 wire 消息,顺序不变。
     wireMap: (messages) => messages.map((_, i) => i),
     listModels: () => fetchModelIds(`${baseUrl}/models`, headers),
-    async complete(messages, tools, { onDelta, onReasoning, signal, onRetry, onRaw, effort } = {}) {
-      const body = wire(messages, tools, effort ? { effort } : {});
+    async complete(
+      messages,
+      tools,
+      { onDelta, onReasoning, signal, onRetry, onRaw, onRequest, record, effort } = {},
+    ) {
+      const body = JSON.stringify(wire(messages, tools, effort ? { effort } : {}));
 
       return withRetry(
         async () => {
           const acc = newAcc();
           const ac = linkedAbort(signal);
+          let saved: Promise<void> | undefined;
           try {
-            const res = await fetch(`${baseUrl}/chat/completions`, {
-              method: "POST",
-              headers,
-              body: JSON.stringify(body),
-              signal: ac.signal,
-            });
+            onRequest?.(body);
+            const captured = await recordedFetch(
+              `${baseUrl}/chat/completions`,
+              {
+                method: "POST",
+                headers,
+                body,
+                signal: ac.signal,
+              },
+              record,
+            );
+            const res = captured.response;
+            saved = captured.saved;
             if (!res.ok || !res.body) {
               const text = await res.text();
               const retryAfterMs = parseRetryAfter(res.headers);
@@ -453,6 +482,8 @@ export function openaiCompat(opts: OpenAICompatOptions): Provider {
             // 打断:已流出的部分作为 aborted turn 返回,由循环记入日志,不丢真相。
             if (signal?.aborted) return finishAcc(acc, true);
             throw stallToError(err, Boolean(acc.text || acc.reasoning));
+          } finally {
+            await saved;
           }
         },
         mergeRetry(opts.retry, { ...(signal && { signal }), ...(onRetry && { onRetry }) }),

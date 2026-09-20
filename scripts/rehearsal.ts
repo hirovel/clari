@@ -7,15 +7,13 @@
 // 用法:pnpm rehearsal [输出目录=.preview/rehearsal]
 import { spawn } from "node:child_process";
 import {
-  appendFileSync,
-  existsSync,
   mkdirSync,
-  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { readRequestRecording } from "../cli/session-records.js";
 import { analyze, reportLines } from "../cli/checkup.js";
 import { buildTools, RESERVE } from "../cli/bootstrap.js";
 import { llmSummarize } from "../src/compaction.js";
@@ -47,6 +45,7 @@ resolved.provider.baseUrl = `http://127.0.0.1:${port}`;
 function boot(name: string, window: number) {
   const sessionFile = join(outDir, `${name}.jsonl`);
   rmSync(sessionFile, { force: true });
+  rmSync(sessionFile.replace(/\.jsonl$/, ".records"), { recursive: true, force: true });
   rmSync(sessionFile.replace(/\.jsonl$/, ".trace.jsonl"), { force: true });
   const provider = createProvider(resolved, resolveApiKey(resolved.providerName, resolved.provider));
   const log = new EventLog(sessionFile);
@@ -62,12 +61,12 @@ function boot(name: string, window: number) {
     terminal: new VirtualTerminal(W, 44),
     log,
     provider,
-    tools: buildTools(log, choice, compaction, false),
+    tools: buildTools(),
     compaction,
     reserveTokens: compaction.reserveTokens,
     info: { model: resolved.model, providerName: resolved.providerName, sessionFile, contextWindow: window },
     systemPrompt: "You are a coding assistant working in the user's repository.",
-    trace: true,
+
     settings: {
       listModels: () => ["local-fake/fake-agent"],
       switchModel: () => choice,
@@ -78,12 +77,7 @@ function boot(name: string, window: number) {
     },
     ...(resolved.price && { price: resolved.price }),
     onExit: () => {},
-    // 与入口同一种写法:一行一条 {request, line};判据 I 读它。
-    onRaw: (request: number, line: string) =>
-      appendFileSync(
-        sessionFile.replace(/\.jsonl$/, ".trace.jsonl"),
-        `${JSON.stringify({ request, line })}\n`,
-      ),
+
   });
   return { app, log, sessionFile };
 }
@@ -93,13 +87,9 @@ const verdicts: string[] = [];
 
 /** 跑完一轮:判据打印到终端,画面进 HTML。 */
 function judge(round: string, log: EventLog, file: string) {
-  // 旁路文件与真实跑一样从磁盘读:判据 I 判的是它有没有覆盖每一次请求。
-  const traceFile = file.replace(/\.jsonl$/, ".trace.jsonl");
-  const raw = existsSync(traceFile)
-    ? readFileSync(traceFile, "utf8").split("\n").filter(Boolean)
-    : [];
-  const requests = [...new Set(raw.map((l) => (JSON.parse(l) as { request: number }).request))];
-  const c = analyze(log.events, raw.length > 0 ? { lines: raw.length, requests } : undefined);
+  const requests = log.events.flatMap((e, i) => e.type === "request" ? [i] : []);
+  const saved = requests.map((i) => readRequestRecording(file, log.events, i));
+  const c = analyze(log.events, { lines: saved.reduce((n, r) => n + (r?.attempts?.reduce((count, a) => count + a.response.split(/\r?\n/).length, 0) ?? 0), 0), requests: requests.filter((_, i) => saved[i]?.attempts?.length && !saved[i]?.error) });
   const report = reportLines(file, log.events.length, c, usageTotals(log.events));
   verdicts.push(`\n${"=".repeat(96)}\n${round}\n${report.join("\n")}`);
   return c.checks.filter((k) => k.status === "fail");

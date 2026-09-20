@@ -17,6 +17,7 @@ import {
   type WireOptions,
 } from "../provider.js";
 import { ProviderError, parseRetryAfter } from "./errors.js";
+import { recordedFetch } from "./http.js";
 import { type RetryOptions, withRetry } from "./retry.js";
 import { sseEvents } from "./sse.js";
 
@@ -270,6 +271,7 @@ function safeParse(s: string): unknown {
 type CacheControl = { cache_control: { type: "ephemeral" } };
 
 type WireBlock = (
+  | { type: "image"; source: { type: "base64"; media_type: string; data: string } }
   | ThinkingBlock
   | { type: "text"; text: string }
   | { type: "tool_use"; id: string; name: string; input: unknown }
@@ -311,7 +313,18 @@ export function toAnthropicWire(
         break;
       case "user":
         map.push(out.length);
-        out.push({ role: "user", content: [{ type: "text", text: m.content || "(空)" }] });
+        out.push({
+          role: "user",
+          content: [
+            ...(m.content || !m.images?.length
+              ? [{ type: "text" as const, text: m.content || "(empty)" }]
+              : []),
+            ...(m.images ?? []).map((image) => ({
+              type: "image" as const,
+              source: { type: "base64" as const, media_type: image.mimeType, data: image.data },
+            })),
+          ],
+        });
         break;
       case "assistant": {
         map.push(out.length);
@@ -459,21 +472,29 @@ export function anthropic(opts: AnthropicOptions): Provider {
     async complete(
       messages: Message[],
       tools: ToolDef[],
-      { onDelta, onReasoning, signal, onRetry, onRaw, effort } = {},
+      { onDelta, onReasoning, signal, onRetry, onRaw, onRequest, record, effort } = {},
     ) {
-      const body = wire(messages, tools, effort ? { effort } : {});
+      const body = JSON.stringify(wire(messages, tools, effort ? { effort } : {}));
 
       return withRetry(
         async () => {
           const acc = newAnthropicAcc();
           const ac = linkedAbort(signal);
+          let saved: Promise<void> | undefined;
           try {
-            const res = await fetch(`${baseUrl}/v1/messages`, {
-              method: "POST",
-              headers,
-              body: JSON.stringify(body),
-              signal: ac.signal,
-            });
+            onRequest?.(body);
+            const captured = await recordedFetch(
+              `${baseUrl}/v1/messages`,
+              {
+                method: "POST",
+                headers,
+                body,
+                signal: ac.signal,
+              },
+              record,
+            );
+            const res = captured.response;
+            saved = captured.saved;
             if (!res.ok || !res.body) {
               const text = await res.text();
               const retryAfterMs = parseRetryAfter(res.headers);
@@ -513,6 +534,8 @@ export function anthropic(opts: AnthropicOptions): Provider {
           } catch (err) {
             if (signal?.aborted) return finishAnthropicAcc(acc, true, opts.model, { mode });
             throw stallToError(err, Boolean(acc.text || thinkingText(acc)));
+          } finally {
+            await saved;
           }
         },
         mergeRetry(opts.retry, { ...(signal && { signal }), ...(onRetry && { onRetry }) }),

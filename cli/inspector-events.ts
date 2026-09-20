@@ -19,7 +19,13 @@ import { c, G } from "./theme.js";
 export const EVENT_FILTERS = ["all", "conversation", "kernel", "changes", "extensions"] as const;
 export type EventFilter = 1 | 2 | 3 | 4 | 5;
 
-const CONVERSATION = new Set(["user/message", "assistant/message", "tool/result", "session/start"]);
+const CONVERSATION = new Set([
+  "user/message",
+  "assistant/message",
+  "tool/result",
+  "tool/unresolved",
+  "session/start",
+]);
 const KERNEL = new Set([
   "request",
   "request/error",
@@ -70,6 +76,8 @@ export function modelSees(
   const ed = editState(events);
   const state = compactionState(events);
   if (ed.dropped.has(i)) return { text: "dropped", changed: true };
+  if (e.type === "tool/unresolved" && !composeContext(events).provenance.some((p) => p.event === i))
+    return { text: "not in context", changed: true };
   if (e.type === "tool/result" && state.cleared.has(i)) return { text: "cleared", changed: true };
   if (state.summary && i >= state.coversFrom && i < state.coversUpTo)
     return { text: "covered", changed: true };
@@ -124,7 +132,7 @@ export function eventSummary(
             : `${plural(lines, "line")}`;
       return {
         sign: G.body,
-        text: `${e.isError ? G.err : G.ok} ${e.name} · ${e.isError ? firstLine(e.content) : size}${e.durationMs !== undefined ? ` · ${fmtMs(e.durationMs)}` : ""}`,
+        text: `${e.outcome === "unknown" ? "?" : e.isError ? G.err : G.ok} ${e.name} · ${e.isError ? firstLine(e.content) : size}${e.durationMs !== undefined ? ` · ${fmtMs(e.durationMs)}` : ""}`,
         tok: eventTokens(e),
       };
     }
@@ -247,6 +255,14 @@ export function eventSummary(
       return { sign: "⚙", text: `model → ${e.model}`, tok: undefined };
     case "session/interrupt":
       return { sign: G.err, text: "interrupted (Esc)", tok: undefined };
+    case "session/exit":
+      return { sign: G.ask, text: `force exit requested · ${e.phase}`, tok: undefined };
+    case "tool/unresolved":
+      return {
+        sign: G.ask,
+        text: `${e.name} · result unknown · call from #${e.callEvent}`,
+        tok: eventTokens(e),
+      };
     case "session/recovered":
       return {
         sign: G.ask,
@@ -350,7 +366,7 @@ export function eventViewLines(events: readonly AgentEvent[], i: number): string
       out.push(
         row(
           "tool",
-          `${e.name} · ${e.isError ? "error" : "ok"}${e.durationMs !== undefined ? ` · ${fmtMs(e.durationMs)}` : ""}`,
+          `${e.name} · ${e.outcome === "unknown" ? "result unknown" : e.isError ? "error" : "ok"}${e.durationMs !== undefined ? ` · ${fmtMs(e.durationMs)}` : ""}`,
         ),
       );
       out.push(row("call", e.callId));
@@ -455,6 +471,15 @@ export function eventViewLines(events: readonly AgentEvent[], i: number): string
     case "session/recovered":
       out.push(row("dropped", `${e.droppedBytes} bytes`));
       out.push(...block("preview", e.preview, c.faint));
+      break;
+    case "tool/unresolved":
+      out.push(row("tool", `${e.name} · ${e.callId} · call event #${e.callEvent}`));
+      out.push(...block("unknown", e.content));
+      break;
+    case "session/exit":
+      out.push(row("action", "force exit requested"), row("phase", e.phase));
+      if (e.error) out.push(...block("error", e.error));
+      out.push(row("outcome", "External work may continue; this is not a completion record."));
       break;
     case "ext/event":
       out.push(row("source", e.source));

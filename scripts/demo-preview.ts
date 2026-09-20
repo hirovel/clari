@@ -32,28 +32,22 @@ try {
   const sessionFile = join(root, ".preview", "demo-session.jsonl");
   // 日志只追加;每次演示从空文件开始。
   rmSync(sessionFile, { force: true });
+  rmSync(sessionFile.replace(/\.jsonl$/, ".records"), { recursive: true, force: true });
   rmSync(sessionFile.replace(/\.jsonl$/, ".trace.jsonl"), { force: true });
   const log = new EventLog(sessionFile);
   const term = new VirtualTerminal(110, 40);
   // 窗口故意给小(8000),让第二个任务("长")触发自动压缩,压缩对照才有东西看。
   const compaction = { strategy: llmSummarize(), window: 8000, reserveTokens: RESERVE };
-  const choice = {
-    provider,
-    model: r.model,
-    providerName: r.providerName,
-    contextWindow: 8000,
-    ...(r.price && { price: r.price }),
-  };
   const app = createTuiApp({
     terminal: term,
     log,
     provider,
-    tools: buildTools(log, choice, compaction, false),
+    tools: buildTools(),
     compaction,
     reserveTokens: RESERVE,
     info: { model: r.model, providerName: r.providerName, sessionFile },
     systemPrompt: "你是一个在用户机器上工作的编程助手。工作目录即当前目录。",
-    trace: true,
+
     ...(r.price && { price: r.price }),
     onExit: () => {},
   });

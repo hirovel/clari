@@ -12,7 +12,7 @@ export type PlanItem = { id: string; text: string; status: PlanStatus };
 /** 复述的用户消息以它开头;stepsSincePlan 靠它认出复述。 */
 export const PLAN_MARK = "[plan]";
 /** 连续这么多步没碰计划且还有未完成项就复述一次;配置 planReminder,0 = 从不。 */
-export const DEFAULT_PLAN_REMINDER = 8;
+export const DEFAULT_PLAN_REMINDER = 0;
 
 const MARKS: Record<PlanStatus, string> = {
   pending: "[ ]",
