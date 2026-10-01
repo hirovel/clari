@@ -5,7 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ClipboardInput } from "../cli/clipboard-input.js";
 import type { ModelSettings } from "../cli/model-settings.js";
+import { SessionInputs } from "../cli/session-inputs.js";
 import { appendMemory } from "../cli/tools/memory.js";
 import { createTuiApp, type TuiApp, type TuiAppDeps } from "../cli/tui-app.js";
 import { llmSummarize } from "../src/compaction.js";
@@ -92,7 +94,6 @@ let tmp: string | undefined;
 afterEach(() => {
   if (tmp) rmSync(tmp, { recursive: true, force: true });
   tmp = undefined;
-  delete process.env.CLARI_EDITOR;
 });
 
 function bootB(provider: Provider, over: Partial<TuiAppDeps> = {}, log = new EventLog()) {
@@ -115,6 +116,39 @@ function bootB(provider: Provider, over: Partial<TuiAppDeps> = {}, log = new Eve
 }
 
 describe("命令:帮助、设置、检视器入口、强度、模型、审批", () => {
+  it("/compact 在运行状态显示进度,Esc 通过普通任务入口取消", async () => {
+    const instructions = "Keep this structure:\n  first  item\n\n\tsecond item";
+    let received = "";
+    const { app, term, log } = bootB(scriptedB([]), {
+      compaction: {
+        strategy: async ({ signal, instructions }) => {
+          received = instructions ?? "";
+          await new Promise<void>((resolve) =>
+            signal?.addEventListener("abort", () => resolve(), { once: true }),
+          );
+          return null;
+        },
+        trigger: "manual",
+        window: 100000,
+        reserveTokens: 1000,
+      },
+    });
+    const running = app.command(`/compact ${instructions}`);
+    await tick();
+    expect(received).toBe(instructions);
+    expect(app.agent.running).toBe(true);
+    expect(doc(app)).toContain("compacting");
+    await app.command("/compact again");
+    expect(doc(app)).toContain("cannot compact while running; press Esc first");
+    expect(app.agent.running).toBe(true);
+    term.feed("\x1b");
+    await running;
+    expect(app.agent.running).toBe(false);
+    expect(log.events.some((e) => e.type === "session/interrupt")).toBe(true);
+    expect(log.events.some((e) => e.type === "request" || e.type === "compaction")).toBe(false);
+    app.stop();
+  });
+
   it("/model:列表选择器、按名切换、default 落盘", async () => {
     const calls: string[] = [];
     const settings: ModelSettings = {
@@ -136,7 +170,7 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
       setKey: (p, k) => calls.push(`key:${p}:${k}`),
       setDefault: (m) => calls.push(`default:${m}`),
     };
-    const { app } = boot(scripted([]), settings);
+    const { app, term } = boot(scripted([]), settings);
 
     await app.command("/model");
     // 无参数:弹列表选择器,当前模型带 ▸;Esc 关闭
@@ -152,6 +186,15 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
 
     await app.command("/model default");
     expect(calls).toContain("default:other/big-model");
+    settings.listModels = () => {
+      throw new Error("Fixture model list unavailable");
+    };
+    await expect(app.command("/model")).resolves.toBeUndefined();
+    expect(text(app)).toContain("Fixture model list unavailable");
+    app.setDraft("keep despite picker failure");
+    expect(() => term.feed("\x0b")).not.toThrow();
+    expect(app.draft()).toBe("keep despite picker failure");
+    expect(app.dialogLines()).toEqual([]);
     app.stop();
   });
 
@@ -253,7 +296,7 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
     app.stop();
   });
 
-  it("/models 对照服务器列表与配置:标出下线与新增", async () => {
+  it("/model list 对照服务器与配置,可取消并丢弃迟到结果", async () => {
     const provider: Provider = {
       model: "fake-model",
       async complete() {
@@ -269,8 +312,9 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
       setKey: () => {},
       setDefault: () => {},
     };
-    const { app } = boot(provider, settings);
+    const { app, term } = boot(provider, settings);
     await app.command("/model list");
+    await tick();
     // 结果是一个列表选择器:配置里的标 ✓/✗,服务器上多出来的不可选
     const dlg = app.dialogLines().map(stripAnsi).join("\n");
     expect(dlg).toContain("server 2 · configured 2");
@@ -282,7 +326,90 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
     expect(dlg).not.toContain("big-model");
     app.dialogInput("\x1b");
     expect(app.dialogLines()).toEqual([]);
+
+    let finish = (_models: string[]) => {};
+    let signal: AbortSignal | undefined;
+    provider.listModels = (cancel) => {
+      signal = cancel;
+      return new Promise((resolve) => {
+        finish = resolve;
+      });
+    };
+    app.setDraft("keep this draft");
+    // 即使供应商忽略取消,迟到的结果也不能重新打开选单。
+    const pending = app.command("/model list");
+    await tick();
+    term.feed("\x1b");
+    expect(signal?.aborted).toBe(true);
+    finish(["fake-model"]);
+    await pending;
+    await tick();
+    expect(app.dialogLines()).toEqual([]);
+    expect(app.draft()).toBe("keep this draft");
+
+    await app.command("/model list");
+    await app.command("/model");
+    expect(signal?.aborted).toBe(true);
+    finish(["fake-model"]);
+    await tick();
+    expect(app.dialogLines().map(stripAnsi).join("\n")).toContain("configured models");
+    app.dialogInput("\x1b");
+
+    // 元数据查询也属于同一弹窗,关闭后不能被它的结果覆盖。
+    let metadata = (_note: string) => {};
+    provider.listModels = async () => ["fake-model"];
+    settings.capabilityNote = () =>
+      new Promise((resolve) => {
+        metadata = resolve;
+      });
+    await app.command("/model list");
+    await tick();
+    term.feed("\x0b");
+    metadata("late metadata");
+    await tick();
+    expect(app.dialogLines()).toEqual([]);
+
+    // 查询失败必须可见,并可立即重试;新模型的保存失败也不能被取消边界吞掉。
+    settings.capabilityNote = async () => {
+      throw new Error("Fixture metadata unavailable", {
+        cause: Object.assign(new Error("Private diagnostic content"), { code: "ECONNREFUSED" }),
+      });
+    };
+    await app.command("/model list");
+    await tick();
+    expect(text(app)).toContain("Fixture metadata unavailable [ECONNREFUSED]");
+    expect(text(app)).not.toContain("Private diagnostic content");
+    expect(app.dialogLines()).toEqual([]);
+    delete settings.capabilityNote;
+    settings.describeModel = async () => ({
+      model: { name: "fresh-model" },
+      caps: { contextWindow: 100000, source: "assumed" },
+      source: "assumed",
+    });
+    settings.addModel = () => {
+      throw new Error("Fixture config unavailable");
+    };
+    provider.listModels = async () => ["fresh-model"];
+    await app.command("/model list");
+    await tick();
+    term.feed("\x1b[B");
+    term.feed("\x1b[B");
+    term.feed("\r");
+    await tick();
+    expect(text(app)).toContain("Fixture config unavailable");
+
+    provider.listModels = (cancel) => {
+      signal = cancel;
+      return new Promise((resolve) => {
+        finish = resolve;
+      });
+    };
+    await app.command("/model list");
     app.stop();
+    expect(signal?.aborted).toBe(true);
+    finish(["fake-model"]);
+    await tick();
+    expect(app.dialogLines()).toEqual([]);
   });
 
   it("--approve ask:每个调用弹一行确认;y 执行、n 以拒绝结果回喂、a 本会话不再问", async () => {
@@ -324,12 +451,20 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
     });
     const tick = () => new Promise((r) => setImmediate(r));
     const running = app.submit("跑");
+    term.feed("\x03"); // 模型稍后申请工具审批,不能盖住退出确认。
     await tick();
     const prompt = app.approvalLines().map(stripAnsi).join("\n");
     expect(prompt).toContain("? echo");
     expect(prompt).toContain("▸ 1. Allow once");
     expect(prompt).toContain("2. Allow echo for the rest of this session");
     expect(prompt).toContain("4. Deny");
+    app.tui.renderNow(true);
+    expect((await term.screen()).join("\n")).toContain("Quit Clari");
+    term.feed("y");
+    expect(app.approvalLines().length).toBeGreaterThan(0);
+    expect(app.agent.running).toBe(true);
+    term.feed("\x1b");
+    expect(app.dialogLines()).toEqual([]);
     term.feed("y");
     await tick();
     await tick();
@@ -356,12 +491,24 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
 });
 
 describe("按键", () => {
-  it("面板列快捷键,普通字符归草稿;Ctrl+R 开关检视器;Ctrl+E 开组装视图;Ctrl+T 切思考;Ctrl+C 退出;检视器的三个入口", async () => {
+  it("面板列快捷键,普通字符归草稿;检视器入口;Ctrl+T 切思考;Ctrl+C 确认退出并保留草稿", async () => {
+    let clipboard: ClipboardInput = { image: testImage };
     const { app, term, exits, log } = bootB(scriptedB([]), {
       terminal: new VirtualTerminal(60, 24),
-      readClipboard: async () => ({ image: testImage }),
+      readClipboard: async () => clipboard,
     });
     const before = log.events.length;
+    // 粘贴的是正文,终端颜色和粘贴结束标记不能变成编辑指令或吞掉后半段。
+    term.feed("\x1b[200~alpha\x1b[31m中文\x1b[0m\r\nbeta\x1b[201~");
+    expect(app.draft()).toBe("alpha中文\nbeta");
+    expect(log.events).toHaveLength(before);
+    app.setDraft("");
+    clipboard = { text: "alpha\x1b[201~\r\nbeta" };
+    term.feed("\x1bv");
+    await vi.waitFor(() => expect(app.draft()).toBe("alpha\nbeta"));
+    expect(log.events).toHaveLength(before);
+    app.setDraft("");
+    clipboard = { image: testImage };
     term.feed("?");
     expect(app.draft()).toBe("?");
     term.feed("\x0b");
@@ -433,12 +580,84 @@ describe("按键", () => {
       app.inspector.close();
     }
     expect(app.inspector.lines(120)).toEqual([]);
+    app.setDraft("keep this draft");
     term.feed("\x03");
-    expect(exits).toEqual([1]);
+    try {
+      expect(exits).toEqual([]);
+      expect(plain(app.dialogLines().join("\n"))).toContain("Quit Clari");
+      term.feed("\x03");
+      term.feed("\x16");
+      expect(exits).toEqual([]);
+      expect(app.draft()).toBe("keep this draft");
+      term.feed("\r"); // 默认继续,不退出。
+      expect(app.dialogLines()).toEqual([]);
+      expect(exits).toEqual([]);
+      term.feed("\x03");
+      term.feed("\x1b[B");
+      term.feed("\x1b"); // 即使选中了退出,Esc 仍回到原界面。
+      expect(exits).toEqual([]);
+      expect(app.draft()).toBe("keep this draft");
+      term.feed("\x03");
+      term.feed("\x1b[B");
+      term.feed("\r");
+      expect(exits).toEqual([1]);
+    } finally {
+      app.stop();
+    }
+    let finishPaste = (_value: ClipboardInput) => {};
+    const pendingPaste = bootB(scriptedB([]), {
+      readClipboard: () =>
+        new Promise((resolve) => {
+          finishPaste = resolve;
+        }),
+    });
+    try {
+      pendingPaste.app.setDraft("/help");
+      pendingPaste.term.feed("\x16");
+      pendingPaste.term.feed("\x1b\r");
+      expect(pendingPaste.log.events.some((e) => e.type === "user/message")).toBe(false);
+      expect(pendingPaste.app.draft()).toBe("/help");
+      finishPaste({ text: " complete" });
+      await vi.waitFor(() => expect(pendingPaste.app.draft()).toBe("/help complete"));
+    } finally {
+      pendingPaste.app.stop();
+    }
   });
 });
 
 describe("提交", () => {
+  it("长粘贴的占位符只用于显示，保存恢复和 Alt+Enter 提交均使用完整正文", async () => {
+    tmp = mkdtempSync(join(tmpdir(), "clari-paste-draft-"));
+    const file = join(tmp, "s.jsonl");
+    const content = Array.from({ length: 20 }, (_, i) => `第 ${i + 1} 行：保留完整粘贴正文。`).join(
+      "\n",
+    );
+    const first = bootB(scriptedB([]), { inputs: new SessionInputs(file, true) });
+    try {
+      first.term.feed(`\x1b[200~${content}\x1b[201~`);
+      first.app.flushInputs();
+      expect(new SessionInputs(file, true).read([]).draft.text).toBe(content);
+      expect(first.app.draft()).toBe(content);
+    } finally {
+      first.app.stop();
+    }
+    const restored = bootB(scriptedB([]), { inputs: new SessionInputs(file, true) });
+    try {
+      expect(restored.app.draft()).toBe(content);
+      restored.app.setDraft("");
+      restored.term.feed(`\x1b[200~${content}\x1b[201~`);
+      restored.term.feed("\x1b\r");
+      await vi.waitFor(() =>
+        expect(restored.log.events.find((e) => e.type === "user/message")).toMatchObject({
+          text: content,
+        }),
+      );
+      await vi.waitFor(() => expect(restored.app.agent.running).toBe(false));
+      expect(restored.app.draft()).toBe("");
+    } finally {
+      restored.app.stop();
+    }
+  });
   it("@路径附件:存在的附上并报字节数,不存在的说明跳过", async () => {
     tmp = mkdtempSync(join(tmpdir(), "clari-tui-"));
     writeFileSync(join(tmp, "a.txt"), "hello");
@@ -499,10 +718,30 @@ describe("提交", () => {
     expect(app.agent.pending).toContainEqual(
       expect.objectContaining({ text: "", deliverAs: "followUp", images: [testImage] }),
     );
+    app.setDraft("keep the main draft");
+    await app.command("/session inputs");
+    expect(plain(app.dialogLines().join("\n"))).toContain("[queued]");
+    term.feed("\r");
+    expect(plain(app.dialogLines().join("\n"))).toContain("Edit message");
+    term.feed("\x01");
+    term.feed("\x0b");
+    const unfinishedEdit = "keep my unfinished edit\n    with indentation";
+    term.feed(`\x1b[200~${unfinishedEdit}\x1b[201~`);
     release?.();
     await first;
     for (let i = 0; i < 20 && calls < 3; i++) await tick();
     expect(calls).toBeGreaterThanOrEqual(2);
+    expect(app.agent.queued).toBe(0);
+    term.feed("\r"); // 原消息在编辑期间已投递;保存失败不能清空尚未应用的文字。
+    const dialog = plain(app.dialogLines().join("\n"));
+    expect(dialog).toContain("already been delivered");
+    expect(dialog).toContain("keep my unfinished edit");
+    expect(dialog).toContain("with indentation");
+    expect(app.draft()).toBe("keep the main draft");
+    term.feed("\x1b");
+    term.feed("\x1b");
+    expect(app.dialogLines()).toEqual([]);
+    expect(app.draft()).toBe("keep the main draft");
     app.stop();
   });
 });
@@ -583,6 +822,7 @@ describe("命令的分支", () => {
 
   it("/prompt 段构成与 instructions-as user 的提示;/compact 失败;/fork 的三种参数;未知命令与模板", async () => {
     tmp = mkdtempSync(join(tmpdir(), "clari-tui-"));
+    const resumed: string[] = [];
     const log = new EventLog();
     log.append({
       type: "session/start",
@@ -599,6 +839,9 @@ describe("命令的分支", () => {
       scriptedB([]),
       {
         sessionsDir: tmp,
+        switchSession: (target) => {
+          if (target.kind === "resume") resumed.push(target.file);
+        },
         compaction: {
           strategy: async () => {
             throw new Error("no summary today");
@@ -607,6 +850,17 @@ describe("命令的分支", () => {
           reserveTokens: 1000,
         },
         templates: [{ name: "greet", description: "say hi", body: "Hi $ARGUMENTS", path: "t.md" }],
+        skills: [
+          {
+            name: "review",
+            description: "review text",
+            body: "Read the request exactly.",
+            path: "review/SKILL.md",
+            dir: "review",
+            disableModelInvocation: false,
+            allowedTools: [],
+          },
+        ],
       },
       log,
     );
@@ -618,7 +872,7 @@ describe("命令的分支", () => {
     expect(d).toContain("first user message (--instructions-as user)");
     expect(d).toContain("memory: off");
     await app.command("/compact");
-    expect(doc(app)).toContain("compaction failed: no summary today");
+    expect(doc(app)).toContain("✗ no summary today");
     await app.command("/session fork 0");
     expect(doc(app)).toContain("Usage: /session fork [N]");
     await app.command("/session fork");
@@ -632,6 +886,30 @@ describe("命令的分支", () => {
     d = doc(app);
     expect(d).toContain("template /greet");
     expect(d).toContain("› Hi world");
+    const structured =
+      "Read this:\n```python\ndef f():\n    return 'a  b'\n```\n\n| A | B |\n|---|---|";
+    await app.command(`/review ${structured}`);
+    expect([...log.events].reverse().find((e) => e.type === "user/message")).toMatchObject({
+      text: expect.stringContaining(`User request:\n${structured}`),
+    });
+    await app.command(`/greet ${structured}`);
+    expect([...log.events].reverse().find((e) => e.type === "user/message")).toMatchObject({
+      text: `Hi ${structured}`,
+    });
+    const target = log.events.findIndex((e) => e.type === "user/message");
+    await app.command(`/edit ${target} content ${structured}`);
+    expect(deriveMessages(log.events).find((m) => m.role === "user")).toMatchObject({
+      content: structured,
+    });
+    await app.command("/session resume C:/project with  spaces/session.jsonl");
+    expect(resumed.at(-1)).toBe("C:/project with  spaces/session.jsonl");
+    await app.command("/set approve allow read:folder with  spaces/**");
+    const approval = [...log.events]
+      .reverse()
+      .find((e) => e.type === "session/slot" && e.slot === "approve");
+    expect(approval).toMatchObject({
+      value: expect.stringContaining("read:folder with  spaces/**"),
+    });
     app.stop();
   });
 
@@ -703,7 +981,7 @@ describe("槽命令的分支", () => {
     log.append({ type: "user/message", at: "", text: "Keep this recent request verbatim." });
     const before = deriveMessages(log.events);
     await app.command("/compact");
-    expect(doc(app)).toContain("compaction failed: Summary did not finish (length)");
+    expect(doc(app)).toContain("Summary did not finish (length)");
     expect(deriveMessages(log.events)).toEqual(before);
     expect(log.events.some((e) => e.type === "compaction")).toBe(false);
     expect(log.events.filter((e) => e.type === "request")).toHaveLength(1);
@@ -751,15 +1029,7 @@ describe("槽命令的分支", () => {
     app.stop();
   });
 
-  it("/toolprompts edit 走外部编辑器(改了生效、没改取消);reset;save 写回配置", async () => {
-    tmp = mkdtempSync(join(tmpdir(), "clari-tui-"));
-    const append = join(tmp, "append.cjs");
-    writeFileSync(
-      append,
-      'const fs=require("fs");const f=process.argv[2];fs.writeFileSync(f,fs.readFileSync(f,"utf8")+" EDITED\\n");',
-    );
-    const noop = join(tmp, "noop.cjs");
-    writeFileSync(noop, "");
+  it("/toolprompts 内部编辑应用、取消与清空;reset;save 写回配置", async () => {
     const read = defineTool({
       name: "read",
       description: "guided read",
@@ -769,8 +1039,13 @@ describe("槽命令的分支", () => {
       },
     });
     const { app, log } = bootB(scriptedB([]), { tools: [read], toolPrompts: { style: "brief" } });
-    process.env.CLARI_EDITOR = `node "${append}"`;
     await app.command("/set toolprompts edit read");
+    const before = log.events.length;
+    app.dialogInput(" EDITED");
+    expect(read.description).toBe("guided read");
+    expect(log.events).toHaveLength(before);
+    app.dialogInput("\t");
+    app.dialogInput("\r");
     expect(read.description.endsWith("EDITED")).toBe(true);
     expect(doc(app)).toContain("toolPrompts → edit read");
     expect(log.events.at(-1)).toMatchObject({ slot: "toolPrompts", value: "brief, edited: read" });
@@ -788,9 +1063,18 @@ describe("槽命令的分支", () => {
     await app.command("/set toolprompts reset read");
     expect(read.description).not.toContain("EDITED");
     expect(doc(app)).toContain("toolPrompts → reset read");
-    process.env.CLARI_EDITOR = `node "${noop}"`;
     await app.command("/set toolprompts edit read");
-    expect(doc(app)).toContain("unchanged, cancelled");
+    const afterReset = log.events.length;
+    app.dialogInput("discard");
+    app.dialogInput("\t");
+    app.dialogInput("\t");
+    app.dialogInput("\r");
+    expect(log.events).toHaveLength(afterReset);
+    await app.command("/set toolprompts edit read");
+    app.dialogInput("\x15");
+    app.dialogInput("\t");
+    app.dialogInput("\r");
+    expect(read.description).toBe("");
     await app.command("/set toolprompts edit");
     expect(doc(app)).toContain("no tool named ?");
     app.stop();
@@ -819,6 +1103,9 @@ describe("槽命令的分支", () => {
     app.approvalInput("b");
     app.approvalInput("\x7f");
     expect(plain(app.approvalLines().join("\n"))).toContain("reason: a");
+    app.approvalInput("\x1b[200~\x1b[31m中文🙂\x1b[0m\x1b[201~");
+    app.approvalInput("\x7f");
+    expect(plain(app.approvalLines().join("\n"))).toContain("reason: a中文");
     app.approvalInput("\x1b");
     expect(plain(app.approvalLines().join("\n"))).toContain("Allow once");
     // ↓ 移到第 2 项再 Enter,与直接按 a 或 2 等价

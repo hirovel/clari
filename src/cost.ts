@@ -34,6 +34,7 @@ export type UsageTotals = {
   cacheWriteTokens: number;
   /** 有价格时的累计费用;没有价格为 undefined。 */
   cost?: number;
+  costStatus: "estimated" | "pending" | "missing usage" | "missing price" | "no usage";
 };
 
 /**
@@ -41,7 +42,7 @@ export type UsageTotals = {
  * 正常步的 assistant 用量 + 压缩摘要请求的用量,两者都花钱;价格按用量发生时的模型取。
  */
 export class UsageAccumulator {
-  private readonly t: UsageTotals = {
+  private readonly t: Omit<UsageTotals, "cost" | "costStatus"> = {
     requests: 0,
     inputTokens: 0,
     outputTokens: 0,
@@ -50,15 +51,35 @@ export class UsageAccumulator {
   };
   private cost = 0;
   private priced = false;
+  private missingUsage = false;
+  private missingPrice = false;
+  private pending = false;
   private model = "";
 
   constructor(private readonly priceFor?: (model: string) => Price | undefined) {}
 
   add(e: AgentEvent): void {
-    if (e.type === "session/start" || e.type === "session/model" || e.type === "request")
+    if (e.type === "session/start" || e.type === "session/model") this.model = e.model;
+    if (e.type === "request") {
+      if (this.pending) this.missingUsage = true;
+      this.pending = true;
       this.model = e.model;
+      return;
+    }
+    if (e.type === "request/error") {
+      if (this.pending) this.missingUsage = true;
+      this.pending = false;
+      return;
+    }
     const u = e.type === "assistant/message" || e.type === "compaction" ? e.usage : undefined;
-    if (!u) return;
+    if (e.type !== "assistant/message" && e.type !== "compaction") return;
+    // 不发请求的 clear 压缩没有费用;有请求但无用量的回复不能凑出完整金额。
+    if (e.type === "compaction" && !this.pending && !u) return;
+    this.pending = false;
+    if (!u) {
+      this.missingUsage = true;
+      return;
+    }
     this.t.requests += 1;
     this.t.inputTokens += u.inputTokens;
     this.t.outputTokens += u.outputTokens;
@@ -68,11 +89,24 @@ export class UsageAccumulator {
     if (price) {
       this.priced = true;
       this.cost += costOf(u, price);
-    }
+    } else this.missingPrice = true;
   }
 
   totals(): UsageTotals {
-    return { ...this.t, ...(this.priced && { cost: this.cost }) };
+    const costStatus: UsageTotals["costStatus"] = this.pending
+      ? "pending"
+      : this.missingUsage
+        ? "missing usage"
+        : this.missingPrice
+          ? "missing price"
+          : this.priced
+            ? "estimated"
+            : "no usage";
+    return {
+      ...this.t,
+      costStatus,
+      ...(costStatus === "estimated" && { cost: this.cost }),
+    };
   }
 }
 

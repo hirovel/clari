@@ -6,7 +6,8 @@ import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
 import { createTuiApp, type TuiAppDeps } from "../cli/tui-app.js";
 import { COMMANDS } from "../cli/tui-commands.js";
-import type { SessionTarget } from "../cli/tui-context.js";
+import type { SessionTarget, TuiContext } from "../cli/tui-context.js";
+import { choose } from "../cli/tui-menu.js";
 import { EventLog } from "../src/log.js";
 import type { AssistantTurn, Provider, ToolDef } from "../src/provider.js";
 import { defineTool } from "../src/tools.js";
@@ -100,6 +101,29 @@ describe("命令选单", () => {
     expect(m).toContain("Esc back");
     app.dialogInput("\x1b");
     expect(app.dialogLines()).toEqual([]);
+    // 关闭真实命令选单也必须结束等待,不能留下悬空的命令流程。
+    let cancel = () => {};
+    const context = {
+      tui: { requestRender() {} },
+      deps: { terminal: { rows: 24 } },
+      dialog: {
+        open(_component: unknown, onClose?: () => void) {
+          cancel = onClose ?? (() => {});
+        },
+        close() {
+          cancel();
+        },
+      },
+    } as unknown as TuiContext;
+    let settled = false;
+    const closedMenu = choose(context, "Close", []).then((result) => {
+      settled = true;
+      return result;
+    });
+    context.dialog.close();
+    await tick();
+    expect(settled).toBe(true);
+    expect(await closedMenu).toBeUndefined();
     await app.command("/inspect");
     app.dialogInput("3"); // usage
     app.dialogInput("\r");
@@ -156,7 +180,7 @@ describe("命令选单", () => {
     narrow.feed("d");
     await tick();
     expect(completed).toBe(false);
-    for (let i = 0; i < 30; i++) narrow.feed("\x1b[B");
+    for (let i = 0; i < 30; i++) narrow.feed("\x1bOB");
     const lines = next.app.dialogLines();
     expect(lines.length).toBeLessThanOrEqual(18);
     expect(lines.every((line) => visibleWidth(line) <= 60)).toBe(true);

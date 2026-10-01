@@ -74,26 +74,46 @@ export type ResolvedServer = {
   source: string;
 };
 
+export type ProjectMcpFile = {
+  file: string;
+  raw: string;
+  servers: Record<string, McpServerConfig & { type?: string }>;
+};
+
+/** 一次读取项目配置;审核与连接共用这个快照,避免显示 A 却启动 B。 */
+export function readProjectMcpFile(cwd: string): ProjectMcpFile | undefined {
+  const file = join(cwd, ".mcp.json");
+  if (!existsSync(file)) return undefined;
+  const raw = readFileSync(file, "utf8");
+  try {
+    const parsed = JSON.parse(raw) as { mcpServers?: ProjectMcpFile["servers"] };
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      throw new Error("expected a JSON object");
+    const servers = parsed.mcpServers ?? {};
+    if (typeof servers !== "object" || Array.isArray(servers))
+      throw new Error("mcpServers must be an object");
+    for (const [name, config] of Object.entries(servers))
+      if (!config || typeof config !== "object" || Array.isArray(config))
+        throw new Error(`mcpServers.${name} must be an object`);
+    return { file, raw, servers };
+  } catch (error) {
+    throw new Error(`failed to parse ${file}: ${(error as Error).message}`);
+  }
+}
+
 /** 合并两处来源并展开变量。 */
 export function loadMcpServers(
   mcp: McpConfig | undefined,
   cwd: string,
   env: Record<string, string | undefined> = process.env,
+  project: ProjectMcpFile | null = readProjectMcpFile(cwd) ?? null,
 ): ResolvedServer[] {
   const merged = new Map<string, { config: McpServerConfig; source: string }>();
-  const projectFile = join(cwd, ".mcp.json");
-  if (existsSync(projectFile)) {
-    try {
-      const parsed = JSON.parse(readFileSync(projectFile, "utf8")) as {
-        mcpServers?: Record<string, McpServerConfig & { type?: string }>;
-      };
-      for (const [name, c] of Object.entries(parsed.mcpServers ?? {})) {
-        const { type, ...rest } = c;
-        void type;
-        merged.set(name, { config: rest, source: projectFile });
-      }
-    } catch (err) {
-      throw new Error(`failed to parse ${projectFile}: ${(err as Error).message}`);
+  if (project) {
+    for (const [name, c] of Object.entries(project.servers)) {
+      const { type, ...rest } = c;
+      void type;
+      merged.set(name, { config: rest, source: project.file });
     }
   }
   for (const [name, c] of Object.entries(mcp?.servers ?? {}))

@@ -13,8 +13,10 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import type { AgentEvent } from "./events.js";
+import { lockFile } from "./file-lock.js";
 
 export type ContentRef = { file: string; label: string; bytes?: number; missingFrom?: number };
+export const RECORDING_FULL = new Error("Recording buffer full; saving must recover");
 type Write = { file: string; data: Buffer; offset?: number; written: number; truncate?: number };
 
 export class Recording {
@@ -22,8 +24,10 @@ export class Recording {
   private dirty = new Set<string>();
   private timer: ReturnType<typeof setTimeout> | undefined;
   private listeners = new Set<() => void>();
-  private rawPending = 0;
+  private queuedBytes = 0;
+  private rejectedBody = false;
   private disposed = false;
+  private writer: ReturnType<typeof lockFile> | undefined;
   revision = 0;
   gaps = 0;
   onGap?: (ref: ContentRef) => void;
@@ -36,9 +40,25 @@ export class Recording {
     this.directory = `${journal.replace(/\.jsonl$/, "")}.records`;
   }
 
+  /** 写盘失败后的内存积压达到上限时,调用方须停止产生新的外部工作。 */
+  get full(): boolean {
+    return this.error !== undefined && (this.queuedBytes >= this.bufferBytes || this.rejectedBody);
+  }
+
+  get pendingBytes(): number {
+    return this.queuedBytes;
+  }
+
   subscribe(fn: () => void): () => void {
     this.listeners.add(fn);
     return () => this.listeners.delete(fn);
+  }
+
+  /** 恢复可写历史必须先独占文件,再读取事件下标;只读查看不获取写入资格。 */
+  claim(): void {
+    if (this.disposed) throw new Error(`Recording is closed: ${this.journal}`);
+    this.writer ??= lockFile(this.journal);
+    this.writer.assertHeld();
   }
 
   dispose(): void {
@@ -46,6 +66,11 @@ export class Recording {
     if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
     this.listeners.clear();
+    try {
+      this.writer?.release();
+    } catch {
+      /* 已失去的锁不能释放别人的写入资格。 */
+    }
   }
 
   // EventLog 交付单个已序列化快照;分隔、修复和字节操作只属于此模块。
@@ -54,6 +79,7 @@ export class Recording {
   }
 
   loadEvents(repair = false): AgentEvent[] {
+    if (repair) this.claim();
     const bytes = readFileSync(this.journal);
     const events: AgentEvent[] = [];
     let line = 0;
@@ -103,18 +129,30 @@ export class Recording {
   }
 
   private append(file: string, data: string | Uint8Array, truncate?: number): boolean {
-    const raw = file !== this.journal;
+    if (this.disposed) throw new Error(`Recording is closed: ${this.journal}`);
+    if (!this.writer) this.claim();
     const size = Buffer.byteLength(data);
-    if (raw && this.rawPending + size > this.bufferBytes) return false;
+    // 原文保持硬上限;一次过大的块也会触发停止,不让失败队列骤增。
+    if (file !== this.journal && (this.full || this.queuedBytes + size > this.bufferBytes)) {
+      const wasFull = this.full;
+      if (this.error) this.rejectedBody = true;
+      if (wasFull !== this.full) {
+        this.revision++;
+        this.notify();
+      }
+      return false;
+    }
+    const wasFull = this.full;
     this.queue.push({
       file,
       data: Buffer.from(data),
       written: 0,
       ...(truncate !== undefined && { truncate, offset: truncate }),
     });
-    if (raw) this.rawPending += size;
+    this.queuedBytes += size;
     this.revision++;
     if (!this.error) this.flush(false);
+    else if (wasFull !== this.full) this.notify();
     this.schedule();
     return true;
   }
@@ -163,7 +201,9 @@ export class Recording {
   // 保存失败是状态,不能成为模型或工具继续执行的门槛。
   flush(durable = true): void {
     const before = this.error;
+    const wasFull = this.full;
     try {
+      if (this.queue.length || this.dirty.size) this.claim();
       while (this.queue.length) {
         const op = this.queue[0] as Write;
         mkdirSync(dirname(op.file), { recursive: true });
@@ -190,7 +230,7 @@ export class Recording {
           }
           this.dirty.add(op.file);
           this.queue.shift();
-          if (op.file !== this.journal) this.rawPending -= op.data.length;
+          this.queuedBytes -= op.data.length;
         } finally {
           if (fd !== undefined) closeSync(fd);
         }
@@ -206,7 +246,10 @@ export class Recording {
           this.dirty.delete(file);
         }
       }
-      if (durable) this.error = undefined;
+      if (durable) {
+        this.error = undefined;
+        this.rejectedBody = false;
+      }
     } catch (error) {
       this.error = (error as Error).message;
     }
@@ -214,7 +257,7 @@ export class Recording {
       clearTimeout(this.timer);
       this.timer = undefined;
     }
-    if (before !== this.error) {
+    if (before !== this.error || wasFull !== this.full) {
       this.revision++;
       this.notify();
     }
@@ -277,8 +320,14 @@ export class Recording {
   copyAttachments(events: readonly AgentEvent[], source?: Recording): void {
     const refs = new Map<string, ContentRef>();
     for (const event of events) {
-      if (event.type !== "ext/event" || event.source !== "recording") continue;
-      for (const key of ["input", "sent", "received", "output"]) {
+      if (event.type !== "ext/event") continue;
+      const keys =
+        event.source === "recording"
+          ? ["input", "sent", "received", "output"]
+          : event.source === "mcp" && event.kind === "rpc"
+            ? ["bodyRef"]
+            : [];
+      for (const key of keys) {
         const ref = event.payload[key] as ContentRef | undefined;
         if (ref) refs.set(ref.file, ref);
       }

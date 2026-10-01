@@ -7,6 +7,77 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ### Changed
 
+- Adopt the MIT license. Introduce API inspection, context editing and configurable presets with three highlights in both READMEs. Add concise usage sections for expanding recorded content, editing context, configuring components and resuming tasks. Replace acceptance stories and old screenshots with one setup preview exported from the terminal renderer.
+
+- Show each setup component with its name and key values, separated by thin rules. Keep summaries scoped to the current session or saved defaults. Fit navigation to rendered row heights, page by visible items and wrap scope hints on narrow terminals. Preserve existing setting actions and draft input.
+
+- Keep the tail and input marker visible when typing long paths, values or preset names in the setup view. Slice by terminal columns for wide characters; preserve the complete value.
+
+- Configure skill discovery directories in `/settings prompt.skills.sources`. Keep four enabled defaults, toggle sources, add custom paths, and remove custom sources without deleting files. Rescan idle sessions immediately, keep in-flight runs unchanged, and preserve loaded instructions. Save source choices with defaults, presets and session setup. Preserve spaces in typed setting values.
+
+- Treat failed Responses terminal events as errors even when details are missing, and reject incomplete responses for reasons other than the output-token limit before handing over tool calls. Keep existing truncation recovery. Use English for fixed tool-validation and stream-error text.
+
+- Recognize nested transport error codes when deciding retries and classifying failures. Stop automatic replay after streamed text or reasoning, across all three provider adapters; preserve the received bytes and pause pending input after failure.
+
+- Include underlying error codes in network failure text for retries, final errors, recorded HTTP attempts, login verification, model listing and `once` output. Preserve the original error and retry policy; do not expand nested diagnostic bodies or request objects.
+
+- Report individual `@path` attachment read failures without losing the input or other readable attachments. Read each accepted file once for both binary detection and text; keep the existing 50 KiB limit and literal treatment of missing paths.
+
+- Keep the TUI available when a prompt-template directory or file cannot be read. Show the source path and reason, continue loading normal templates, and preserve the existing project-over-user precedence.
+
+- Show all four skill discovery locations and their order in `/inspect skills` and CLI help. Report unreadable directories, unreadable skill files and duplicate names without preventing other skills from loading. Keep the existing first-name-wins order. Reclaim temporary artifacts in skill, parity, registry, Responses and edit-tool tests through the existing test isolation root.
+
+- Page through help and other main-screen output with PgUp/PgDn before the first request. Keep step selection once requests exist. Isolate project MCP test sessions in their temporary directory.
+
+- Run the default Vitest suite with at most two worker processes. Keep all tests and existing timing limits; reduce contention between rendering measurements and subprocess checks.
+
+- Pause undelivered input after a failed turn, requiring explicit continuation in `/session inputs`. Keep unapplied pending-message edits when the original message has already been delivered; the main draft stays intact.
+
+- Preserve internal line breaks, indentation and repeated spaces in command text, including skill requests, templates, inline context edits and compaction instructions. Keep repeated spaces in session paths and approval rules. Expand template placeholders in one pass without reinterpreting the supplied text.
+
+- Preserve the off option when the model catalog declares both a thinking toggle and effort levels. Explicit model settings still take precedence. Request failures without an inline error body now link to recorded response details instead of claiming that no response was received.
+
+- Correct CLI help to describe manual skill invocation as the default and distinguish automatic catalogs in the system prompt from those in a tool definition.
+
+- Cancel `/model list` when its view closes or is replaced. Discard late catalog and capability results without closing a newer menu. Report default-save failure separately from a successful model switch, with `/model default` available for retry. Keep a short failure summary visible after full details on narrow terminals.
+
+- Ask before exiting on Ctrl+C, with Continue selected by default. Cancel returns to the previous view with drafts, unapplied edits and pending approvals intact. Repeated Ctrl+C does not confirm or force shutdown; `/quit` remains a direct shutdown command.
+
+- Keep status-bar exports in the same order as the live screen. Show descriptions for checkbox readings, wrap failure messages and recovery actions on narrow terminals, and label context totals as unmeasured when no API baseline is available. The preview server listens on loopback only.
+
+- Add four status-bar layouts, defaulting to Signal rail. `/settings` previews the highlighted layout with live readings and offers a checkbox menu for visible readings. Selected readings wrap on narrow terminals; model and effort appear below the input. Urgent failures remain visible regardless of the layout.
+
+- Hide monetary estimates by default, including static rates in model pickers. `showCostEstimate` opts in to a labeled token-based estimate in the TUI; one-shot JSON uses `--show-cost-estimate`. If usage or pricing is incomplete, show the reason instead of a partial total. The optional Classic status style keeps the capacity meter on wide terminals.
+
+- Before valid provider usage is available, label context size as a message estimate plus the active tool count, with the total pending measurement. Explain the estimate's scope in request details and `/context`; treat all-zero usage as missing and keep the existing compaction threshold and event format.
+
+- Report an interrupted turn as interrupted even when an adapter returns a late completed reply. Keep the received reply in the event log. Pending input cannot be resumed while the turn is stopping, and an input is not unpaused before its first delivery is recorded.
+
+- Run `/compact` through the agent activity cycle. Esc interrupts it, exit waits for it, and input queued during compaction continues afterward. A standalone compaction does not start a normal model request.
+
+- Mark visual token cost as unknown before sending a new image, and show the provider's measured input beside the next-context estimate. If an attempted compaction makes no progress, record its reason and keep the original images and context available for manual editing.
+
+- Format the generated model snapshot as part of `pnpm models:update`, so a normal refresh leaves the repository checks green without a separate manual step.
+
+- Use `deepseek-flash` as the new-install default and list the current Flash and Pro names in the DeepSeek template. Refresh the generated offline model-capability snapshot.
+
+- Remove the outdated `HANDOVER.md`; keep current working rules in `AGENTS.md` and the module map in the internal architecture document.
+
+- Keep separate `grep` and `glob` tools but run both through one cancellable, bundled ripgrep process. Apply the search limits to the whole call, report invalid patterns directly, and remove tool-description rules that forbid shell searches.
+
+- Allow one `fetch` call to raise its response byte budget with `maxBytes`. Keep the 5 MiB default, do not cache stopped downloads, and leave any retry to the agent or user.
+
+- Let `bash` commands finish regardless of output volume. Stream the complete captured output to Recording, keep a bounded 50 KiB tail for the model, and show the byte count and raw-output path. Timeout, interruption and recording-failure handling remain in force.
+
+- Let `fetch` read local and private HTTP(S) addresses under the same tool approval rules as other network-capable tools. Remove its separate `allowPrivate` setting, connection guard, and fixed per-host request quota.
+
+- Read files above 20 MiB by explicit line range without loading the whole file. Keep the default 50 KiB / 2000-line response budget; `maxOutputBytes` raises the byte budget for one read call.
+
+- Review project `.mcp.json` in the TUI before connecting its effective servers. Remember trust by project path and file digest; changed files require review again. One-shot mode stops with a clear message for an untrusted project configuration.
+
+- Share context field rules across menus, commands, comparison and restore. Menu editing enters the editor directly; application rechecks running and read-only state.
+
+- Edit context text and tool descriptions inside the terminal, with explicit Apply and Cancel actions. Preserve the message draft and original history. Remove Ctrl+G, external editor processes and temporary edit files.
 - Label where skill catalogs enter requests: system prompt for read loading, tool definition for skill loading, and no catalog for manual invocation. Distinguish catalogs from loaded instructions.
 
 - Default skills to manual invocation. Add live automatic selection and a shared checkbox range, saved in defaults and presets. `include: "all"` includes future discoveries; arrays keep specific names. Replace `prompt.skills.list` with `mode` and `include`; the old key reports an error. Dedicated skill tools carry the selected catalog without repeating it in the system prompt.
@@ -17,6 +88,80 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ### Fixed
 
+- Bound masked login input and verification errors to the terminal size, with paged error details. Cancel the actual model-list request on Esc or dialog closure, and reject malformed model-list responses. After verification fails, explicitly save an unverified key with Ctrl+S and choose a configured model. Show when an environment key still takes precedence. Read UTF-8 BOMs in configuration and credentials, and avoid credential excerpts in parsing and login errors.
+
+- Reuse the scrolling list picker in login for providers and models. Keep long selection errors readable through the detail pager and retain the selected model for retry. Size the compact fallback from the actual wrapped footer height so small menus stay inside the terminal.
+
+- Keep all command-palette matches available to arrow-key navigation instead of discarding entries after the first ten. Scroll the visible rows, bound the view to the terminal size, and let PgUp/PgDn read the selected entry's full label and description.
+
+- Settle menu waits when a dialog is closed or replaced. Cancel login verification with Esc and ignore late results after cancellation or closure; keep credential-save and model-switch errors in the dialog for retry. Keep command and palette lookup errors visible without ending the interface.
+- Preserve editor key ownership while editing pending messages. Accept bracketed paste and Unicode backspace in palette, login and approval inputs, and recognize supported terminal key encodings. Block Alt+Enter command submission while clipboard reading is pending. Ask before palette actions replace a nonempty draft, defaulting to keeping it.
+
+- Keep full pasted text when saving drafts, switching sessions, attaching images or submitting with Alt+Enter. Folded paste markers remain display-only. Share terminal-sequence cleanup across the main editor, editing panels and single-line settings inputs.
+
+- Stop a turn cleanly when Esc interrupts an in-progress automatic or overflow compaction. Do not record a false no-progress decision, apply a late summary, or dispatch another model request after cancellation.
+
+- Exclude requests that introduce an image from the text-only token-drift check. Later requests still use measured usage as their baseline.
+
+- Label message indexes in the context workbench as positions in the next request. A reply produced after the last request is no longer described as already sent.
+
+- Include the relay configuration example referenced by both READMEs in the installable package.
+
+- Save the resolved setup in one-shot sessions before their first request. Opening those sessions in the TUI now restores the same model, effort and tools without asking users to review missing settings; older sessions still require review.
+
+- Show recorded HTTP request bodies as available in the inspector summary without loading their full text until the wire section opens.
+
+- Compare context size immediately before and after each compaction in `checkup`; later tool results no longer turn a successful reduction into a false failure.
+
+- Do not follow directory symlinks during file searches; a cyclic link no longer turns valid matches into a search error.
+
+- Save the full scanned `glob` match list when more than 500 paths match, and include its Recording path beside the bounded model preview.
+
+- Tell the agent how to recover shortened `read` lines. Avoid suggesting a next-line offset when the displayed line itself is incomplete; point to the saved original text when available.
+
+- Save long redacted MCP protocol messages as Recording attachments, and keep relative references valid when a session is forked. The event inspector shows the current session's full-body path.
+
+- Include the recorded raw-result path when an MCP tool result is shortened for the model. Keep the preview on a Unicode boundary and label an incomplete recording as a prefix.
+
+- Mark byte-limited `fetch` downloads as incomplete and show the captured-prefix path when available. Show the recorded body path when long lines or page results are shortened; clarify that `offset` only pages through downloaded content.
+
+- Keep one-line tool results within the displayed byte budget, preserving complete UTF-8 characters. Remove the unused two-ended truncation policy and its test.
+
+- Make `edit` require a unique exact match instead of silently changing punctuation or whitespace through fuzzy fallback. Preserve untouched mixed line endings, and reject invalid UTF-8 or NUL-containing files before rewriting them.
+
+- Stop telling the agent to continue after the final page of a read or fetch result. Reject offsets beyond the end instead of returning an empty page. Apply the read output budget to directory listings while recording the full listing. Mark built-in grep/glob results incomplete when their file scan reaches its cap, and avoid directory symlink loops.
+
+- Bound failed-session write backlog at 64 MiB before starting more work. Stop the active turn at the limit, mark uncertain tool results, and resume only after saving recovers and the user starts new work. Inputs arriving while a turn is stopping stay paused for manual continuation.
+
+- Keep MCP connections in the pool when cleanup fails, and retry them during session shutdown. Initial setup failures now close the connection pool before exit and report both startup and cleanup errors.
+
+- Stop bash and stdio MCP process trees on cancellation or close where the OS permits it. Report cleanup failure and possible surviving children instead of claiming they stopped. Do not start a bash command when its signal was already aborted.
+- Save and release a one-shot session when runtime setup fails.
+- Restrict Vitest discovery to `tests/` so acceptance-task files are not mistaken for project tests.
+
+- Show recorded step-limit stops after session restore without a duplicate live notice. Keep retry notices inside their request so they appear before the final error.
+- Show request input, measured usage, cache, latency, and stop reason across two lines in narrow inspector windows instead of truncating the outcome.
+- Keep later tool results when a dropped earlier call used the same call ID. Context projection now associates each result with its own call instead of removing every matching ID.
+
+- Describe both clipboard content and pasted image paths as a paste while input is being prepared.
+
+- Find a safe compaction boundary without repeatedly copying the history tail. Share session-log release handling across completed switches and abandoned candidates.
+
+- Keep one writer per session, release ownership on session handoff and clean shutdown, and reject active-session pruning. Read-only history remains available.
+- Save configuration and credentials under a file lock with atomic replacement. Apply changes to the latest file so separate processes do not overwrite unrelated settings.
+- Separate live requests with numbered headings. Keep the last reported cache hit rate visible in narrow terminals, distinguish missing usage from zero hits, and prioritize saving-retry controls.
+
+- Cancel provider retry waits immediately and check cancellation before each attempt. Compose request and turn cancellation with native signals so long turns do not accumulate abort listeners.
+- Point authentication, model, context-editing and error-inspection hints to the current command tree.
+
+- Keep child-session inspection read-only and check action availability when executing. Reopening the inspector returns to the main session; child context no longer borrows the parent's tools or prefix comparison.
+- Keep selected context actions visible in short terminals and page their full details. Track actions by identity when available options change. Hide retry when no reply exists, distinguish unknown results from manual edits, and explain that edited context is used by the next message.
+- Offer context editing for recovered tool calls with unknown results. Preserve their original records and unknown status; stop claiming that edits necessarily reduce cache hits.
+- Fork sessions from the active recording so buffered bodies remain available during source saving failures. Reopened forks retain their own events and bodies.
+- Inherit the parent's current system prompt when starting child tasks. Apply explicit child-type overrides after inherited history, and preserve child prompts when resuming.
+- Recalculate context size after edits or exclusions instead of reusing stale API usage. Resume measured usage after the next response; retain historical usage and costs.
+- Build compaction input from the current context before selecting older messages. Honor later edits and exclusions, carry forward previous summaries and recovered tool results, and measure compression against effective content.
+- Keep editing shortcuts inside the text panel. Connect Ctrl+V / Alt+V to clipboard text, wait before applying, and discard late results after the panel closes. Preserve drafts on clipboard errors and show a text-only notice for images.
 - Parse skill metadata with the `yaml` library, including quoted names and multiline descriptions. Skip invalid skills individually and show their path and error in the session or CLI.
 
 - Apply the selected preservation policy to manual `/compact`, matching automatic compaction. Original history and the retained message tail remain intact.
@@ -104,7 +249,7 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 - Ledger: every request is a step; the newest `foldSteps` (3) stay open, older ones fold to one ledger line (stop reason, calls, tokens, cache hit rate, first line of the reply or the first call). PgUp/PgDn move a step cursor and scroll that step to the top, Enter unfolds or folds it, Esc releases; `foldSteps: 0` never folds.
 - Ctrl+K command palette: fuzzy search over commands, configured models, provider logins, skills and templates.
 - Desktop notification (OSC 9/777 and bell) when a turn ends or approval is needed while the terminal is unfocused (`notify: unfocused | always | off`); the terminal title follows the state.
-- `/copy` copies the last reply, `/copy N` its Nth code block (OSC 52). Ctrl+G writes the message in `$EDITOR`. Shift+Enter inserts a newline.
+- `/copy` copies the last reply, `/copy N` its Nth code block (OSC 52). Shift+Enter inserts a newline.
 - File paths in tool calls are OSC 8 `file://` links; clicking them in the alt screen opens the file.
 - The seal in the header breathes while the model works; the status line shows a context pulse (last ten requests as a tiny bar chart).
 - Streaming coalesced to 30 frames per second.

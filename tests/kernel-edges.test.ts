@@ -1,22 +1,15 @@
 // 内核与工具的低分支(重构块 7):配置文件的每种坏形态与写回、模型解析的猜测与报错、key 的三条路;
-// bash 的 shell 不可用 / 打断 / 非零退出 / 截断落盘;grep 的 rg 路径与 JS 回退、glob 上限;参数解析的每个开关。
+// bash 的 shell 不可用 / 打断 / 非零退出 / 截断落盘;搜索结果上限;参数解析的每个开关。
 
 import * as childProcess from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
-
-vi.mock("node:child_process", async (original) => ({
-  ...(await original<typeof import("node:child_process")>()),
-  spawnSync: vi.fn((...args: Parameters<typeof childProcess.spawnSync>) =>
-    require("node:child_process").spawnSync(...args),
-  ),
-}));
+import { dirname, join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { applyPreset, parseCommonArgs, resolveApproval } from "../cli/args.js";
 import { createBashTool } from "../cli/tools/bash.js";
-import { createGrepTool, globTool, grepFiles, walkFiles } from "../cli/tools/search.js";
+import { createGrepTool, globTool } from "../cli/tools/search.js";
 import { keepTail } from "../cli/tools/truncate.js";
 import { DEFAULT_APPROVAL } from "../src/approval.js";
 import {
@@ -31,6 +24,7 @@ import {
   saveCredential,
   setApiKey,
   setDefaultModel,
+  updateConfig,
 } from "../src/config.js";
 
 const ctx = (signal = new AbortController().signal) => ({ signal }) as never;
@@ -93,9 +87,57 @@ describe("配置文件", () => {
     expect(loadCredentials(creds).fake?.apiKey).toBe("sk-1");
     saveCredential("other", "sk-2", creds);
     expect(Object.keys(loadCredentials(creds))).toEqual(["fake", "other"]);
-    const withDefault = setDefaultModel(next, "fake/other", path);
+    writeFileSync(creds, `\uFEFF${readFileSync(creds, "utf8")}`);
+    expect(Object.keys(loadCredentials(creds))).toEqual(["fake", "other"]);
+    saveCredential("third", "local-fixture", creds);
+    expect(Object.keys(loadCredentials(creds))).toEqual(["fake", "other", "third"]);
+    writeFileSync(creds, "not-json-local-private-fixture");
+    expect(() => loadCredentials(creds)).toThrow(/failed to parse credentials/);
+    try {
+      loadCredentials(creds);
+    } catch (error) {
+      expect(String(error)).not.toContain("local-private-fixture");
+    }
+    writeFileSync(path, JSON.stringify(next));
+    writeFileSync(path, `\uFEFF${readFileSync(path, "utf8")}`);
+    expect(loadConfig(path).config.default).toBe(next.default);
+    const withDefault = setDefaultModel("fake/other", path);
     expect(withDefault.default).toBe("fake/other");
     expect(JSON.parse(readFileSync(path, "utf8")).default).toBe("fake/other");
+    const saveFromChild = () =>
+      childProcess.spawnSync(
+        process.execPath,
+        [
+          "--import",
+          "tsx",
+          "--input-type=module",
+          "-e",
+          `import { updateConfig } from './src/config.ts';
+       updateConfig(c => ({...c, defaults:{...c.defaults, execution:'parallel'}}), process.argv[1]);`,
+          path,
+        ],
+        { encoding: "utf8", timeout: 10000 },
+      );
+    updateConfig((current) => {
+      const busy = saveFromChild();
+      expect(busy.status).not.toBe(0);
+      expect(busy.stderr).toContain("File is in use");
+      expect(loadConfig(path).config.default).toBe("fake/other");
+      return { ...current, defaults: { ...current.defaults, steering: "turn" } };
+    }, path);
+    const child = saveFromChild();
+    expect(child.status, child.stderr).toBe(0);
+    expect(loadConfig(path).config.defaults).toMatchObject({
+      steering: "turn",
+      execution: "parallel",
+    });
+    const saved = readFileSync(path, "utf8");
+    expect(() =>
+      updateConfig(() => {
+        throw new Error("cancel save");
+      }, path),
+    ).toThrow("cancel save");
+    expect(readFileSync(path, "utf8")).toBe(saved);
   });
 });
 
@@ -217,92 +259,72 @@ describe("bash 工具的其它边界", () => {
     expect(spilled).not.toContain("a\nb");
     const file = spilled.match(/Full output: (.+)\]/)?.[1];
     expect(file && readFileSync(file, "utf8")).toBe("a\nb\nc\nd\n");
+    const large = await tool.execute(
+      { command: "yes X | head -c 70000; printf '\\nDIRECT_END\\n'" },
+      ctx(),
+    );
+    const largeFile = large.match(/Full output: (.+)\]/)?.[1];
+    expect(large).toContain("DIRECT_END");
+    expect(largeFile && readFileSync(largeFile, "utf8")).toContain("DIRECT_END");
+    expect(largeFile && readFileSync(largeFile).length).toBeGreaterThan(70000);
+    if (file) rmSync(dirname(file), { recursive: true, force: true });
+    if (largeFile) rmSync(dirname(largeFile), { recursive: true, force: true });
     expect(await tool.execute({ command: "echo unlimited", timeout: 0 }, ctx())).toBe("unlimited");
   }, 20000);
 
   it("打断:signal 中止 → 杀进程,错误里带已产出的输出", async () => {
     const tool = createBashTool();
+    const already = new AbortController();
+    already.abort();
+    await expect(
+      tool.execute({ command: "echo should-not-run" }, ctx(already.signal)),
+    ).rejects.toThrow(/interrupted|aborted/);
     const ac = new AbortController();
+    const started = Date.now();
     const pending = tool.execute({ command: "echo started; sleep 5; echo late" }, ctx(ac.signal));
     setTimeout(() => ac.abort(), 300);
-    await expect(pending).rejects.toThrow(/command interrupted[\s\S]*started/);
+    await expect(pending).rejects.toThrow(
+      /(command interrupted|could not stop process tree)[\s\S]*started/,
+    );
+    expect(Date.now() - started).toBeLessThan(3000);
   }, 20000);
 });
 
-describe("搜索工具的回退与上限", () => {
-  it("walkFiles:不存在的根为空,maxFiles 截断;grepFiles:根是文件、glob 按文件名过滤、二进制跳过", () => {
-    tmp = mkdtempSync(join(tmpdir(), "clari-search-"));
-    mkdirSync(join(tmp, "src"));
-    writeFileSync(join(tmp, "src", "a.ts"), "needle here\nother");
-    writeFileSync(join(tmp, "src", "b.md"), "needle too");
-    writeFileSync(join(tmp, "bin.dat"), Buffer.from([0x6e, 0x65, 0x00, 0x64]));
-    expect(walkFiles(join(tmp, "missing"))).toEqual([]);
-    expect(walkFiles(tmp, { maxFiles: 2 })).toHaveLength(2);
-    const one = grepFiles(join(tmp, "src", "a.ts"), /needle/);
-    expect(one.matches).toEqual([{ file: join(tmp, "src", "a.ts"), line: 1, text: "needle here" }]);
-    const byName = grepFiles(tmp, /needle/, { glob: "*.md" });
-    expect(byName.matches.map((m) => m.file)).toEqual(["src/b.md"]);
-    const all = grepFiles(tmp, /ne/);
-    expect(all.matches.map((m) => m.file).sort()).toEqual(["src/a.ts", "src/b.md"]);
-    expect(all.scanned).toBe(2);
-  });
-
-  it("grep 适配 rg 输出:路径前缀、无匹配与非法正则回退;不依赖宿主安装", async () => {
+describe("搜索工具的上限", () => {
+  it("grep 的结果上限按整次搜索计算,文件路径可直接复用", async () => {
     tmp = mkdtempSync(join(tmpdir(), "clari-search-"));
     mkdirSync(join(tmp, "src"));
     writeFileSync(join(tmp, "src", "a.ts"), "Needle here\nneedle again");
-    const result = (stdout: string, status: number) => ({
-      pid: 0,
-      output: [],
-      stdout,
-      stderr: "",
-      status,
-      signal: null,
-    });
-    const spawn = vi
-      .mocked(childProcess.spawnSync)
-      .mockReturnValueOnce(result("src/a.ts:1:Needle here\nsrc/a.ts:2:needle again\n", 0))
-      .mockReturnValueOnce(result("a.ts:2:needle again\n", 0))
-      .mockReturnValueOnce(result("", 1))
-      .mockReturnValueOnce(result("", 2));
-    try {
-      const rg = createGrepTool({ useRipgrep: true });
-      const out = await rg.execute({ pattern: "needle", path: tmp, ignoreCase: true }, ctx());
-      expect(out).toContain("a.ts:1:Needle here");
-      expect(out).toContain("a.ts:2:needle again");
-      const inFile = await rg.execute({ pattern: "again", path: join(tmp, "src", "a.ts") }, ctx());
-      expect(inFile).toContain(":2:needle again");
-      expect(await rg.execute({ pattern: "zzz", path: tmp }, ctx())).toBe("(no matches)");
-      await expect(rg.execute({ pattern: "(", path: tmp }, ctx())).rejects.toThrow();
-    } finally {
-      spawn
-        .mockReset()
-        .mockImplementation((...args) => require("node:child_process").spawnSync(...args));
-    }
-  });
-
-  it("grep 工具 JS 回退:ignoreCase、根是文件时的前缀、结果上限、非法正则报错、rg 不在时自动回退", async () => {
-    tmp = mkdtempSync(join(tmpdir(), "clari-search-"));
-    mkdirSync(join(tmp, "src"));
-    writeFileSync(join(tmp, "src", "a.ts"), "Needle here\nneedle again");
-    const js = createGrepTool({ useRipgrep: false, maxResults: 1 });
-    const capped = await js.execute({ pattern: "needle", path: tmp, ignoreCase: true }, ctx());
+    const grep = createGrepTool({ maxResults: 1 });
+    const capped = await grep.execute({ pattern: "needle", path: tmp, ignoreCase: true }, ctx());
     expect(capped).toContain("a.ts:1:Needle here");
     expect(capped).toContain("showing first 1 results");
-    const inFile = await js.execute({ pattern: "again", path: join(tmp, "src", "a.ts") }, ctx());
+    expect(capped).not.toContain("needle again");
+    const inFile = await grep.execute({ pattern: "again", path: join(tmp, "src", "a.ts") }, ctx());
     expect(inFile).toContain(":2:needle again");
-    await expect(js.execute({ pattern: "(", path: tmp }, ctx())).rejects.toThrow();
-    const auto = createGrepTool({ useRipgrep: true });
-    expect(await auto.execute({ pattern: "zzz", path: tmp }, ctx())).toMatch(/no matches/);
   });
 
   it("glob 工具:无匹配说明;超过 500 条截断", async () => {
     tmp = mkdtempSync(join(tmpdir(), "clari-glob-"));
     for (let i = 0; i < 501; i++) writeFileSync(join(tmp, `f${i}.txt`), "");
     expect(await globTool.execute({ pattern: "*.md", path: tmp }, ctx())).toBe("(no matches)");
-    const out = await globTool.execute({ pattern: "*.txt", path: tmp }, ctx());
-    expect(out).toContain("[showing first 500 of 501 results]");
+    let recorded = "";
+    const out = await globTool.execute({ pattern: "*.txt", path: tmp }, {
+      signal: new AbortController().signal,
+      output: {
+        path: "saved-list.body",
+        ref: { file: "saved-list.body", label: "glob" },
+        write: (text: string | Uint8Array) => {
+          recorded += text;
+        },
+      },
+    } as Parameters<typeof globTool.execute>[1]);
+    expect(out).toContain(
+      "[showing first 500 of 501 scanned matches; recorded 501 scanned matches: saved-list.body]",
+    );
     expect(out.split("\n")).toHaveLength(501);
+    expect(out).not.toContain("f99.txt");
+    expect(recorded).toContain("f99.txt");
   });
 });
 

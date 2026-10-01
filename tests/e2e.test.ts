@@ -185,6 +185,7 @@ describe("端到端(假服务器)", () => {
       ]),
     );
     expect(doc).toContain("Image 1: pixel.png");
+    expect(doc).toContain("visual tokens unknown before response");
     expect(doc).not.toContain(testImage.data);
     expect(server.calls[4]?.body.messages).toBeDefined();
 

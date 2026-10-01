@@ -1,12 +1,80 @@
+import { getEventListeners } from "node:events";
+import { createServer } from "node:http";
 import { describe, expect, it } from "vitest";
 import {
+  anthropic,
   feedAnthropicEvent,
   finishAnthropicAcc,
   newAnthropicAcc,
 } from "../src/providers/anthropic.js";
 import { isContextOverflow, isRetryable, ProviderError } from "../src/providers/errors.js";
-import { feedChunk, finishAcc, newAcc, toWire } from "../src/providers/openai-chat.js";
+import { linkedAbort } from "../src/providers/http.js";
+import {
+  feedChunk,
+  finishAcc,
+  newAcc,
+  openaiCompat,
+  toWire,
+} from "../src/providers/openai-chat.js";
+import { openaiResponses } from "../src/providers/openai-responses.js";
 import { withRetry } from "../src/providers/retry.js";
+
+it("请求取消不累积整轮监听器;本地超时不取消兄弟请求,整轮取消向下传递", async () => {
+  const turn = new AbortController();
+  const requests = Array.from({ length: 12 }, () => linkedAbort(turn.signal));
+  expect(getEventListeners(turn.signal, "abort")).toHaveLength(0);
+  requests[0]?.abort();
+  expect(requests[0]?.signal.aborted).toBe(true);
+  expect(turn.signal.aborted).toBe(false);
+  expect(requests[1]?.signal.aborted).toBe(false);
+  turn.abort();
+  expect(requests.every((request) => request.signal.aborted)).toBe(true);
+  expect(linkedAbort(turn.signal).signal.aborted).toBe(true);
+  let started = () => {};
+  let closed = () => {};
+  let hold = false;
+  let body = '{"data":[{"id":"fixture-model"}]}';
+  const server = createServer((_req, res) => {
+    if (hold) {
+      res.once("close", () => closed());
+      started();
+    } else res.end(body);
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address() as { port: number };
+  const options = {
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    apiKey: "local-fixture",
+    model: "fixture-model",
+  };
+  try {
+    for (const provider of [openaiCompat(options), openaiResponses(options), anthropic(options)]) {
+      hold = false;
+      body = '{"data":[{"id":"fixture-model"}]}';
+      expect(await provider.listModels?.()).toEqual(["fixture-model"]);
+      body = "{}";
+      await expect(provider.listModels?.()).rejects.toThrow("Invalid model list");
+      hold = true;
+      const ready = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      const disconnected = new Promise<void>((resolve) => {
+        closed = resolve;
+      });
+      const controller = new AbortController();
+      const interrupted = expect(provider.listModels?.(controller.signal)).rejects.toMatchObject({
+        name: "AbortError",
+      });
+      await ready;
+      controller.abort();
+      await interrupted;
+      await disconnected;
+    }
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
 
 describe("withRetry", () => {
   const noSleep = { sleep: async () => {} };
@@ -45,6 +113,30 @@ describe("withRetry", () => {
         throw new ProviderError("provider 400: bad", { status: 400 });
       }, noSleep),
     ).rejects.toThrow("bad");
+    expect(calls).toBe(1);
+
+    // 在实际退避等待期间取消,应立即结束且不发出下一次请求。
+    const controller = new AbortController();
+    let ready!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      ready = resolve;
+    });
+    calls = 0;
+    const pending = withRetry(
+      async () => {
+        calls++;
+        throw new ProviderError("429", { status: 429, retryAfterMs: 30000 });
+      },
+      { signal: controller.signal, onRetry: ready },
+    );
+    const interrupted = expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    await waiting;
+    controller.abort();
+    await interrupted;
+    expect(calls).toBe(1);
+    await expect(
+      withRetry(async () => calls++, { signal: controller.signal }),
+    ).rejects.toMatchObject({ name: "AbortError" });
     expect(calls).toBe(1);
   });
 

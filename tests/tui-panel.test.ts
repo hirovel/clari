@@ -1,15 +1,18 @@
 // 界面:上下文面板(Ctrl+E)。动作按消息类型增减与后果预告;Enter 出菜单再执行;
-// compare / restore / rewind / edit-reasoning / drop / fork / retry 落到事件;编辑走外部编辑器。
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+// compare / restore / rewind / edit-reasoning / drop / fork / retry 落到事件;编辑在终端内完成。
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { afterEach, describe, expect, it } from "vitest";
+import type { ClipboardInput } from "../cli/clipboard-input.js";
 import { actionsFor, compositionRows, consequenceOf } from "../cli/inspector.js";
 import { createTuiApp, type TuiApp, type TuiAppDeps } from "../cli/tui-app.js";
 import { type AgentEvent, now } from "../src/events.js";
 import { EventLog } from "../src/log.js";
+import { deriveMessages, type Message } from "../src/messages.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
+import { recordUnresolvedCalls } from "../src/recovery.js";
 import { defineTool } from "../src/tools.js";
 import { stripAnsi, VirtualTerminal } from "./helpers/virtual-terminal.js";
 
@@ -22,7 +25,6 @@ let tmp: string | undefined;
 afterEach(() => {
   if (tmp) rmSync(tmp, { recursive: true, force: true });
   tmp = undefined;
-  delete process.env.CLARI_EDITOR;
 });
 
 /** 从当前行往上找,直到菜单里出现某个标签;返回是否找到(菜单保持打开)。 */
@@ -160,6 +162,13 @@ describe("上下文面板的动作与后果", () => {
       "the next request starts from #3",
     );
     expect(consequenceOf("view", tool, rows, events)).toBe("read-only · nothing changes");
+    const initial = events.slice(0, 2);
+    const initialRows = compositionRows(initial).rows;
+    const initialUser = initialRows[1];
+    if (!initialUser) throw new Error("missing initial user message");
+    expect(actionsFor(initial, initialUser, initialRows.length).map((a) => a.action)).not.toContain(
+      "retry",
+    );
   });
 
   it("打字形态:/edit compare、restore、rewind 落到事件;首屏随第一条消息撤掉", async () => {
@@ -197,8 +206,8 @@ describe("上下文面板的动作与后果", () => {
     doc = plain(app.lines(120).join("\n"));
     expect(doc).not.toContain("Ask anything");
     expect(doc).toContain("› second");
-    // 直印:正常追加不印变化说明,没有请求卡
-    expect(doc).not.toContain("Request #");
+    // 正常追加显示请求边界,不误报上下文重算。
+    expect(doc).toContain("Request #2");
     expect(doc).not.toContain("recomputed");
 
     // 命令:编辑 #1 的 content,再 compare 与 restore;rewind 到 #1 丢掉之后的三条。
@@ -222,17 +231,13 @@ describe("上下文面板的动作与后果", () => {
 });
 
 describe("面板动作菜单", () => {
-  it("compare / restore / rewind 落到事件;Edit thinking 走外部编辑器", async () => {
+  it("compare / restore / rewind 落到事件;内部编辑保留草稿,应用前不改上下文", async () => {
     tmp = mkdtempSync(join(tmpdir(), "clari-panel-"));
-    const append = join(tmp, "append.cjs");
-    writeFileSync(
-      append,
-      'const fs=require("fs");const f=process.argv[2];fs.writeFileSync(f,fs.readFileSync(f,"utf8")+" EDITED");',
-    );
-    process.env.CLARI_EDITOR = `node "${append}"`;
+    let lastInput: Message[] = [];
     const provider: Provider = {
       model: "m",
-      async complete() {
+      async complete(messages) {
+        lastInput = messages;
         return {
           text: "answer",
           toolCalls: [],
@@ -243,8 +248,15 @@ describe("面板动作菜单", () => {
       },
     };
     const log = new EventLog();
+    const terminal = new VirtualTerminal(60, 24);
+    let clipboard: () => Promise<ClipboardInput> = async () => ({});
+    let clipboardReads = 0;
     const app = createTuiApp({
-      terminal: new VirtualTerminal(120, 40),
+      terminal,
+      readClipboard: () => {
+        clipboardReads++;
+        return clipboard();
+      },
       log,
       provider,
       tools: [],
@@ -273,15 +285,117 @@ describe("面板动作菜单", () => {
     await tick();
     expect(doc(app)).toContain("restored event #1");
 
-    // 全文思考的助手行:Edit thinking → 外部编辑器追加文字 → 记 context/edit reasoning
+    // 全文思考的助手行:Enter 只换行,动作需要切换焦点,草稿不被覆盖或发送。
+    terminal.feed("unsent draft");
     app.inspector.openComposition();
     expect(findRowWith(app, "Edit thinking")).toBe(true);
     pick(app, "Edit thinking");
     await tick();
+    const before = log.events.length;
+    terminal.feed("\r");
+    const addition = Array.from({ length: 35 }, (_, i) => `中文 ${i} EDITED`).join("\n");
+    terminal.feed(`\x1b[200~\x1b[31m${addition}\x1b[0m\x00\x1b[201~`);
+    expect(log.events).toHaveLength(before);
+    expect(app.draft()).toBe("unsent draft");
+    app.tui.renderNow(true);
+    const screen = (await terminal.screen()).join("\n");
+    expect(screen).toContain("中文 34 EDITED");
+    expect(screen).toContain("Apply");
+    terminal.feed("\x03");
+    terminal.feed("\x03");
+    expect(plain(app.dialogLines().join("\n"))).toContain("Quit Clari");
+    expect(log.events).toHaveLength(before);
+    terminal.feed("\x1b");
+    expect(plain(app.dialogLines().join("\n"))).toContain("中文 34 EDITED");
+    expect(app.draft()).toBe("unsent draft");
+    terminal.feed("\t");
+    terminal.feed("\r");
     const edit = [...log.events].reverse().find((e) => e.type === "context/edit");
-    expect(edit).toMatchObject({ field: "reasoning" });
-    expect((edit as { value: string }).value.endsWith("EDITED")).toBe(true);
+    expect(edit).toMatchObject({ field: "reasoning", value: `deep thought\n${addition}` });
+    expect(log.events).toHaveLength(before + 1);
+    expect(app.draft()).toBe("unsent draft");
     expect(doc(app)).toContain(".reasoning (");
+
+    // 取消、不改动应用都不写事件;清空是有效编辑,不能当取消。
+    await app.command("/edit 1 content");
+    terminal.feed("discard me");
+    terminal.feed("\x1b");
+    expect(log.events).toHaveLength(before + 1);
+    await app.command("/edit 1 content");
+    terminal.feed("\t");
+    terminal.feed("\r");
+    expect(log.events).toHaveLength(before + 1);
+    await app.command("/edit 1 content");
+    terminal.feed("\x15");
+    terminal.feed("\t");
+    terminal.feed("\r");
+    expect(log.events.at(-1)).toMatchObject({ type: "context/edit", target: 1, value: "" });
+    expect(log.events[1]).toMatchObject({ type: "user/message", text: "first" });
+    expect(app.draft()).toBe("unsent draft");
+
+    // Ctrl+K 归文字编辑;异步粘贴可继续打字,应用等待读取,重复按键不重复读取。
+    let finishPaste: (value: ClipboardInput) => void = () => {};
+    clipboard = () =>
+      new Promise((resolve) => {
+        finishPaste = resolve;
+      });
+    await app.command("/edit 1 content");
+    terminal.feed("keep remove");
+    terminal.feed("\x01");
+    for (let i = 0; i < 5; i++) terminal.feed("\x1b[C");
+    terminal.feed("\x0b");
+    expect(app.dialogLines().length).toBeGreaterThan(0);
+    terminal.feed("\x16");
+    terminal.feed("\x1bv");
+    expect(clipboardReads).toBe(1);
+    terminal.feed("typed ");
+    const beforePaste = log.events.length;
+    terminal.feed("\t");
+    terminal.feed("\r");
+    expect(log.events).toHaveLength(beforePaste);
+    expect(app.dialogLines().length).toBeGreaterThan(0);
+    finishPaste({ text: "\x1b[31mfile.png\x1b[0m" });
+    await tick();
+    terminal.feed("\r");
+    expect(log.events.at(-1)).toMatchObject({ value: "keep typed file.png" });
+    expect(app.draft()).toBe("unsent draft");
+
+    // 失败和纯图片不修改文本;更换面板后晚到结果不能进入新面板或草稿。
+    await app.command("/edit 1 content");
+    clipboard = async () => {
+      throw new Error("fixture unavailable");
+    };
+    terminal.feed("\x1bv");
+    await tick();
+    expect(plain(app.dialogLines().join("\n"))).toContain("fixture unavailable");
+    clipboard = async () => ({ image: { mimeType: "image/png", data: "", name: "fixture" } });
+    terminal.feed("\x16");
+    await tick();
+    expect(plain(app.dialogLines().join("\n"))).toContain("Text only here");
+    clipboard = () =>
+      new Promise((resolve) => {
+        finishPaste = resolve;
+      });
+    terminal.feed("\x16");
+    terminal.feed("\x1b");
+    await app.command("/edit 1 content");
+    finishPaste({ text: "late clipboard" });
+    await tick();
+    expect(plain(app.dialogLines().join("\n"))).not.toContain("late clipboard");
+    terminal.feed("\t");
+    terminal.feed("\r");
+    expect(log.events).toHaveLength(beforePaste + 1);
+    expect(app.draft()).toBe("unsent draft");
+    terminal.feed("\x0b");
+    expect(app.dialogLines().length).toBeGreaterThan(0); // 离开面板后恢复命令菜单。
+    terminal.feed("\x1b");
+
+    // 通过真正的循环入口发送,核对编辑后的正文和思考都进入下一次请求。
+    await app.submit("continue with edited context");
+    expect(lastInput.find((m) => m.role === "user")?.content).toBe("keep typed file.png");
+    expect(lastInput.filter((m) => m.role === "assistant").at(-1)).toMatchObject({
+      reasoning: `deep thought\n${addition}`,
+    });
 
     // Rewind 到第一条:之后的消息全部丢弃
     app.inspector.openComposition();
@@ -297,7 +411,7 @@ describe("面板动作菜单", () => {
 describe("/retry 与面板的 drop、fork", () => {
   it("/retry:运行中拒绝;空闲时丢掉最后一步重问;上下文面板的 drop 与 fork 动作", async () => {
     tmp = mkdtempSync(join(tmpdir(), "clari-tui-"));
-    const { app, log } = bootB(
+    const { app, log, term } = bootB(
       scriptedB([
         { text: "first answer", toolCalls: [], stopReason: "end" },
         { text: "second answer", toolCalls: [], stopReason: "end" },
@@ -335,6 +449,65 @@ describe("/retry 与面板的 drop、fork", () => {
     app.inspector.key("\r");
     await tick();
     expect(doc(app)).toContain("forked: first");
+    // 恢复后的未知结果与普通结果共用编辑入口;编辑不执行工具,也不改执行状态。
+    log.append({
+      type: "assistant/message",
+      at: now(),
+      text: "",
+      toolCalls: [{ id: "unknown", name: "echo", args: { text: "pending" } }],
+      stopReason: "tool",
+    });
+    recordUnresolvedCalls(log);
+    const target = log.events.length - 1;
+    const original = log.events[target];
+    if (original?.type !== "tool/unresolved") throw new Error("missing recovery event");
+    const beforeEdit = log.events.length;
+    const current = () =>
+      deriveMessages(log.events).find((m) => m.role === "tool" && m.callId === "unknown");
+    app.setDraft("keep my draft");
+    app.inspector.openComposition();
+    app.inspector.key("\r");
+    pick(app, "Edit content");
+    await tick();
+    term.feed("discard this");
+    term.feed("\x1b");
+    expect(log.events).toHaveLength(beforeEdit);
+    expect(current()?.content).toBe(original.content);
+    app.inspector.openComposition();
+    app.inspector.key("\r");
+    pick(app, "Edit content");
+    await tick();
+    term.feed("\x05");
+    term.feed(" User checked separately.");
+    term.feed("\t");
+    term.feed("\r");
+    expect(current()?.content).toContain("User checked separately.");
+    expect(current()).toMatchObject({ isError: true });
+    const menuEdit = log.events.at(-1);
+    const menuProjection = deriveMessages(log.events);
+    app.inspector.openComposition();
+    app.inspector.key("\r");
+    pick(app, "Compare with original");
+    await tick();
+    expect(doc(app)).toContain(`#${target}.content`);
+    app.inspector.openComposition();
+    app.inspector.key("\r");
+    pick(app, "Restore original");
+    await tick();
+    expect(current()?.content).toBe(original.content);
+    expect(log.events[target]).toBe(original);
+    expect(log.events.slice(beforeEdit).map((e) => e.type)).toEqual([
+      "context/edit",
+      "context/edit",
+    ]);
+    // 相同原文经命令编辑应得到与菜单相同的事件语义及模型上下文。
+    await app.command(`/edit ${target} content ${original.content} User checked separately.`);
+    const commandEdit = log.events.at(-1);
+    expect(commandEdit).toEqual({ ...menuEdit, at: commandEdit?.at });
+    expect(deriveMessages(log.events)).toEqual(menuProjection);
+    await app.command(`/edit restore ${target}`);
+    expect(current()?.content).toBe(original.content);
+    expect(app.draft()).toBe("keep my draft");
     app.stop();
   });
 });

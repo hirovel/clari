@@ -3,29 +3,28 @@
 // 工作目录跨调用保持:每次命令末尾打印 $PWD,下一次从那里起;目录变了就在结果末尾说一句,
 // 模型不必自己记 cd 过哪里。每个工具实例各有自己的目录(子 agent 用自己的实例)。
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdtempSync, openSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { defineTool, described } from "../../src/tools.js";
+import { stopProcessTree } from "../process-tree.js";
 import { keepTail, type TruncationPolicy } from "./truncate.js";
 
-/** 缺省超时(秒)与输出缓冲上限(字节)。超过就杀进程树,已收到的部分照常返回并说明。 */
+/** 缺省超时与模型可见的输出尾部预算。完整原文流式写入 Recording。 */
 export const DEFAULT_TIMEOUT_S = 120;
-export const MAX_OUTPUT_BYTES = 10 * 1024 * 1024;
+const PREVIEW_BYTES = 50 * 1024;
 
 export function createBashTool(
   opts: {
     truncate?: TruncationPolicy;
     defaultTimeoutS?: number;
-    maxOutputBytes?: number;
     /** 起始工作目录;缺省进程目录。 */
     cwd?: string;
   } = {},
 ) {
   const truncate = opts.truncate ?? keepTail();
   const defaultTimeout = opts.defaultTimeoutS ?? DEFAULT_TIMEOUT_S;
-  const maxBytes = opts.maxOutputBytes ?? MAX_OUTPUT_BYTES;
   let cwd = opts.cwd ?? process.cwd();
   return defineTool({
     name: "bash",
@@ -34,7 +33,7 @@ export function createBashTool(
         "Run a bash command; returns stdout and stderr combined. The working directory persists across calls " +
         "(cd changes it for later calls) and the result says so whenever it changed. " +
         `Default timeout ${defaultTimeout} s; raise the timeout parameter for long tasks. ` +
-        "Output past the limit is truncated and the full output is saved to a temp file whose path is appended.",
+        "Long results show the last 50 KiB and a path to the complete captured output; output size does not stop the command.",
       guidance:
         "For reading and searching files prefer read, grep and glob; use bash for builds, tests, git and other commands. " +
         "Quote paths that contain spaces.",
@@ -57,14 +56,20 @@ export function createBashTool(
         );
       }
       const timeoutS = args.timeout ?? defaultTimeout;
+      const recording = ctx.output;
       const r = await run(shell, withCwdMarker(args.command), ctx.signal, {
         timeoutMs: timeoutS > 0 ? timeoutS * 1000 : 0,
-        maxBytes,
         cwd,
-        onData: (data: Buffer) => ctx.output?.write(data),
+        ...(recording && { onData: (data: Buffer) => recording.write(data) }),
       });
       const { output, pwd } = splitCwdMarker(r.output);
-      let shown = applyTruncation(output, truncate, ctx.output?.path);
+      let shown = applyTruncation(output, truncate, {
+        path: ctx.output?.path ?? r.outputPath,
+        omitted: r.omitted,
+        bytes: r.bytes,
+        missingFrom: ctx.output?.ref.missingFrom,
+        exitCode: r.exitCode,
+      });
       if (pwd && !samePath(pwd, cwd)) {
         cwd = pwd;
         shown = shown ? `${shown}\n[cwd is now ${cwd}]` : `[cwd is now ${cwd}]`;
@@ -73,11 +78,6 @@ export function createBashTool(
       if (r.timedOut) {
         throw new Error(
           `command did not finish within ${timeoutS} s, killed. Output so far:\n${shown}`,
-        );
-      }
-      if (r.overflowed) {
-        throw new Error(
-          `command output exceeds ${Math.round(maxBytes / 1024 / 1024)} MB, killed. Narrow the output. Output so far:\n${shown}`,
         );
       }
       if (r.exitCode !== 0) throw new Error(`${shown}\ncommand exited with code ${r.exitCode}`);
@@ -111,14 +111,30 @@ function splitCwdMarker(output: string): { output: string; pwd?: string } {
 function applyTruncation(
   output: string,
   truncate: TruncationPolicy,
-  recordedPath?: string,
+  capture: {
+    path: string | undefined;
+    omitted: boolean;
+    bytes: number;
+    missingFrom: number | undefined;
+    exitCode: number;
+  },
 ): string {
   const t = truncate(output);
-  if (!t.truncated) return t.text.trimEnd();
-  // 全量落盘是透明度要求,与策略无关:被截掉的部分永远找得回来。
-  const fullPath = recordedPath ?? join(mkdtempSync(join(tmpdir(), "kernel-bash-")), "output.txt");
-  if (!recordedPath) writeFileSync(fullPath, output, "utf8");
-  return `${t.text.trimEnd()}\n[${t.note ?? "output truncated"}. Full output: ${fullPath}]`;
+  if (!t.truncated && !capture.omitted && capture.missingFrom === undefined)
+    return t.text.trimEnd();
+  // 仅截断展示;无 Recording 的直接调用只在需要时写临时原文。
+  const fullPath = capture.path ?? join(mkdtempSync(join(tmpdir(), "kernel-bash-")), "output.txt");
+  if (!capture.path) writeFileSync(fullPath, output, "utf8");
+  const range = capture.omitted
+    ? `showing last ${Buffer.byteLength(t.text, "utf8")} of ${capture.bytes} captured bytes`
+    : t.truncated
+      ? (t.note ?? "output truncated")
+      : "output shown in full";
+  const location =
+    capture.missingFrom === undefined
+      ? `Full output: ${fullPath}`
+      : `Recording incomplete from byte ${capture.missingFrom}; available prefix: ${fullPath}`;
+  return `${t.text.trimEnd()}\n[${range}. ${capture.exitCode === 0 ? "Exit code: 0. " : ""}${location}]`;
 }
 
 function findBash(): string | null {
@@ -136,15 +152,19 @@ type RunResult = {
   exitCode: number;
   aborted: boolean;
   timedOut: boolean;
-  overflowed: boolean;
+  /** 累计从 stdout/stderr 收到的字节,含内部目录标记。 */
+  bytes: number;
+  omitted: boolean;
+  outputPath?: string;
 };
 
 function run(
   shell: string,
   command: string,
   signal: AbortSignal,
-  limits: { timeoutMs: number; maxBytes: number; cwd: string; onData?: (data: Buffer) => void },
+  limits: { timeoutMs: number; cwd: string; onData?: (data: Buffer) => void },
 ): Promise<RunResult> {
+  if (signal.aborted) return Promise.reject(new Error("command interrupted before starting"));
   return new Promise((resolvePromise, rejectPromise) => {
     // POSIX 下 detached 开进程组,打断时整组杀掉;Windows 用 taskkill /T 杀进程树。
     const child = spawn(shell, ["-c", command], {
@@ -152,33 +172,56 @@ function run(
       windowsHide: true,
       detached: process.platform !== "win32",
     });
-    const chunks: Buffer[] = [];
+    let tail = Buffer.alloc(0);
     let bytes = 0;
+    let omitted = false;
+    let outputPath: string | undefined;
+    let outputFd: number | undefined;
+    let captureError: Error | undefined;
     let aborted = false;
     let timedOut = false;
-    let overflowed = false;
     let killed = false;
+    let killError: Error | undefined;
 
     const killTree = () => {
-      if (killed || child.pid === undefined) return;
+      if (killed) return;
       killed = true;
-      if (process.platform === "win32") {
-        spawnSync("taskkill", ["/F", "/T", "/PID", String(child.pid)]);
-      } else {
-        try {
-          process.kill(-child.pid, "SIGKILL");
-        } catch {
-          child.kill("SIGKILL");
-        }
+      try {
+        stopProcessTree(child, process.platform !== "win32");
+      } catch (error) {
+        const reason = aborted
+          ? "command interrupted"
+          : timedOut
+            ? `command did not finish within ${limits.timeoutMs / 1000} s`
+            : "command stop requested";
+        killError = new Error(
+          `${reason}; ${(error as Error).message}. Output so far:\n${tail.toString("utf8").slice(-4000)}`,
+        );
+        child.stdout.destroy();
+        child.stderr.destroy();
+        rejectPromise(killError);
       }
     };
     const onData = (d: Buffer) => {
-      if (overflowed) return;
-      limits.onData?.(d);
-      chunks.push(d);
-      bytes += d.length;
-      if (bytes > limits.maxBytes) {
-        overflowed = true;
+      if (captureError) return;
+      try {
+        limits.onData?.(d);
+        const combined = Buffer.concat([tail, d]);
+        if (!limits.onData) {
+          if (outputFd !== undefined) writeFileSync(outputFd, d);
+          else if (combined.length > PREVIEW_BYTES) {
+            outputPath = join(mkdtempSync(join(tmpdir(), "kernel-bash-")), "output.txt");
+            outputFd = openSync(outputPath, "w");
+            writeFileSync(outputFd, combined);
+          }
+        }
+        omitted ||= combined.length > PREVIEW_BYTES;
+        tail = combined.subarray(Math.max(0, combined.length - PREVIEW_BYTES));
+        bytes += d.length;
+      } catch (error) {
+        captureError = new Error(
+          `command output could not be captured: ${(error as Error).message}`,
+        );
         killTree();
       }
     };
@@ -201,6 +244,16 @@ function run(
     const cleanup = () => {
       signal.removeEventListener("abort", onAbort);
       if (timer) clearTimeout(timer);
+      if (outputFd !== undefined) {
+        try {
+          closeSync(outputFd);
+        } catch (error) {
+          captureError ??= new Error(
+            `command output could not be closed: ${(error as Error).message}`,
+          );
+        }
+        outputFd = undefined;
+      }
     };
     child.on("error", (err) => {
       cleanup();
@@ -208,12 +261,18 @@ function run(
     });
     child.on("close", (code) => {
       cleanup();
+      if (killError) return;
+      if (captureError) return rejectPromise(captureError);
+      let start = 0;
+      while (start < tail.length && ((tail[start] as number) & 0xc0) === 0x80) start++;
       resolvePromise({
-        output: Buffer.concat(chunks).toString("utf8"),
+        output: tail.subarray(start).toString("utf8"),
         exitCode: code ?? -1,
         aborted,
         timedOut,
-        overflowed,
+        bytes,
+        omitted,
+        ...(outputPath && { outputPath }),
       });
     });
   });

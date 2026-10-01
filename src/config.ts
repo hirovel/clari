@@ -1,16 +1,28 @@
 // 供应商配置:哪家、什么协议、key 从哪来、模型名怎么匹配到家,以及每个模型的能力数据。
 // 分层原则:协议形状写在适配器代码里(多年不变);模型名、窗口、强度集合、thinking 模式是数据,放这里;
 // API 新增的参数用 extraBody / extraHeaders 逐字透传,不必等代码。key 只从配置字段或环境变量读取。
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import type { ApprovalConfig } from "./approval.js";
+import { lockFile } from "./file-lock.js";
 import type { CompactionTrigger } from "./loop.js";
 import type { EffortLevel, Provider } from "./provider.js";
 import { anthropic, type ThinkingMode } from "./providers/anthropic.js";
 import { type OpenAIDialect, openaiCompat } from "./providers/openai-chat.js";
 import { openaiResponses } from "./providers/openai-responses.js";
 import { defaultPreset } from "./settings.js";
+import type { StatusStyle } from "./status-bar.js";
 import type { SubagentApproval, SubagentType } from "./subagent.js";
 import type { DescriptionLevel } from "./tools.js";
 
@@ -82,6 +94,8 @@ export type ToolPromptsConfig = {
 export type PromptSectionName = "role" | "env" | "instructions" | "memory" | "skills" | "append";
 
 export type SkillsConfig = {
+  /** 内置来源名或目录路径 → on/off;关闭的自定义来源仍保留,可重新开启。 */
+  sources?: Record<string, "on" | "off">;
   mode?: "manual" | "auto";
   /** all 随发现目录增长;数组固定到具体名称,空数组不提供任何技能。 */
   include?: "all" | string[];
@@ -138,6 +152,10 @@ export type Preset = {
   planReminder?: number;
   /** 账簿:保持展开的最新步数,更早的折成一行;缺省 3,0 = 从不自动折。 */
   foldSteps?: number;
+  statusStyle?: StatusStyle;
+  statusWidgets?: string[];
+  /** 是否显示基于已报告 token 和目录单价的估算金额;缺省关闭,不代表账单。 */
+  showCostEstimate?: boolean;
   /** 屏幕模式:alt(缺省,备用屏,头尾固定、自己滚、鼠标、搜索)| main(主屏,保留终端回滚)。 */
   screen?: "alt" | "main";
   /** 桌面通知:unfocused(缺省,只在终端失焦时)| always | off。回合结束与等审批时发。 */
@@ -181,17 +199,14 @@ export type KernelConfig = {
   subagents?: SubagentsConfig;
   /** MCP 桥接的配置。内核不解释它;形状归 cli/mcp/config.ts。 */
   mcp?: Record<string, unknown>;
-  /** fetch 工具的安全边界:私网放行、超时、字节上限、重定向次数。 */
+  /** fetch 工具的请求预算:超时、字节上限、重定向次数。 */
   fetch?: {
-    allowPrivate?: boolean;
     timeoutMs?: number;
     maxBytes?: number;
     maxRedirects?: number;
     userAgent?: string;
     /** 会话内缓存存活毫秒数,缺省 15 分钟;0 关。 */
     cacheTtlMs?: number;
-    /** 每主机每分钟最多几次真实请求,缺省 10;0 不限。 */
-    perHostPerMinute?: number;
   };
 };
 
@@ -218,7 +233,7 @@ export const DEFAULT_CONFIG_PATH =
   process.env.CLARI_CONFIG?.trim() || join(clariHome(), "config.json");
 
 export const CONFIG_TEMPLATE: KernelConfig = {
-  default: "deepseek-v4-pro",
+  default: "deepseek-flash",
 
   // 每个可选项的内置缺省值,从开关登记表(settings.ts)生成。命令行与预设可以覆盖;删掉某一项等于用内置缺省。
   defaults: defaultPreset(),
@@ -237,8 +252,8 @@ export const CONFIG_TEMPLATE: KernelConfig = {
       reasoningField: "reasoning_content",
       // 窗口、输出上限、价格不预填:缺省来自 models.dev(内置快照,每天刷新);想覆盖就在模型对象里写。
       models: [
+        { name: "deepseek-flash", effortLevels: ["off", "low", "high", "max"] },
         { name: "deepseek-v4-pro", effortLevels: ["off", "low", "high", "max"] },
-        { name: "deepseek-v4-flash", effortLevels: ["off", "low", "high", "max"] },
       ],
     },
     anthropic: {
@@ -281,24 +296,63 @@ export function modelConfig(p: ProviderConfig, name: string): ModelConfig {
 }
 
 /** 读配置;文件不存在时写入模板并返回它(key 字段留空,由用户填)。 */
-export function loadConfig(path = DEFAULT_CONFIG_PATH): { config: KernelConfig; created: boolean } {
-  if (!existsSync(path)) {
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, `${JSON.stringify(CONFIG_TEMPLATE, null, 2)}\n`, "utf8");
-    return { config: CONFIG_TEMPLATE, created: true };
-  }
-  let parsed: unknown;
+// 临时文件与目标同目录;失败保留旧文件,不会留下半份 JSON。
+function writeJson(path: string, value: unknown): void {
+  const temp = `${path}.${randomUUID()}.tmp`;
+  let fd: number | undefined;
   try {
-    parsed = JSON.parse(readFileSync(path, "utf8"));
-  } catch (err) {
-    throw new Error(`failed to parse config ${path}: ${(err as Error).message}`);
+    fd = openSync(temp, "wx", 0o600);
+    writeFileSync(fd, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
+    renameSync(temp, path);
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+    rmSync(temp, { force: true });
   }
-  return { config: validate(parsed, path), created: false };
 }
 
-export function saveConfig(config: KernelConfig, path = DEFAULT_CONFIG_PATH): void {
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+function readConfig(path: string): KernelConfig {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8").replace(/^\uFEFF/, ""));
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) throw error;
+    throw new Error(`failed to parse config ${path}: invalid JSON`);
+  }
+  return validate(parsed, path);
+}
+
+export function loadConfig(path = DEFAULT_CONFIG_PATH): { config: KernelConfig; created: boolean } {
+  if (existsSync(path)) return { config: readConfig(path), created: false };
+  const writer = lockFile(path);
+  try {
+    const created = !existsSync(writer.path);
+    if (created) writeJson(writer.path, CONFIG_TEMPLATE);
+    return { config: readConfig(writer.path), created };
+  } finally {
+    writer.release();
+  }
+}
+
+/** 回调只描述本次改动;在锁内读最新值、校验、原子替换,成功后才更新调用方快照。 */
+export function updateConfig(
+  change: (current: KernelConfig) => KernelConfig,
+  path = DEFAULT_CONFIG_PATH,
+): KernelConfig {
+  const writer = lockFile(path);
+  try {
+    const current = existsSync(writer.path)
+      ? readConfig(writer.path)
+      : structuredClone(CONFIG_TEMPLATE);
+    const next = validate(change(current), path);
+    writer.assertHeld();
+    writeJson(writer.path, next);
+    return next;
+  } finally {
+    writer.release();
+  }
 }
 
 /** 凭据文件:~/.clari/credentials.json,环境变量 CLARI_CREDENTIALS 可改。key 只进这里,配置文件里不出现。 */
@@ -312,9 +366,11 @@ export function loadCredentials(path = credentialsPath()): Credentials {
   if (!existsSync(path)) return {};
   let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(path, "utf8"));
+    parsed = JSON.parse(readFileSync(path, "utf8").replace(/^\uFEFF/, ""));
   } catch (err) {
-    throw new Error(`failed to parse credentials ${path}: ${(err as Error).message}`);
+    if (!(err instanceof SyntaxError)) throw err;
+    // JSON 解析器会带上原文片段,其中可能包含凭据。
+    throw new Error(`failed to parse credentials ${path}: invalid JSON`);
   }
   if (!parsed || typeof parsed !== "object")
     throw new Error(`credentials is not an object: ${path}`);
@@ -332,9 +388,14 @@ export function saveCredential(
   apiKey: string,
   path = credentialsPath(),
 ): void {
-  const next = { ...loadCredentials(path), [providerName]: { apiKey: apiKey.trim() } };
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, `${JSON.stringify(next, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  const writer = lockFile(path);
+  try {
+    const next = { ...loadCredentials(writer.path), [providerName]: { apiKey: apiKey.trim() } };
+    writer.assertHeld();
+    writeJson(writer.path, next);
+  } finally {
+    writer.release();
+  }
 }
 
 export type KeySource = "env" | "credentials" | "config";
@@ -357,7 +418,7 @@ export function findApiKey(
   return undefined;
 }
 
-/** 写入某供应商的 key(TUI 的 /login 与 /key 用):进凭据文件,不碰配置。返回配置原样。 */
+/** /login 保存供应商 key:进凭据文件,不碰配置。返回配置原样。 */
 export function setApiKey(
   config: KernelConfig,
   providerName: string,
@@ -374,32 +435,28 @@ export function setApiKey(
 }
 
 /** 修改缺省模型并落盘。 */
-export function setDefaultModel(
-  config: KernelConfig,
-  model: string,
-  path = DEFAULT_CONFIG_PATH,
-): KernelConfig {
-  const next = { ...config, default: model };
-  saveConfig(next, path);
-  return next;
+export function setDefaultModel(model: string, path = DEFAULT_CONFIG_PATH): KernelConfig {
+  return updateConfig((current) => {
+    resolveModel(current, model);
+    return { ...current, default: model };
+  }, path);
 }
 
-/** 把一个模型(带能力数据)写进某供应商的模型表并落盘;已有同名的就替换。 */
+/** 修改指定供应商的一个模型,保留其它进程已保存的模型及配置。 */
 export function addModel(
-  config: KernelConfig,
   providerName: string,
   model: ModelConfig,
   path = DEFAULT_CONFIG_PATH,
 ): KernelConfig {
-  const p = config.providers[providerName];
-  if (!p) throw new Error(`unknown provider "${providerName}"`);
-  const models = p.models.filter((m) => (typeof m === "string" ? m : m.name) !== model.name);
-  const next = {
-    ...config,
-    providers: { ...config.providers, [providerName]: { ...p, models: [...models, model] } },
-  };
-  saveConfig(next, path);
-  return next;
+  return updateConfig((current) => {
+    const p = current.providers[providerName];
+    if (!p) throw new Error(`unknown provider "${providerName}"`);
+    const models = p.models.filter((m) => (typeof m === "string" ? m : m.name) !== model.name);
+    return {
+      ...current,
+      providers: { ...current.providers, [providerName]: { ...p, models: [...models, model] } },
+    };
+  }, path);
 }
 
 function validate(raw: unknown, path: string): KernelConfig {
@@ -496,7 +553,7 @@ export function resolveModel(config: KernelConfig, requested?: string): Resolved
   }
 }
 
-/** 取 key:配置字段优先,其次环境变量。缺失时的报错要告诉用户该去哪里填。 */
+/** 取 key:沿用 findApiKey 的环境变量、凭据文件、配置字段顺序;缺失时指出填写入口。 */
 export function resolveApiKey(name: string, p: ProviderConfig, env = process.env): string {
   const found = findApiKey(name, p, env);
   if (found) return found.key;

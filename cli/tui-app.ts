@@ -41,7 +41,6 @@ import type { ChildInfo } from "../src/subagent.js";
 import type { Tool } from "../src/tools.js";
 import { DEFAULT_RESULT_VIEWS, firstRunLines, thinkingLines } from "./cards.js";
 import { type ClipboardInput, imageFromPath, readClipboardInput } from "./clipboard-input.js";
-import { editInExternalEditor } from "./editor.js";
 import { RequestInspector, type SessionSource } from "./inspector.js";
 import type { McpServerStatus } from "./mcp/bridge.js";
 import type { ModelSettings } from "./model-settings.js";
@@ -51,7 +50,13 @@ import type { SessionInputs } from "./session-inputs.js";
 import type { RecordingSection, RequestRecording } from "./session-records.js";
 import { recordingReader } from "./session-records.js";
 import type { SessionSetup } from "./session-setup.js";
-import { type ExitState, exitReview, SessionSetupReview, textReview } from "./session-view.js";
+import {
+  type ExitState,
+  exitReview,
+  PendingInputsView,
+  SessionSetupReview,
+  textReview,
+} from "./session-view.js";
 import type { PromptTemplate } from "./templates.js";
 import {
   FOCUS_OFF,
@@ -66,8 +71,8 @@ import { Block } from "./tui-block.js";
 import { applyTools, COMMANDS, command, openLogin, openPalette, submit } from "./tui-commands.js";
 import { FOLD_HEAD, type SessionTarget, type TuiContext } from "./tui-context.js";
 import { contextAction, flipSection } from "./tui-edit.js";
-import { brief } from "./tui-format.js";
-import { ListPicker } from "./tui-login.js";
+import { brief, cleanPasteText } from "./tui-format.js";
+import { ListPicker, LoginDialog } from "./tui-login.js";
 import {
   attachChild,
   render,
@@ -81,6 +86,7 @@ import { captureSessionSetup } from "./tui-settings.js";
 import { approveImpl, initialApproval, initialSlotState } from "./tui-slots.js";
 import { InputHints, RuntimeStatus } from "./tui-status.js";
 import { clearStepSelection, FOLD_STEPS, selectStep, toggleSelectedStep } from "./tui-steps.js";
+import { TextEditor } from "./tui-text-editor.js";
 
 export { toolCallDetail } from "./tui-format.js";
 export { childEventLines } from "./tui-render.js";
@@ -107,7 +113,7 @@ export type TuiAppDeps = {
   /** 日志为空时用它落 session/start;入口已经落过(bootstrap.beginSession)就不需要。 */
   systemPrompt?: string;
   onExit?: () => void;
-  /** 工具结果初始是否折叠。缺省不折叠;Ctrl+O 随时切换。 */
+  /** 工具结果初始是否折叠。缺省折叠;Ctrl+O 随时切换。 */
   fold?: boolean;
   /** 折叠时保留的结果行数;缺省 5。 */
   foldLines?: number;
@@ -119,6 +125,9 @@ export type TuiAppDeps = {
   planReminder?: number;
   /** 账簿保持展开的最新步数;缺省 3,0 = 从不自动折。 */
   foldSteps?: number;
+  statusStyle?: Preset["statusStyle"];
+  statusWidgets?: string[];
+  showCostEstimate?: boolean;
   /** 屏幕模式:alt(缺省)备用屏,main 主屏。 */
   screen?: "alt" | "main";
   /** 桌面通知:unfocused(缺省)| always | off。 */
@@ -147,7 +156,7 @@ export type TuiAppDeps = {
   slots?: TurnDeps["slots"];
   /** 提示词模板:/名 参数 展开成一条用户消息。 */
   templates?: PromptTemplate[];
-  /** 技能:/名 参数 触发;/skills 列出。 */
+  /** 技能:/名 参数 触发;/inspect skills 列出。 */
   skills?: Skill[];
   /** 会话目录,/fork 的新文件写到这里。 */
   sessionsDir?: string;
@@ -233,8 +242,10 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
   const savedInputs = deps.inputs?.read(log.events);
   let stopped = false;
   let unsubscribeLog: (() => void) | undefined;
-  let cancelSessionDialog: (() => void) | undefined;
+  let cancelDialog: (() => void) | undefined;
   let exiting = false;
+  // 确认独立覆盖当前视图,取消后保留编辑面板、审批与原焦点。
+  let quitPrompt: { picker: ListPicker; overlay: ReturnType<TUI["showOverlay"]> } | undefined;
 
   // ---------- 组件树 ----------
   // 备用屏(缺省):头部与状态行固定,正文自己滚,鼠标滚轮、拖选即复制、Ctrl+Shift+F 搜索、Ctrl+↑↓ 按步跳;
@@ -269,6 +280,12 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       process.cwd(),
     ),
   );
+  // 底部组件只组装一次;两种屏幕模式与离线导出复用同一顺序。
+  const bottom = new Container();
+  bottom.addChild(new Spacer(1));
+  bottom.addChild(editor);
+  bottom.addChild(status);
+  bottom.addChild(inputHints);
   let scroll: ScrollView | undefined;
   if (isViewportTUI(tui)) {
     const body = new Container();
@@ -277,11 +294,6 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     const top = new Container();
     top.addChild(header);
     top.addChild(new Spacer(1));
-    const bottom = new Container();
-    bottom.addChild(new Spacer(1));
-    bottom.addChild(status);
-    bottom.addChild(editor);
-    bottom.addChild(inputHints);
     scroll = new ScrollView(body, { follow: "end", primary: true, overscroll: "chain" });
     tui.setLayoutRoot(
       new VStack([
@@ -302,10 +314,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     tui.addChild(new Spacer(1));
     tui.addChild(transcript);
     tui.addChild(live);
-    tui.addChild(new Spacer(1));
-    tui.addChild(status);
-    tui.addChild(editor);
-    tui.addChild(inputHints);
+    tui.addChild(bottom);
   }
   // 焦点事件:通知只在终端失焦时发。
   deps.terminal.write(FOCUS_ON);
@@ -342,6 +351,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     {
       name: "main",
       events: log.events,
+      ...(log.recording && { recordingDirectory: log.recording.directory }),
       recordingFor: (i: number, section?: RecordingSection) =>
         deps.recordingFor
           ? deps.recordingFor(log, i, section)
@@ -350,6 +360,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     ...ctx.children.views.map((v) => ({
       name: `sub #${v.info.index} ${brief(v.info.task)}`,
       events: v.info.log.events,
+      ...(v.info.log.recording && { recordingDirectory: v.info.log.recording.directory }),
       recordingFor: (i: number, section?: RecordingSection) =>
         deps.recordingFor
           ? deps.recordingFor(v.info.log, i, section)
@@ -374,6 +385,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     lastSent: () => ctx.req.lastSent,
     contextWindow: () => ctx.model.contextWindow,
     running: () => agent.running,
+    readOnlyReason: () => deps.readOnlyReason,
     onClose: () => ctx.inspector.close(),
     onAction: (action, row) => void contextAction(ctx, action, row),
     onSection: (name) => flipSection(ctx, name),
@@ -460,17 +472,19 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     dialog: {
       overlay: undefined,
       component: undefined,
-      open(component) {
+      open(component, onClose) {
         ctx.dialog.close();
+        cancelDialog = onClose;
         ctx.dialog.component = component;
         ctx.dialog.overlay = tui.showOverlay(component, { width: "100%", anchor: "bottom-left" });
+        quitPrompt?.overlay.focus();
         tui.requestRender();
         // 命令层在等"选单开了"这个信号,好把控制权交回去。
         ctx.dialog.onOpen?.();
       },
       close() {
-        const cancel = cancelSessionDialog;
-        cancelSessionDialog = undefined;
+        const cancel = cancelDialog;
+        cancelDialog = undefined;
         cancel?.();
         if (!ctx.dialog.overlay) return;
         ctx.dialog.overlay.hide();
@@ -526,7 +540,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       );
     },
     updateStatus,
-    // 工作状态固定在输入区上方,滚回历史时仍然可见。
+    // 工作状态固定在输入区下方,滚回历史时仍然可见。
     showLoader(message) {
       ctx.hideLoader();
       const startedAt = Date.now();
@@ -568,6 +582,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     persistSetup: () => deps.onSetupChange?.(captureSessionSetup(ctx)),
     stop() {
       stopped = true;
+      closeQuitPrompt();
       deps.inputs?.flush();
       deps.inputs?.detach();
       for (const off of recordingOffs) off();
@@ -597,6 +612,8 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
   let wasRunning = false;
   /** 通知和标题跟随执行状态;固定状态区自己按实际宽度投影。 */
   function updateStatus(): void {
+    // 运行中的审批可能新开覆盖层;确认仍应位于顶层,防止看到审批却操作了退出。
+    if (quitPrompt && !quitPrompt.overlay.isFocused()) quitPrompt.overlay.focus();
     ctx.persistSetup();
     // 回合结束(运行 → 空闲)时通知一次;审批提示在 askApproval 里自己通知。之后的说明行回到根上,不进最后一步。
     if (wasRunning && !agent.running) {
@@ -610,13 +627,16 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
 
   const recordingOffs: (() => void)[] = [];
   const watchRecording = (source: EventLog) => {
+    let shownError: string | undefined;
     const off = source.recording?.subscribe(() => {
-      if (source.recording?.error)
+      const recording = source.recording;
+      if (recording?.error && !recording.full && recording.error !== shownError)
         ctx.note(
           c.zhu(
-            `Saving failed: ${source.recording.error}. Work continues; unsaved data stays in memory. Retrying automatically; Ctrl+S retries now.`,
+            `Saving failed: ${recording.error}. Retrying; work continues until the buffer fills.`,
           ),
         );
+      shownError = recording?.error;
       tui.requestRender();
     });
     if (off) recordingOffs.push(off);
@@ -661,7 +681,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     editor.setText(raw);
     const text = raw.trim();
     if (ctx.inputReading) {
-      ctx.note(c.soft("Reading clipboard; send after the attachment appears."));
+      ctx.note(c.soft("Preparing paste; send after it appears."));
       return;
     }
     if (!text && !ctx.draftImages.length) return;
@@ -679,7 +699,48 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       ),
     ),
   );
-  editor.onChange = (text) => deps.inputs?.setDraft(text, ctx.draftImages);
+  editor.onChange = () => deps.inputs?.setDraft(editor.getExpandedText(), ctx.draftImages);
+
+  function closeQuitPrompt(): void {
+    quitPrompt?.overlay.hide();
+    quitPrompt = undefined;
+  }
+
+  function askToQuit(): void {
+    if (exiting || quitPrompt) return;
+    const picker = new ListPicker(
+      "Quit Clari",
+      [
+        {
+          label: "Continue using Clari",
+          note: "Return to the current view. No work is cancelled.",
+          current: true,
+        },
+        {
+          label: "Exit",
+          note: [
+            "Cancel active work and close Clari. External work may continue until cancellation completes.",
+            deps.inputs?.saving
+              ? "Save drafts and queued messages for later."
+              : "Input saving is off; unsaved input will be lost.",
+          ].join("\n"),
+        },
+      ],
+      "↑↓ choose · Enter select · Esc back",
+      (row, key) => {
+        if (key !== "enter") return;
+        closeQuitPrompt();
+        if (row.label === "Exit") ctx.exit();
+      },
+      closeQuitPrompt,
+      () => tui.requestRender(),
+      () => deps.terminal.rows,
+    );
+    quitPrompt = {
+      picker,
+      overlay: tui.showOverlay(picker, { width: "100%", anchor: "bottom-left" }),
+    };
+  }
 
   const pasteInput = async (get: () => Promise<ClipboardInput>) => {
     if (ctx.inputReading) return;
@@ -691,9 +752,9 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       if (stopped) return;
       if (image) {
         ctx.draftImages = [...ctx.draftImages, image];
-        deps.inputs?.setDraft(editor.getText(), ctx.draftImages);
+        deps.inputs?.setDraft(editor.getExpandedText(), ctx.draftImages);
       } else if (value.text) {
-        editor.handleInput(`\x1b[200~${value.text}\x1b[201~`);
+        editor.handleInput(`\x1b[200~${cleanPasteText(value.text)}\x1b[201~`);
       } else ctx.note(c.soft("No image or text on the clipboard."));
     } catch (error) {
       if (!stopped) ctx.note(c.zhu(`Paste failed: ${(error as Error).message}. Draft unchanged.`));
@@ -704,7 +765,13 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
   };
 
   tui.addInputListener((data) => {
-    if (!exiting && !ctx.inspector.overlay && !approval.overlay && !ctx.dialog.overlay) {
+    if (
+      !exiting &&
+      !quitPrompt &&
+      !ctx.inspector.overlay &&
+      !approval.overlay &&
+      !ctx.dialog.overlay
+    ) {
       if (matchesKey(data, Key.ctrl("v")) || matchesKey(data, Key.alt("v"))) {
         void pasteInput(deps.readClipboard ?? readClipboardInput);
         return { consume: true };
@@ -715,6 +782,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
           void pasteInput(async () => ({ text: pasted }));
           return { consume: true };
         }
+        return { data: `\x1b[200~${cleanPasteText(pasted)}\x1b[201~` };
       }
       if (matchesKey(data, Key.alt("i"))) {
         let selected = 0;
@@ -746,7 +814,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
             else if (matchesKey(key, Key.delete)) {
               ctx.draftImages = ctx.draftImages.filter((_, i) => i !== selected);
               selected = Math.max(0, Math.min(selected, ctx.draftImages.length - 1));
-              deps.inputs?.setDraft(editor.getText(), ctx.draftImages);
+              deps.inputs?.setDraft(editor.getExpandedText(), ctx.draftImages);
             }
             tui.requestRender();
           },
@@ -755,34 +823,41 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       }
     }
     if (matchesKey(data, Key.ctrl("s"))) {
+      if (!exiting && !quitPrompt && ctx.dialog.component instanceof LoginDialog) {
+        ctx.dialog.component.handleInput(data);
+        return { consume: true };
+      }
       for (const source of [log, ...ctx.children.views.map((v) => v.info.log)])
         source.recording?.flush();
       tui.requestRender();
       return { consume: true };
     }
     if (matchesKey(data, Key.ctrl("c"))) {
-      ctx.exit();
+      // 已开始收尾时复用宿主的幂等关闭请求,不另开确认或强退。
+      if (exiting) ctx.exit();
+      else askToQuit();
       return { consume: true };
     }
     if (exiting) {
       ctx.dialog.component?.handleInput?.(data);
       return { consume: true };
     }
+    if (quitPrompt) {
+      quitPrompt.picker.handleInput(data);
+      return { consume: true };
+    }
+    // 编辑面板先于应用快捷键接收输入;退出和记录保存仍由上方统一处理。
+    if (
+      ctx.dialog.component instanceof TextEditor ||
+      (ctx.dialog.component instanceof PendingInputsView && ctx.dialog.component.editingText)
+    ) {
+      ctx.dialog.component.handleInput(data);
+      return { consume: true };
+    }
     if (matchesKey(data, Key.ctrl("k"))) {
       if (ctx.inspector.overlay || approval.overlay) return undefined;
       if (ctx.dialog.overlay) ctx.dialog.close();
       else openPalette(ctx);
-      return { consume: true };
-    }
-    if (matchesKey(data, Key.ctrl("g"))) {
-      // 长提示交给用户自己的编辑器:先让出终端,编辑器退出后再接管。
-      if (ctx.inspector.overlay || approval.overlay || ctx.dialog.overlay) return undefined;
-      tui.stop();
-      const next = editInExternalEditor(editor.getText());
-      tui.start();
-      deps.terminal.write(FOCUS_ON);
-      if (next !== undefined) editor.setText(next.replace(/\s+$/, ""));
-      tui.requestRender();
       return { consume: true };
     }
     if (matchesKey(data, Key.ctrl("r"))) {
@@ -807,8 +882,12 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     }
     if (ctx.inspector.overlay || approval.overlay || ctx.dialog.overlay) return undefined; // 检视器、审批提示或对话框打开时,其余按键归它们
     if (matchesKey(data, Key.alt("enter"))) {
+      if (ctx.inputReading) {
+        ctx.note(c.soft("Preparing paste; send after it appears."));
+        return { consume: true };
+      }
       // 后续留言:不打断当前步,等模型不再调工具时才给它。空闲时与普通提交等价。
-      const text = editor.getText().trim();
+      const text = editor.getExpandedText().trim();
       if (!text && !ctx.draftImages.length) return { consume: true };
       editor.addToHistory(text);
       if (text.startsWith("/")) {
@@ -823,7 +902,11 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     }
     // 账簿光标:PgUp / PgDn 在步之间移动并滚到那一步;Enter(输入框为空)展开或折起;Esc 放开。
     if (matchesKey(data, "pageUp") || matchesKey(data, "pageDown")) {
-      selectStep(ctx, matchesKey(data, "pageUp") ? -1 : 1);
+      const direction = matchesKey(data, "pageUp") ? -1 : 1;
+      if (!selectStep(ctx, direction) && scroll) {
+        scroll.scrollBy(direction * Math.max(1, scroll.viewportHeight - 1));
+        tui.requestRender();
+      }
       return { consume: true };
     }
     if (
@@ -868,12 +951,11 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     return new Promise((resolve) => {
       ctx.dialog.open(
         build((value) => {
-          cancelSessionDialog = undefined;
           resolve(value);
           ctx.dialog.close();
         }),
+        () => resolve(undefined),
       );
-      cancelSessionDialog = () => resolve(undefined);
     });
   }
 
@@ -881,7 +963,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     tui,
     flushInputs: () => deps.inputs?.flush(),
     agent,
-    draft: () => editor.getText(),
+    draft: () => editor.getExpandedText(),
     setDraft: (text) => {
       editor.setText(text);
       tui.requestRender();
@@ -889,6 +971,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     setExitState(state) {
       exiting = Boolean(state);
       if (state) {
+        closeQuitPrompt();
         ctx.inspector.close();
         ctx.dialog.open(exitReview(ctx, state));
       } else ctx.dialog.close();
@@ -946,10 +1029,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
             "",
             ...transcript.render(width),
             ...live.render(width),
-            "",
-            ...status.render(width),
-            ...editor.render(width),
-            ...inputHints.render(width),
+            ...bottom.render(width),
           ]
         : tui.render(width),
     inspector: {
@@ -981,8 +1061,9 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     approvalLines: () => approval.prompt?.render(deps.terminal.columns) ?? [],
     approvalInput: (data) => approval.prompt?.handleInput(data),
     note: (text) => ctx.note(text),
-    dialogLines: () => ctx.dialog.component?.render(deps.terminal.columns) ?? [],
-    dialogInput: (data) => ctx.dialog.component?.handleInput?.(data),
+    dialogLines: () =>
+      (quitPrompt?.picker ?? ctx.dialog.component)?.render(deps.terminal.columns) ?? [],
+    dialogInput: (data) => (quitPrompt?.picker ?? ctx.dialog.component)?.handleInput?.(data),
     openLogin: (provider) => openLogin(ctx, provider ? { provider } : {}),
     toggleFold: () => toggleFold(ctx),
     toggleReasoning: () => toggleReasoning(ctx),

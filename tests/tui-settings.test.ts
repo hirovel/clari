@@ -1,12 +1,19 @@
 // 验证用户能完成的调整流程:作用域、真实请求、恢复、错误、窄屏与长列表。
+
+import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
+import { SessionInputs } from "../cli/session-inputs.js";
+import { renderStatusLayout } from "../cli/status-layout.js";
 import { createTuiApp, type TuiAppDeps } from "../cli/tui-app.js";
 import type { Preset } from "../src/config.js";
 import { EventLog } from "../src/log.js";
 import { planTool } from "../src/plan.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
 import { setSetting } from "../src/settings.js";
+import { STATUS_WIDGETS } from "../src/status-bar.js";
 import { defineTool } from "../src/tools.js";
 import { stripAnsi, VirtualTerminal } from "./helpers/virtual-terminal.js";
 
@@ -77,6 +84,81 @@ function boot(over: Partial<TuiAppDeps> = {}, size = [120, 40]) {
 }
 
 describe("Agent setup", () => {
+  it("窄状态栏保留全部已选读数，隐藏读数仍保留保存故障和恢复入口", async () => {
+    const lines = renderStatusLayout(
+      "rail",
+      STATUS_WIDGETS.map((widget) => widget.id),
+      {
+        context: "Context ~24k/128k",
+        cache: "last cache 73%",
+        model: "model deepseek-flash",
+        effort: "effort Auto (omitted)",
+        compaction: "compact manual",
+      },
+      28,
+    ).map(stripAnsi);
+    expect(lines.join("\n")).toContain("Context ~24k/128k");
+    expect(lines.join("\n")).toContain("last cache 73%");
+    expect(lines.join("\n")).toContain("model deepseek-flash");
+    expect(lines.join("\n")).toContain("effort Auto (omitted)");
+    expect(lines.join("\n")).toContain("compact manual");
+    expect(lines.every((line) => line.length <= 28)).toBe(true);
+    const inputs = new SessionInputs(join(tmpdir(), `${randomUUID()}.jsonl`), false);
+    const { app, term } = boot({ inputs, statusWidgets: [] }, [24, 24]);
+    try {
+      inputs.error = "Local save failed";
+      app.tui.renderNow(true);
+      const screen = (await term.screen()).join("\n").replace(/\s+/g, " ");
+      expect(screen).toContain("Inputs not saved");
+      expect(screen).toContain("/session inputs");
+      expect(screen).not.toContain("model m");
+    } finally {
+      app.stop();
+    }
+  });
+  it("状态栏样式可预览，内容在次级菜单勾选并立即生效", async () => {
+    const { app, term, menu, doc, saved } = boot();
+    app.setDraft("bar-location-check");
+    app.tui.renderNow(true);
+    const screen = (await term.screen()).join("\n");
+    expect(screen.indexOf("bar-location-check")).toBeLessThan(screen.indexOf("Ready"));
+    expect(doc().indexOf("bar-location-check")).toBeLessThan(doc().indexOf("Ready"));
+    await app.command("/settings statusStyle");
+    app.dialogInput(ENTER);
+    app.dialogInput(DOWN);
+    app.dialogInput(DOWN);
+    expect(menu()).toContain("Live preview");
+    expect(menu()).toContain("Instrument tiles");
+    expect(menu()).toContain("▏ model m");
+    app.dialogInput(ENTER);
+    await tick();
+    expect(doc()).toContain("▏ model m");
+    app.dialogInput(ESC);
+    app.dialogInput(ESC);
+
+    await app.command("/settings statusWidgets");
+    app.dialogInput(ENTER);
+    expect(menu()).toContain("Context");
+    expect(menu()).toContain("Shown [x]");
+    app.dialogInput(ENTER);
+    await tick();
+    expect(doc()).not.toContain("Context · no requests yet");
+    expect(doc()).toContain("▏ model m");
+    expect(saved).toEqual([]);
+    app.dialogInput(ESC);
+    app.dialogInput(ESC);
+    await app.command("/settings statusStyle");
+    app.dialogInput(TAB);
+    app.dialogInput(ENTER);
+    app.dialogInput(DOWN);
+    app.dialogInput(DOWN);
+    app.dialogInput(DOWN);
+    app.dialogInput(ENTER);
+    await tick();
+    expect(saved).toEqual([["statusStyle", "classic"]]);
+    expect(doc()).toContain("▏ model m");
+    app.stop();
+  });
   it("同一模型入口区分当前切换与默认值保存,保存默认值不会创建供应商", async () => {
     let chosen = 0;
     let defaults: Preset = {};
@@ -137,6 +219,13 @@ describe("Agent setup", () => {
       "Save as preset",
     ])
       expect(menu()).toContain(name);
+    expect(menu()).toContain("p/m · effort Model default");
+    expect(menu()).toContain("Skills Manual · memory Off");
+    // 首页摘要和详情共用作用域,切到保存值不能继续显示运行值。
+    app.dialogInput(TAB);
+    expect(menu()).toContain("Configured default · effort Model default");
+    expect(menu()).not.toContain("p/m · effort");
+    app.dialogInput(TAB);
     app.dialogInput("/");
     app.dialogInput("foldLines");
     expect(menu()).toContain("Output preview lines");
@@ -174,6 +263,16 @@ describe("Agent setup", () => {
     expect(menu()).toMatch(/Expanded recent steps\s+5/);
     expect(menu()).toContain("Current: 5");
     expect(menu()).toContain("Saved default: 10");
+    app.dialogInput(ESC);
+    app.dialogInput(ESC);
+    await app.command("/settings prompt.skills.sources");
+    app.dialogInput(TAB);
+    app.dialogInput(ENTER);
+    app.dialogInput(ENTER);
+    await tick();
+    expect(saved.at(-1)?.[0]).toBe("prompt.skills.sources");
+    expect((saved.at(-1)?.[1] as Record<string, string> | undefined)?.["user-clari"]).toBe("off");
+    expect(app.setup().values.prompt?.skills?.sources?.["user-clari"]).toBe("on");
     app.stop();
   });
 
@@ -319,6 +418,26 @@ describe("Agent setup", () => {
       name: `tool_${String(i).padStart(2, "0")}`,
     }));
     const { app, menu, term, saved } = boot({ tools }, [60, 24]);
+    app.setDraft("unrelated draft");
+    await app.command("/settings");
+    // 分隔线不占导航项;翻页、跳到末尾及返回仍指向正确的模块或操作。
+    expect(menu()).toContain("1–2 of 9");
+    app.dialogInput("\x1b[6~");
+    expect(menu()).toMatch(/▸\s+Tools & delegation/);
+    app.dialogInput(ENTER);
+    expect(menu()).toContain("Agent setup / Tools & delegation");
+    app.dialogInput(ESC);
+    expect(menu()).toMatch(/▸\s+Tools & delegation/);
+    app.dialogInput("\x1b[5~");
+    expect(menu()).toMatch(/▸\s+Model/);
+    app.dialogInput("\x1b[F");
+    expect(menu()).toMatch(/▸\s+Load preset/);
+    expect(app.dialogLines().length).toBeLessThanOrEqual(22);
+    app.dialogInput(ENTER);
+    expect(menu()).toContain("Recommended");
+    app.dialogInput(ESC);
+    app.dialogInput(ESC);
+    expect(app.draft()).toBe("unrelated draft");
     await app.command("/settings tools.disable");
     app.dialogInput(ENTER);
     app.dialogInput("\x1b[F");
@@ -331,8 +450,9 @@ describe("Agent setup", () => {
     expect(menu()).toMatch(/tool_39\s+Disabled/);
     // 经过真实 TUI→ANSI→xterm 渲染链后,底部操作提示仍在可见窗口。
     app.tui.requestRender();
-    await tick();
-    expect((await term.screen()).slice(-24).join("\n")).toContain("Esc back");
+    await expect
+      .poll(async () => (await term.screen()).slice(-24).join("\n"))
+      .toContain("Esc back");
     // 选项详情不能丢掉光标候选,返回时仍可确认同一项;阅读本身不修改设置。
     await app.command("/settings compaction");
     app.dialogInput(ENTER);
@@ -353,6 +473,24 @@ describe("Agent setup", () => {
     app.dialogInput("i");
     expect(menu()).toContain("Current: Clear tool results (clear)");
     expect(menu()).toContain("Saved default: Model summary (llm)");
+    await app.command("/settings prompt.skills.sources");
+    app.dialogInput(ENTER);
+    app.dialogInput("\x1b[F");
+    app.dialogInput(ENTER);
+    const longPath = `C:/skills/${"long-directory/".repeat(8)}visible-tail`;
+    app.setDraft("unrelated draft");
+    app.dialogInput(`\x1b[200~${longPath}\x1b[201~`);
+    expect(menu()).toContain("visible-tail");
+    expect(menu()).toContain("visible-tail▏");
+    expect(app.dialogLines().every((line) => stripAnsi(line).length <= 60)).toBe(true);
+    app.tui.requestRender();
+    await expect
+      .poll(async () => (await term.screen()).slice(-24).join("\n"))
+      .toContain("visible-tail");
+    app.dialogInput(ESC);
+    expect(menu()).toMatch(/▸\s+Add directory/);
+    expect(app.draft()).toBe("unrelated draft");
+    expect(saved).toEqual([]);
     app.stop();
   });
 
@@ -365,6 +503,8 @@ describe("Agent setup", () => {
     await app.command("/settings nope 1");
     expect(doc()).toContain("unknown setting nope");
     expect(log.events.some((e) => e.type === "ext/event" && e.source === "setup")).toBe(true);
+    await app.command('/settings prompt.skills.sources {"./custom  skills":"on"}');
+    expect(saved.at(-1)).toEqual(["prompt.skills.sources", { "./custom  skills": "on" }]);
     app.stop();
   });
 });

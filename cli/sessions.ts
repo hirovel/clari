@@ -6,8 +6,9 @@ import { existsSync, lstatSync, readdirSync, readFileSync, rmSync, statSync } fr
 import { join } from "node:path";
 import type { KernelConfig } from "../src/config.js";
 import type { AgentEvent } from "../src/events.js";
+import { lockFile } from "../src/file-lock.js";
 import { EventLog } from "../src/log.js";
-import { Recording } from "../src/recording.js";
+import type { Recording } from "../src/recording.js";
 import { recordUnresolvedCalls } from "../src/recovery.js";
 import type { CommonArgs } from "./args.js";
 
@@ -167,8 +168,13 @@ export function pruneSessions(
       } catch {}
     }
     if (opts.apply) {
-      rmSync(s.file, { force: true });
-      for (const side of s.sidecars) rmSync(side, { recursive: true, force: true });
+      const writer = lockFile(s.file);
+      try {
+        rmSync(s.file, { force: true });
+        for (const side of s.sidecars) rmSync(side, { recursive: true, force: true });
+      } finally {
+        writer.release();
+      }
     }
   }
   return { removed, kept: all.length - removed.length, bytes };
@@ -239,14 +245,14 @@ export function forkSession(
   events: readonly AgentEvent[],
   upTo: number,
   dir = SESSIONS_DIR,
-  sourceFile?: string,
+  source?: Recording,
 ): { file: string; events: number } {
   const n = Math.max(1, Math.min(upTo, events.length));
   const file = newSessionPath(dir, "-fork");
   const log = new EventLog(file);
   const prefix = events.slice(0, n);
   try {
-    log.recording?.copyAttachments(prefix, sourceFile ? new Recording(sourceFile) : undefined);
+    log.recording?.copyAttachments(prefix, source);
     for (const e of prefix) log.append(e);
     log.recording?.flush();
     if (log.recording?.error) throw new Error(log.recording.error);
@@ -256,5 +262,7 @@ export function forkSession(
     rmSync(file, { force: true });
     if (log.recording) rmSync(log.recording.directory, { recursive: true, force: true });
     throw error;
+  } finally {
+    log.recording?.dispose();
   }
 }

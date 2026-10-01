@@ -1,6 +1,6 @@
-// 生产级加固:流停滞、烂 JSON、无 index 的工具调用、bash 超时与输出上限、CRLF 编辑、二进制与大文件、
+// 生产级加固:流停滞、烂 JSON、无 index 的工具调用、bash 超时与大输出、CRLF 编辑、二进制与大文件、
 // rg 路径前缀、费用汇总。每一条都对应一次真实环境里会遇到的失败。
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -9,9 +9,12 @@ import { editTool, readTool } from "../cli/tools/fs.js";
 import { grepTool } from "../cli/tools/search.js";
 import { costOf, fmtCost, usageTotals } from "../src/cost.js";
 import type { AgentEvent } from "../src/events.js";
+import { toolOutput } from "../src/exchange.js";
+import { EventLog } from "../src/log.js";
 import { toAnthropicWire } from "../src/providers/anthropic.js";
+import { isRetryable, ProviderError } from "../src/providers/errors.js";
 import { feedChunk, finishAcc, newAcc } from "../src/providers/openai-chat.js";
-import { StreamStall, sseEvents } from "../src/providers/sse.js";
+import { StreamStall, sseEvents, streamError } from "../src/providers/sse.js";
 
 const enc = new TextEncoder();
 async function* chunks(parts: string[], delayMs = 0): AsyncGenerator<Uint8Array> {
@@ -51,7 +54,7 @@ describe("SSE 读流", () => {
     });
   });
 
-  it("停滞超时 → StreamStall(可重试)并调用 onStall 撤销底层请求", async () => {
+  it("停滞会撤销请求;已有输出时停滞、断连和流内错误都不重试", async () => {
     let stalled = 0;
     const p = collect(
       sseEvents(chunks(['data: {"a":1}\n', 'data: {"a":2}\n'], 80), {
@@ -61,6 +64,22 @@ describe("SSE 读流", () => {
     );
     await expect(p).rejects.toBeInstanceOf(StreamStall);
     expect(stalled).toBe(1);
+    const socket = new TypeError("terminated", { cause: { code: "UND_ERR_SOCKET" } });
+    const overloaded = new ProviderError("provider stream error: overloaded", {
+      retryable: true,
+      body: "overloaded",
+    });
+    for (const error of [new StreamStall(20), socket, overloaded]) {
+      expect(streamError(error, false)).toBe(error);
+      expect(isRetryable(error)).toBe(true);
+      const stopped = streamError(error, true);
+      expect(stopped).toBeInstanceOf(ProviderError);
+      expect(isRetryable(stopped)).toBe(false);
+      expect((stopped as Error).cause).toBe(error);
+    }
+    expect(streamError(overloaded, true)).toMatchObject({ body: "overloaded" });
+    const invalid = new ProviderError("provider stream: malformed data", { retryable: false });
+    expect(streamError(invalid, true)).toBe(invalid);
   });
 
   it("stallTimeoutMs=0 不限时", async () => {
@@ -133,11 +152,27 @@ describe("bash 工具的边界", () => {
     ).rejects.toThrow(/did not finish within 1 s[\s\S]*before/);
   }, 15000);
 
-  it("输出超过上限 → 终止并说明", async () => {
-    const tool = createBashTool({ maxOutputBytes: 2000 });
-    await expect(tool.execute({ command: "yes | head -c 100000" }, ctx)).rejects.toThrow(
-      /exceeds 0 MB/,
-    );
+  it("超过旧 10 MiB 上限仍跑完;模型只见尾部,Recording 保留完整原文", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kernel-bash-large-"));
+    const log = new EventLog(join(dir, "session.jsonl"));
+    try {
+      const output = toolOutput(log, "large", "bash");
+      if (!output) throw new Error("Recording output unavailable");
+      const shown = await createBashTool().execute(
+        { command: "yes A | head -c 11000000; printf '\\nEND_SENTINEL\\n'" },
+        { signal: ctx.signal, output },
+      );
+      await log.checkpoint();
+      expect(shown).toContain("END_SENTINEL");
+      expect(shown).toContain("Exit code: 0");
+      expect(shown).toContain(`Full output: ${output.path}`);
+      expect(Buffer.byteLength(shown)).toBeLessThan(60 * 1024);
+      expect(statSync(output.path).size).toBeGreaterThan(10 * 1024 * 1024);
+      expect(readFileSync(output.path, "utf8")).toContain("END_SENTINEL");
+    } finally {
+      log.recording?.dispose();
+      rmSync(dir, { recursive: true, force: true });
+    }
   }, 15000);
 
   it("timeout 参数覆盖缺省", async () => {
@@ -154,6 +189,33 @@ describe("文件工具的边界", () => {
     writeFileSync(file, "a\r\nb\r\nc\r\n");
     await editTool.execute({ path: file, oldText: "a\nb", newText: "x\ny\nz" }, ctx);
     expect(readFileSync(file, "utf8")).toBe("x\r\ny\r\nz\r\nc\r\n");
+  });
+
+  it("edit:混合换行时未修改的行保持原样", async () => {
+    const file = join(dir, "mixed-eol.txt");
+    writeFileSync(file, "first\r\nsecond\nthird\r\n");
+    await editTool.execute({ path: file, oldText: "second", newText: "changed" }, ctx);
+    expect(readFileSync(file, "utf8")).toBe("first\r\nchanged\nthird\r\n");
+  });
+
+  it("edit:非法 UTF-8 拒绝修改,原始字节不变", async () => {
+    const file = join(dir, "invalid-utf8.txt");
+    const original = Buffer.from([0x61, 0xff, 0x62]);
+    writeFileSync(file, original);
+    await expect(editTool.execute({ path: file, oldText: "a", newText: "x" }, ctx)).rejects.toThrow(
+      /not valid UTF-8 text; edit refused/,
+    );
+    expect(readFileSync(file)).toEqual(original);
+  });
+
+  it("edit:含 NUL 的文件拒绝修改,避免把二进制当作文本重写", async () => {
+    const file = join(dir, "utf16-like.txt");
+    const original = Buffer.from([0x61, 0x00, 0x62, 0x00]);
+    writeFileSync(file, original);
+    await expect(editTool.execute({ path: file, oldText: "a", newText: "x" }, ctx)).rejects.toThrow(
+      /contains NUL bytes/,
+    );
+    expect(readFileSync(file)).toEqual(original);
   });
 
   it("edit:oldText 为空 → 报错", async () => {
@@ -234,6 +296,15 @@ describe("费用汇总", () => {
     expect(t).toMatchObject({ requests: 2, inputTokens: 150, outputTokens: 15 });
     expect(t.cost).toBeCloseTo((150 * 3 + 15 * 15) / 1e6, 9);
     expect(usageTotals(events).cost).toBeUndefined();
+    expect(
+      usageTotals(
+        [
+          ...events,
+          { type: "assistant/message", at: "", text: "done", toolCalls: [], stopReason: "end" },
+        ],
+        () => price,
+      ).cost,
+    ).toBeUndefined();
   });
 
   it("fmtCost 按量级取位", () => {

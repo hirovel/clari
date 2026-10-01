@@ -7,11 +7,13 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import { contextTokens } from "../src/compaction.js";
+import { contextSize } from "../src/compaction.js";
 import { fmtCostApprox } from "../src/cost.js";
 import type { AgentEvent } from "../src/events.js";
+import { DEFAULT_STATUS_WIDGETS, type StatusStyle, type StatusWidget } from "../src/status-bar.js";
 import { shortcutLines } from "./cards.js";
 import { fmtTok } from "./inspector.js";
+import { renderStatusLayout } from "./status-layout.js";
 import { c, G } from "./theme.js";
 import type { TuiContext } from "./tui-context.js";
 
@@ -24,6 +26,15 @@ function fitParts(parts: string[], width: number): string {
     else if (!out) out = truncateToWidth(part, width, "…");
   }
   return out;
+}
+
+/** 八格只画已取得 usage 基准的容量比例;半格以下用细块表示,不把 5% 画成空。 */
+function capacityMeter(used: number, window: number): string {
+  const units = Math.round(Math.min(1, Math.max(0, used / window)) * 64);
+  const full = Math.floor(units / 8);
+  const partial = units % 8;
+  const ink = "█".repeat(full) + (partial ? ("▏▎▍▌▋▊▉"[partial - 1] ?? "") : "");
+  return c.jin(ink) + c.faint("░".repeat(8 - full - Number(partial > 0)));
 }
 
 export class RuntimeStatus implements Component {
@@ -80,13 +91,13 @@ export class RuntimeStatus implements Component {
   }
 
   invalidate(): void {}
-  render(width: number): string[] {
+  render(width: number, preview?: { style?: StatusStyle; widgets?: string[] }): string[] {
     const ctx = this.context();
     const { agent, view } = ctx;
     const inner = Math.max(1, width - 2);
-    const unsaved = [ctx.log, ...ctx.children.views.map((v) => v.info.log)].find(
-      (log) => log.recording?.error,
-    );
+    const logs = [ctx.log, ...ctx.children.views.map((v) => v.info.log)];
+    const unsaved =
+      logs.find((log) => log.recording?.full) ?? logs.find((log) => log.recording?.error);
     const busy = agent.running || this.work !== undefined;
     let label = "Ready";
     if (!busy && this.unknown)
@@ -118,38 +129,41 @@ export class RuntimeStatus implements Component {
         : ctx.scroll && !ctx.scroll.isFollowingEnd
           ? "Reading history"
           : "";
-    const first = fitParts(
+    const first = wrapTextWithAnsi(
       [
         state,
         !busy && this.unknown ? c.jin("/session recovery") : "",
-        c.soft(selected),
-        agent.queued
-          ? c.jin(
-              `${agent.pending.filter((p) => p.paused).length} paused · ${agent.pending.filter((p) => !p.paused).length} queued`,
-            )
-          : "",
-        ctx.deps.inputs?.error ? c.zhu("Inputs not saved") : "",
-        elapsed ? c.faint(elapsed) : "",
-        children ? c.faint(`${children} sub-agents running`) : "",
-        this.outcome === "failed" ? c.soft("/edit retry · /raw") : "",
-      ],
+        ctx.deps.inputs?.error ? c.zhu("Inputs not saved · /session inputs") : "",
+        this.outcome === "failed" ? c.soft("/inspect raw") : "",
+      ]
+        .filter(Boolean)
+        .join(" · "),
       inner,
     );
     const total = ctx.usage.totals();
     let context = "Context · no requests yet";
+    let contextMeter = "";
+    let compaction = "";
     if (view.lastUsage || ctx.req.count > 0) {
-      const used = contextTokens(ctx.log.events);
+      const size = contextSize(ctx.log.events);
+      const used = size.tokens;
       const threshold = Math.max(1, ctx.threshold());
       const trigger = ctx.compaction.trigger ?? "threshold";
       // 带用量基准仍是估算;窗口与压缩触发点是两件事,不把手动模式写成自动倒计时。
-      context = `Context ~${fmtTok(used)}/${fmtTok(ctx.model.contextWindow)}`;
-      context +=
+      context =
+        size.basis === "usage"
+          ? `Context ~${fmtTok(used)}/${fmtTok(ctx.model.contextWindow)}`
+          : `Messages ~${fmtTok(used)} + ${ctx.agent.tools.length} tools · total unmeasured`;
+      if (size.basis === "usage" && inner >= 90 && ctx.model.contextWindow > 0) {
+        contextMeter = capacityMeter(used, ctx.model.contextWindow);
+      }
+      compaction =
         trigger === "threshold"
-          ? ` · auto-compact ~${fmtTok(threshold)}`
+          ? `auto-compact ~${fmtTok(threshold)}`
           : trigger === "manual"
-            ? " · compact manual"
-            : ` · remind ~${fmtTok(threshold)}`;
-      if (used >= threshold && trigger !== "threshold") context += " · /compact";
+            ? "compact manual"
+            : `remind ~${fmtTok(threshold)}`;
+      if (used >= threshold && trigger !== "threshold") compaction = "/compact suggested";
     }
     const pulse =
       view.pulse.length > 1
@@ -157,20 +171,34 @@ export class RuntimeStatus implements Component {
             .map((ratio) => "▁▂▃▄▅▆▇█"[Math.min(7, Math.max(0, Math.round(ratio * 7)))])
             .join("")
         : "";
-    const second = fitParts(
-      [
-        c.faint(context),
-        total.cost !== undefined ? c.soft(fmtCostApprox(total.cost)) : "",
-        agent.effort ? c.faint(`effort ${agent.effort}`) : "",
-        total.requests
-          ? c.faint(`this session ↑${fmtTok(total.inputTokens)} ↓${fmtTok(total.outputTokens)}`)
-          : "",
-        total.cacheReadTokens ? c.faint(`cache ${fmtTok(total.cacheReadTokens)}`) : "",
-        c.faint(pulse),
-      ],
-      inner,
-    );
-    const gaps = [ctx.log, ...ctx.children.views.map((v) => v.info.log)].reduce(
+    const usage = view.lastUsage;
+    const cache = usage
+      ? usage.cacheReadTokens !== undefined && usage.inputTokens > 0
+        ? `last cache ${Math.round((usage.cacheReadTokens / usage.inputTokens) * 100)}%`
+        : "last cache n/a"
+      : ctx.req.count > 0
+        ? "last cache n/a"
+        : "";
+    const style = preview?.style ?? ctx.deps.statusStyle ?? "rail";
+    const widgets = preview?.widgets ?? ctx.deps.statusWidgets ?? DEFAULT_STATUS_WIDGETS;
+    const values: Partial<Record<StatusWidget, string>> = {
+      context: `${context}${style === "classic" && contextMeter ? ` · ${contextMeter}` : ""}`,
+      model: `model ${ctx.model.info.model}`,
+      effort: `effort ${agent.effort ?? "Auto (omitted)"}`,
+      ...(cache && { cache }),
+      ...(compaction && { compaction }),
+      ...(total.requests && {
+        tokens: `session ↑${fmtTok(total.inputTokens)} ↓${fmtTok(total.outputTokens)}`,
+      }),
+      ...(pulse && { trend: pulse }),
+      ...(agent.queued && {
+        queue: `${agent.pending.filter((p) => p.paused).length} paused · ${agent.pending.filter((p) => !p.paused).length} queued`,
+      }),
+      ...(elapsed && { elapsed }),
+      ...(children && { children: `${children} sub-agents` }),
+      ...(selected && { position: selected }),
+    };
+    const gaps = logs.reduce(
       (n, log) =>
         n +
         log.events.filter(
@@ -179,11 +207,27 @@ export class RuntimeStatus implements Component {
       0,
     );
     const saving = unsaved
-      ? "Not saved · work continues · auto retry / Ctrl+S"
+      ? unsaved.recording?.full
+        ? `${agent.running ? "Stopping" : "Work paused"} · recording buffer full · Ctrl+S retry`
+        : "Not saved · Ctrl+S retry · auto retry active"
       : gaps
-        ? `${gaps} recording gap(s) · inspect for details`
+        ? `${gaps} recording gap(s) · Ctrl+R details`
         : undefined;
-    return [` ${first}`, ` ${saving ? c.zhu(truncateToWidth(saving, inner, "…")) : second}`];
+    return [
+      ...first.map((line) => ` ${line}`),
+      ...(saving ? wrapTextWithAnsi(c.zhu(saving), inner).map((line) => ` ${line}`) : []),
+      ...renderStatusLayout(style, widgets, values, width),
+      ...(ctx.deps.showCostEstimate
+        ? wrapTextWithAnsi(
+            c.faint(
+              total.cost !== undefined
+                ? `cost est. ${fmtCostApprox(total.cost)}`
+                : `cost est. unavailable (${total.costStatus})`,
+            ),
+            inner,
+          ).map((line) => ` ${line}`)
+        : []),
+    ];
   }
 }
 
@@ -193,7 +237,7 @@ export class InputHints implements Component {
   invalidate(): void {}
   render(width: number): string[] {
     const ctx = this.context();
-    const text = ctx.editor.getText();
+    const text = ctx.editor.getExpandedText();
     const history =
       ctx.view.selectedStep !== undefined || (ctx.scroll && !ctx.scroll.isFollowingEnd);
     let parts: string[];
@@ -202,7 +246,7 @@ export class InputHints implements Component {
       parts = [
         "Esc return live",
         !text && ctx.view.selectedStep !== undefined ? "Enter fold/unfold" : "",
-        "PgUp/PgDn steps",
+        ctx.steps.length ? "PgUp/PgDn steps" : "PgUp/PgDn page",
       ];
     else if (text.startsWith("/")) parts = ["Enter run command", "Ctrl+K palette"];
     else if (ctx.agent.running) {
@@ -216,7 +260,7 @@ export class InputHints implements Component {
         "/help",
       ];
     const attachments = ctx.inputReading
-      ? "Reading clipboard…"
+      ? "Preparing paste…"
       : ctx.draftImages.length
         ? `${ctx.draftImages.length} image(s) attached · Alt+I inspect/remove · Enter sends`
         : "";

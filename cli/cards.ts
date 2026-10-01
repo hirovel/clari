@@ -15,6 +15,14 @@ import { c, G } from "./theme.js";
 type RequestEvent = Extract<AgentEvent, { type: "request" }>;
 type Usage = NonNullable<Extract<AgentEvent, { type: "assistant/message" }>["usage"]>;
 
+export function compactionDecisionText(
+  e: Extract<AgentEvent, { type: "decision"; slot: "compaction" }>,
+): string {
+  const reason =
+    e.reason === "no-result" ? "strategy returned no change" : "candidate did not reduce text";
+  return `compact unchanged: ${reason} · ${e.images ? "images kept, visual tokens unknown · Ctrl+E edit" : "context kept"}`;
+}
+
 export function firstLine(s: string, max = 60): string {
   const l =
     s
@@ -307,7 +315,7 @@ export function resultLines(
 type RequestErrorEvent = Extract<AgentEvent, { type: "request/error" }>;
 
 /**
- * 请求失败:四行。分类与状态码、供应商原话、下一步、原始响应体在哪。原话原样,不转述。
+ * 请求失败:四行。分类与状态码、错误原文、下一步、原始响应查看入口。
  */
 export function errorCardLines(
   e: RequestErrorEvent,
@@ -321,8 +329,8 @@ export function errorCardLines(
     `  ${c.soft("next")}  ${c.ink(ctx.hint)}`,
     `  ${c.faint(
       e.body
-        ? `${e.body.length} chars of response body saved · /raw ${ctx.n}`
-        : `no response body (network or stream failure) · /raw ${ctx.n}`,
+        ? `${e.body.length} chars of response body saved · /inspect raw ${ctx.n}`
+        : `response details · /inspect raw ${ctx.n}`,
     )}`,
   ];
 }
@@ -358,14 +366,13 @@ export function shortcutLines(): string[] {
     k("Alt+I", "inspect or remove draft images"),
     k("Esc", "close view / return live / interrupt"),
     k("Ctrl+K", "search commands, models, skills and templates"),
-    k("Ctrl+G", "write the message in $EDITOR"),
     k("PgUp PgDn", "select step · Enter folds or unfolds"),
     k("Ctrl+↑ ↓", "jump between user prompts"),
     k("Ctrl+E", "context workbench · inspect or edit messages"),
     k("Ctrl+R", "request inspector · Tab switches views"),
     k("Ctrl+O", "fold results · cycle sub-agent views"),
     k("Ctrl+T", "expand or collapse thinking"),
-    k("Ctrl+C", "quit"),
+    k("Ctrl+C", "confirm exit"),
     k("@path", "attach a file to the message"),
     k("/help", "all commands"),
   ];

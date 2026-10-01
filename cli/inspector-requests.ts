@@ -11,7 +11,7 @@ import {
   type Message,
 } from "../src/messages.js";
 import { type Provider, parseEffort, type ToolDef } from "../src/provider.js";
-import { unchangedPrefix } from "./cards.js";
+import { compactionDecisionText, unchangedPrefix } from "./cards.js";
 import { renderExtEvent } from "./ext-events.js";
 import {
   cacheUsageLines,
@@ -110,8 +110,7 @@ export type Section = 1 | 2 | 3 | 4 | 5 | 6 | 7;
 
 // ---------- 请求列表 ----------
 
-export function listRow(rec: RequestRecord, selected: boolean): string {
-  const mark = selected ? c.zhu("▸") : " ";
+function listParts(rec: RequestRecord): { head: string; tail: string } {
   const head = `#${rec.n}`.padEnd(4);
   const model = rec.request.model;
   const sent = `${rec.request.messages} msgs  ≈${fmtTok(rec.request.estimatedTokens)}`;
@@ -138,8 +137,23 @@ export function listRow(rec: RequestRecord, selected: boolean): string {
       : rec.request.reason === "compaction"
         ? "compaction  "
         : "";
-  const body = `${head} ${clock(rec.request.at)}  ${model}  ${kind}${sent}  ${tail}${retry}`;
-  return `${mark} ${selected ? c.bold(c.ink(body)) : c.soft(body)}`;
+  return {
+    head: `${head} ${clock(rec.request.at)}  ${model}  ${kind}${sent}`,
+    tail: `${tail}${retry}`,
+  };
+}
+
+export function listRow(rec: RequestRecord, selected: boolean): string {
+  const { head, tail } = listParts(rec);
+  const body = `${head}  ${tail}`;
+  return `${selected ? c.zhu("▸") : " "} ${selected ? c.bold(c.ink(body)) : c.soft(body)}`;
+}
+
+/** 窄屏的第二行专门留给结果,避免缓存、输出和停止原因被右侧截断。 */
+export function narrowListRows(rec: RequestRecord, selected: boolean): string[] {
+  const { head, tail } = listParts(rec);
+  const tone = selected ? (text: string) => c.bold(c.ink(text)) : c.soft;
+  return [`${selected ? c.zhu("▸") : " "} ${tone(head)}`, `  ${tone(tail)}`];
 }
 
 // ---------- 请求详情的七个分区 ----------
@@ -177,7 +191,7 @@ export function exchangeLines(
     ),
     ...cacheUsageLines(rec.response?.usage ?? rec.compaction?.usage).map(c.soft),
     c.faint(
-      `HTTP body: ${recording?.bodies.length ? `${recording.bodies.length} attempt(s) captured before dispatch` : "not captured; 5 shows reconstruction when possible"}`,
+      `HTTP body: ${recording?.attempts?.length ? `${recording.attempts.length} attempt(s) recorded before dispatch; open 5 to read` : "not captured; 5 shows reconstruction when possible"}`,
     ),
     c.faint(
       `HTTP responses: ${recording?.attempts?.length ? `${recording.attempts.length} attempt(s) recorded` : "not available here"}`,
@@ -211,6 +225,10 @@ export function summaryLines(rec: RequestRecord, messages: Message[]): string[] 
     row(
       "sent",
       `${r.messages} messages · ${r.tools.length} tools · estimated ${r.estimatedTokens} tok`,
+    ),
+    row(
+      "estimate",
+      "Last usage plus new messages when available; otherwise messages only. Current tool definitions and provider framing are excluded until the provider reports input usage.",
     ),
   ];
   if (rec.compaction?.strategy) lines.push(row("strategy", rec.compaction.strategy));
@@ -299,7 +317,9 @@ export function decisionLines(rec: RequestRecord): string[] {
                 ? `${c.soft("·")} plan restated at step ${e.steps} (${e.reason === "compacted" ? "after compaction" : "not updated for a while"})`
                 : e.slot === "facts"
                   ? `${c.soft("·")} fact injected: ${e.note}`
-                  : `${c.soft("·")} termination stopped the loop at step ${e.steps}: ${e.reason}`,
+                  : e.slot === "compaction"
+                    ? `${c.soft("·")} ${compactionDecisionText(e)}`
+                    : `${c.soft("·")} termination stopped the loop at step ${e.steps}: ${e.reason}`,
         );
         break;
       case "session/interrupt":

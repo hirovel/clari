@@ -8,11 +8,10 @@ import {
   describeApproval,
   policyApprove,
 } from "../src/approval.js";
-import { DEFAULT_CONFIG_PATH, loadConfig, saveConfig } from "../src/config.js";
+import { DEFAULT_CONFIG_PATH, updateConfig } from "../src/config.js";
 import { now, type ToolCall } from "../src/events.js";
 import { type ApprovePolicy, allowAll, queueToTurnEnd, steer } from "../src/loop.js";
 import { isCompactionTrigger, loadCompactionStrategy, parsePreservation } from "./bootstrap.js";
-import { editInExternalEditor } from "./editor.js";
 import { c } from "./theme.js";
 import {
   applyToolPrompts,
@@ -24,7 +23,8 @@ import {
 } from "./tool-prompts.js";
 import type { TuiAppDeps } from "./tui-app.js";
 import type { ApprovalState, TuiContext } from "./tui-context.js";
-import { formatArgs, toolCallDetail } from "./tui-format.js";
+import { formatArgs, printableInput, toolCallDetail } from "./tui-format.js";
+import { TextEditor } from "./tui-text-editor.js";
 
 // ---------- 审批 ----------
 
@@ -140,16 +140,18 @@ export class ApprovalPrompt implements Component {
       } else if (matchesKey(data, Key.escape)) {
         this.mode = "choose";
         this.reason = "";
-      } else if (data === "\x7f" || data === "\b") this.reason = this.reason.slice(0, -1);
-      else if (data.length > 0 && !data.startsWith("\x1b") && data >= " ") this.reason += data;
+      } else if (matchesKey(data, Key.backspace) || data === "\b")
+        this.reason = Array.from(this.reason).slice(0, -1).join("");
+      else if (!data.startsWith("\x1b") || data.startsWith("\x1b[200~"))
+        this.reason += printableInput(data);
       this.onChange();
       return;
     }
     const options = OPTIONS(this.call.name);
     const byKey = options.find((o) => o.key === data.toLowerCase());
     const byNumber = /^[1-4]$/.test(data) ? options[Number(data) - 1] : undefined;
-    if (data === "\x1b[A" || data === "k") this.index = (this.index + 3) % 4;
-    else if (data === "\x1b[B" || data === "j") this.index = (this.index + 1) % 4;
+    if (matchesKey(data, Key.up) || data === "k") this.index = (this.index + 3) % 4;
+    else if (matchesKey(data, Key.down) || data === "j") this.index = (this.index + 1) % 4;
     else if (matchesKey(data, Key.enter)) {
       this.choose(options[this.index] as ApprovalOption);
       return;
@@ -359,8 +361,8 @@ function steeringSlot(ctx: TuiContext, v: string): string {
 
 function approveSlot(ctx: TuiContext, v: string): string {
   const a = ctx.approval;
-  const [sub = "", ...restRule] = v.split(/\s+/);
-  const rule = restRule.join(" ").trim();
+  const sub = v.match(/^\S+/)?.[0] ?? "";
+  const rule = v.slice(sub.length).trim();
   const show = () =>
     [
       `${c.soft("approve")} ${c.ink(a.mode)}${a.mode === "policy" ? `  ${c.faint(describeApproval(a.cfg))}` : ""}`,
@@ -425,7 +427,7 @@ function toolPromptsSlot(ctx: TuiContext, v: string): string {
       c.faint(
         edited.length > 0
           ? `  edited by you: ${edited.join(" ")}  (reset <tool> to drop; save to keep across sessions)`
-          : "  edit <tool> opens the description in your editor; save writes style and edits to ~/.clari/config.json",
+          : "  edit <tool> edits the description here; save writes style and edits to ~/.clari/config.json",
       ),
     ].join("\n");
   }
@@ -444,35 +446,46 @@ function toolPromptsSlot(ctx: TuiContext, v: string): string {
   if (sub === "edit" || sub === "reset") {
     const t = tools.find((x) => x.name === name);
     if (!name || !t) return c.zhu(`no tool named ${name ?? "?"}; see /tools`);
-    const descriptions = cfg.descriptions ?? {};
-    cfg.descriptions = descriptions;
+    const apply = () => {
+      applyToolPrompts(tools, cfg);
+      recordSlot(ctx, "toolPrompts", describeToolPrompts(cfg));
+      return done(
+        "toolPrompts",
+        `${sub} ${name} (${Math.ceil(t.description.length / 4)} tok)`,
+        "takes effect from the next request; /tools shows the first line, Ctrl+R → tool definitions the full text",
+      );
+    };
     if (sub === "reset") {
-      if (!(name in descriptions)) return c.faint(`· ${name} is not edited`);
-      delete descriptions[name];
+      if (!cfg.descriptions || !(name in cfg.descriptions))
+        return c.faint(`· ${name} is not edited`);
+      delete cfg.descriptions[name];
     } else {
-      // 长文本走外部编辑器:先让出终端,编辑器退出后再接管。
-      ctx.tui.stop();
-      const next = editInExternalEditor(t.description, { suffix: ".txt" });
-      ctx.tui.start();
-      if (next === undefined) return c.faint("· unchanged, cancelled");
-      descriptions[name] = next.replace(/\s+$/, "");
+      ctx.dialog.open(
+        new TextEditor(
+          ctx,
+          `Edit tool description · ${name}`,
+          "Changes future requests. Use save to keep as a default.",
+          t.description,
+          (text) => {
+            cfg.descriptions = { ...cfg.descriptions, [name]: text };
+            return apply();
+          },
+        ),
+      );
+      return "";
     }
-    applyToolPrompts(tools, cfg);
-    recordSlot(ctx, "toolPrompts", describeToolPrompts(cfg));
-    return done(
-      "toolPrompts",
-      `${sub} ${name} (${Math.ceil(t.description.length / 4)} tok)`,
-      "takes effect from the next request; /tools shows the first line, Ctrl+R → tool definitions the full text",
-    );
+    return apply();
   }
   if (sub === "save") {
-    const { config } = loadConfig();
     const descriptions = cfg.descriptions ?? {};
-    config.toolPrompts = {
-      style: cfg.style ?? "explain",
-      ...(Object.keys(descriptions).length > 0 && { descriptions }),
-    };
-    saveConfig(config);
+    updateConfig((current) => ({
+      ...current,
+      toolPrompts: {
+        style: cfg.style ?? "explain",
+        ...(Object.keys(descriptions).length > 0 && { descriptions }),
+      },
+    }));
+
     return done("toolPrompts", "saved", `toolPrompts written to ${DEFAULT_CONFIG_PATH}`);
   }
   return c.zhu("Usage: /toolprompts brief|explain|rules | edit <tool> | reset <tool> | save");

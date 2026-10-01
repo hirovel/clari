@@ -6,6 +6,9 @@ import { Agent } from "../src/agent.js";
 import { policyApprove } from "../src/approval.js";
 import { usageTotals } from "../src/cost.js";
 import type { AgentEvent } from "../src/events.js";
+import { errorMessage } from "../src/providers/errors.js";
+import { getSetting, SETTINGS } from "../src/settings.js";
+import { setupSnapshot } from "../src/setup.js";
 import { expandFileRefs } from "./attachments.js";
 import {
   beginSession,
@@ -13,9 +16,11 @@ import {
   parseCommonArgs,
   resolveApproval,
   sessionsDir,
+  settingsFromArgs,
   USAGE,
 } from "./bootstrap.js";
 import { prepareSessionRuntime } from "./session-runtime.js";
+import { recordSessionSetup } from "./session-setup.js";
 
 let args: ReturnType<typeof parseCommonArgs>;
 try {
@@ -58,13 +63,28 @@ log.subscribe((e) => {
 });
 let runtime: Awaited<ReturnType<typeof prepareSessionRuntime>>;
 let agent: Agent;
+const recordings = new Set<typeof log>();
 const recordingOffs: (() => void)[] = [];
 const watchSaving = (source: typeof log) => {
+  if (recordings.has(source)) return;
+  recordings.add(source);
+  let shownError: string | undefined;
+  let shownFull = false;
   const off = source.recording?.subscribe(() => {
-    if (source.recording?.error)
+    const recording = source.recording;
+    if (!recording?.error) {
+      shownError = undefined;
+      shownFull = false;
+    } else if (recording.full && !shownFull) {
       console.error(
-        `Saving failed (${source.path}): ${source.recording.error}. Work continues; retrying storage every second. Unsaved data may be lost on exit.`,
+        `Recording buffer full (${source.path}); stopping current work. Fix saving before starting new work.`,
       );
+      shownFull = true;
+    } else if (!recording.full && recording.error !== shownError)
+      console.error(
+        `Saving failed (${source.path}): ${recording.error}. Work continues; retrying storage every second. Unsaved data may be lost on exit.`,
+      );
+    shownError = recording?.error;
   });
   if (off) recordingOffs.push(off);
 };
@@ -82,9 +102,24 @@ try {
   runtime.activate();
 } catch (error) {
   console.error((error as Error).message);
+  await log.checkpoint();
+  if (log.recording?.error) console.error(`Saving failed: ${log.recording.error}`);
+  log.recording?.dispose();
   process.exit(2);
 }
 const approvalCfg = resolveApproval(args, boot.config);
+const resolvedSettings = settingsFromArgs(args);
+const values = setupSnapshot(SETTINGS, (def) => getSetting(resolvedSettings, def.key));
+values.model = `${runtime.choice.providerName}/${runtime.choice.model}`;
+values.extensions = [...args.extensions];
+if (typeof approvalCfg === "object") values.approval = structuredClone(approvalCfg);
+if (args.systemPromptFile) values.systemPromptFile = args.systemPromptFile;
+if (args.appendSystemPromptFile) values.appendSystemPromptFile = args.appendSystemPromptFile;
+recordSessionSetup(log, {
+  values,
+  tools: runtime.tools.map((tool) => tool.name),
+  descriptions: structuredClone(runtime.toolPrompts.descriptions ?? {}),
+});
 agent = new Agent({
   log,
   provider: runtime.choice.provider,
@@ -129,13 +164,19 @@ try {
   }
 } catch (err) {
   if (args.json) {
-    console.log(JSON.stringify({ ok: false, error: (err as Error).message, sessionFile }, null, 2));
-  } else console.error(`request failed: ${(err as Error).message}`);
+    console.log(JSON.stringify({ ok: false, error: errorMessage(err), sessionFile }, null, 2));
+  } else console.error(`request failed: ${errorMessage(err)}`);
   process.exitCode = 1;
 } finally {
-  await runtime.dispose();
-  await log.checkpoint();
-  for (const off of recordingOffs) off();
+  try {
+    await runtime.dispose();
+  } finally {
+    for (const source of recordings) {
+      await source.checkpoint();
+      source.recording?.dispose();
+    }
+    for (const off of recordingOffs) off();
+  }
 }
 
 function summarize(
@@ -171,7 +212,11 @@ function summarize(
       cacheReadTokens: totals.cacheReadTokens,
       cacheWriteTokens: totals.cacheWriteTokens,
     },
-    ...(totals.cost !== undefined && { costUsd: Number(totals.cost.toFixed(6)) }),
+    ...(args.showCostEstimate &&
+      totals.cost !== undefined && {
+        estimatedCostUsd: Number(totals.cost.toFixed(6)),
+      }),
+    ...(args.showCostEstimate && { estimatedCostStatus: totals.costStatus }),
     text,
     sessionFile: file,
   };

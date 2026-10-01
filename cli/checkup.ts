@@ -2,8 +2,9 @@
 // 纯函数,输入是一份会话的事件数组(可选带上原始流旁路文件的覆盖情况),输出是表格行、判据与报告文本。
 // 入口是 scripts/checkup.ts。判据里最要紧的是 A:没有编辑、丢弃或压缩时,上一次发出的整段消息必须是
 // 这一次的前缀 —— 这是"内核不在最新消息之前插东西"在真实数据上的可证形态,也是缓存不被自己打断的保证。
+
+import { estimateAfter } from "../src/compaction.js";
 import type { UsageTotals } from "../src/cost.js";
-import { fmtCost } from "../src/cost.js";
 import type { AgentEvent } from "../src/events.js";
 import type { Message } from "../src/messages.js";
 import { predictedCache, unchangedPrefix } from "./cards.js";
@@ -77,6 +78,8 @@ export function analyze(events: readonly AgentEvent[], recording?: ResponseCover
     const previous = records[rec.n - 2];
     const messages = messagesFor(events, rec);
     const keep = unchangedPrefix(lastSent, messages);
+    // 新图片的供应商视觉用量无法由本地文字估算推得;下一轮已有实测基准,仍可比较。
+    const newImage = messages.slice(keep).some((m) => m.role === "user" && m.images?.length);
     const usage = rec.response?.usage ?? rec.compaction?.usage;
     // 策略自己发的请求(摘要)不是纯投影:请求事件记了差异部分,按它重建。
     const rebuilt = messages.length;
@@ -94,6 +97,7 @@ export function analyze(events: readonly AgentEvent[], recording?: ResponseCover
           !rec.request.body &&
           previous.request.model === rec.request.model &&
           JSON.stringify(previous.request.tools) === JSON.stringify(rec.request.tools) &&
+          !newImage &&
           !rec.before.some(
             (e) =>
               e.type === "compaction" ||
@@ -197,7 +201,7 @@ export function analyze(events: readonly AgentEvent[], recording?: ResponseCover
       "C",
       "token estimate drift: heuristic for comparable requests",
       judged === 0 ? "skip" : outliers.length === 0 ? "pass" : "fail",
-      `${notes.join(" · ") || "no comparable usage"} · ${rows.filter((r) => !r.comparable || r.inTok === undefined).length} excluded (initial, changed, custom or missing usage)${outliers.length > 0 ? ` · off: ${outliers.join(", ")}` : ""}`,
+      `${notes.join(" · ") || "no comparable usage"} · ${rows.filter((r) => !r.comparable || r.inTok === undefined).length} excluded (initial, changed, custom, new image or missing usage)${outliers.length > 0 ? ` · off: ${outliers.join(", ")}` : ""}`,
     );
   }
 
@@ -223,28 +227,23 @@ export function analyze(events: readonly AgentEvent[], recording?: ResponseCover
     );
   }
 
-  // E 压缩:压缩之后的下一次请求,发出的规模必须比压缩之前小。
+  // E 在压缩事件的两侧用同一投影口径比较;相邻请求之间可能新增大量工具结果。
   {
-    const turns = records
-      .filter((rec) => rec.request.reason !== "compaction")
-      .map((rec) => ({ index: rec.index, row: rows.find((r) => r.n === rec.n) as CheckupRow }));
-    const pairs: { before: CheckupRow; after: CheckupRow }[] = [];
-    for (const cmp of compactions) {
-      const before = [...turns].reverse().find((t) => t.index < cmp.index);
-      const after = turns.find((t) => t.index > cmp.index);
-      if (before && after) pairs.push({ before: before.row, after: after.row });
-    }
-    const bad = pairs.filter((p) => p.after.est >= p.before.est);
+    const pairs = compactions.map((cmp) => ({
+      before: estimateAfter(events.slice(0, cmp.index)),
+      after: estimateAfter(events.slice(0, cmp.index + 1)),
+    }));
+    const bad = pairs.filter((p) => p.after >= p.before);
     add(
       "E",
-      "estimated context decreases after compaction (heuristic)",
+      "projected context decreases at compaction",
       pairs.length === 0 ? "skip" : bad.length === 0 ? "pass" : "fail",
       pairs.length === 0
-        ? "no compaction with a request on both sides"
+        ? "no compaction"
         : pairs
             .map(
               (p) =>
-                `${fmtTok(p.before.est)} → ${fmtTok(p.after.est)}${p.after.est >= p.before.est ? " (no drop)" : ""}`,
+                `${fmtTok(p.before)} → ${fmtTok(p.after)}${p.after >= p.before ? " (no drop)" : ""}`,
             )
             .join(" · "),
     );
@@ -354,7 +353,7 @@ export function reportLines(
     "",
     file,
     `${eventCount} events · ${c.requests} requests · ${c.compactions} compactions · ${c.toolCalls} tool calls · ${c.models.join(", ")} · ${c.minutes.toFixed(1)} min`,
-    `${fmtTok(totals.inputTokens)} in (${fmtTok(totals.cacheReadTokens)} cached${totals.cacheWriteTokens > 0 ? `, ${fmtTok(totals.cacheWriteTokens)} written` : ""}) · ${fmtTok(totals.outputTokens)} out${totals.cost !== undefined ? ` · ${fmtCost(totals.cost)}` : " · no price configured"}`,
+    `${fmtTok(totals.inputTokens)} in (${fmtTok(totals.cacheReadTokens)} cached${totals.cacheWriteTokens > 0 ? `, ${fmtTok(totals.cacheWriteTokens)} written` : ""}) · ${fmtTok(totals.outputTokens)} out`,
     "",
     "  #  reason          msgs    est  measured    gap   cache (prefix ≈)   out  latency  stop",
     `  ${"─".repeat(88)}`,

@@ -15,7 +15,7 @@ import {
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import type { AgentEvent } from "../src/events.js";
-import type { Message } from "../src/messages.js";
+import { editState, type Message } from "../src/messages.js";
 import type { Provider, ToolDef } from "../src/provider.js";
 import {
   BodyBrowser,
@@ -65,6 +65,7 @@ import {
   exchangeLines,
   listRow,
   messagesFor,
+  narrowListRows,
   type RequestRecord,
   SECTIONS,
   type Section,
@@ -97,6 +98,7 @@ export * from "./inspector-workbench.js";
 export type SessionSource = {
   name: string;
   events: readonly AgentEvent[];
+  recordingDirectory?: string;
   recordingFor?: (index: number, section?: RecordingSection) => RequestRecording | undefined;
 };
 
@@ -118,6 +120,8 @@ export type InspectorDeps = {
   contextWindow?: () => number;
   /** 模型正在跑:工作台只看不改。 */
   running?: () => boolean;
+  /** 当前宿主会话不能编辑的原因;只读检视仍可用。 */
+  readOnlyReason?: () => string | undefined;
   /** 工作台里选中一条消息并选了动作。view 由检视器自己处理,其余交给界面落到命令上。 */
   onAction?: (action: ContextAction, row: CompositionRow) => void;
   /** 工作台的 system 行:翻一段(界面层追加 context/edit)。 */
@@ -184,6 +188,7 @@ export class RequestInspector implements Component {
   /** 打开时回到主会话的请求列表并选中最新一条。 */
   reset(): void {
     this.mode = "list";
+    this.sessionIndex = 0;
     this.section = 1;
     this.scroll = 0;
     this.selected = Math.max(0, this.records().length - 1);
@@ -205,13 +210,13 @@ export class RequestInspector implements Component {
   }
 
   private messageSelected = 0;
-  private actionSelected = 0;
+  private actionSelected: ContextAction = "view";
 
   /** 直接定位到第 n 次请求的某个分区(/inspect raw N → 接收分区)。没有该请求返回 false。 */
   showRequest(n: number, section: Section): boolean {
+    this.sessionIndex = 0;
     const idx = this.records().findIndex((r) => r.n === n);
     if (idx < 0) return false;
-    this.sessionIndex = 0;
     this.selected = idx;
     this.section = section;
     this.mode = "detail";
@@ -243,14 +248,18 @@ export class RequestInspector implements Component {
   }
 
   composition(): ReturnType<typeof compositionRows> {
-    return compositionRows(this.events(), this.deps.currentProvider?.());
+    return compositionRows(
+      this.events(),
+      this.events() === this.deps.events() ? this.deps.currentProvider?.() : undefined,
+    );
   }
 
   /** 工作台的行:按会话、事件数与工具集缓存,同一状态下按键不重算。 */
   workbench(): Workbench {
     const events = this.events();
-    const tools = this.deps.tools();
-    const lastSent = this.deps.lastSent?.();
+    const main = events === this.deps.events();
+    const tools = main ? this.deps.tools() : [];
+    const lastSent = main ? this.deps.lastSent?.() : undefined;
     const key = `${this.sessionIndex}:${tools.map((t) => t.name).join(",")}:${lastSent?.length ?? -1}`;
     if (
       this.wbCache?.events !== events ||
@@ -259,10 +268,12 @@ export class RequestInspector implements Component {
     ) {
       const wb = workbench({
         events,
-        provider: this.deps.currentProvider?.(),
+        provider: main ? this.deps.currentProvider?.() : undefined,
         tools,
         lastSent,
       });
+      // 子任务下一次派发会重新组装工具;不能把主会话工具冒充子配置。
+      if (!main) wb.rows = wb.rows.filter((row) => row.kind !== "tools");
       this.wbCache = { events, len: events.length, key, wb };
     }
     return this.wbCache.wb;
@@ -418,6 +429,26 @@ export class RequestInspector implements Component {
     return this.deps.running?.() ?? false;
   }
 
+  private contextReadOnlyReason(): string | undefined {
+    if (this.events() !== this.deps.events()) return "Sub-session context is read-only.";
+    return (
+      this.deps.readOnlyReason?.() ??
+      (this.busy()
+        ? "Context is read-only while running; Esc in the transcript stops the turn."
+        : undefined)
+    );
+  }
+
+  private contextActions(row: CompositionRow, total: number): ActionItem[] {
+    const items = actionsFor(this.events(), row, total);
+    // 渲染与按键执行共用筛选,菜单打开后运行状态改变也不能执行过期动作。
+    if (this.events() !== this.deps.events() || this.busy())
+      return items.filter((item) => item.action === "view");
+    if (this.deps.readOnlyReason?.())
+      return items.filter((item) => ["view", "compare", "fork"].includes(item.action));
+    return items;
+  }
+
   /** 提示词段:切得回来就带开关;切不回来只列元数据。 */
   private sections(): { states: SectionState[] | undefined; names: string[] } {
     const events = this.events();
@@ -555,16 +586,23 @@ export class RequestInspector implements Component {
         const row = this.selectedRow();
         const r = row?.kind === "message" || row?.kind === "system" ? row.row : undefined;
         const total = this.composition().rows.length;
-        const items = r ? actionsFor(events, r, total) : [];
+        const items = r ? this.contextActions(r, total) : [];
+        const previous = this.actionSelected;
+        const selected = Math.max(
+          0,
+          items.findIndex((item) => item.action === previous),
+        );
         if (matchesKey(data, Key.escape) || data === "q") this.mode = "composition";
         else if (matchesKey(data, Key.up) || data === "k")
-          this.actionSelected = clampSel(this.actionSelected - 1, items.length);
+          this.actionSelected = items[clampSel(selected - 1, items.length)]?.action ?? "view";
         else if (matchesKey(data, Key.down) || data === "j")
-          this.actionSelected = clampSel(this.actionSelected + 1, items.length);
+          this.actionSelected = items[clampSel(selected + 1, items.length)]?.action ?? "view";
         else if (/^[1-9]$/.test(data) && Number(data) <= items.length)
-          this.actionSelected = Number(data) - 1;
+          this.actionSelected = items[Number(data) - 1]?.action ?? "view";
+        else if (matchesKey(data, Key.pageUp)) this.scroll = Math.max(0, this.scroll - page);
+        else if (matchesKey(data, Key.pageDown)) this.scroll += page;
         else if (matchesKey(data, Key.enter) && r) {
-          const item = items[this.actionSelected];
+          const item = items.find((item) => item.action === this.actionSelected);
           if (item?.action === "view") {
             this.mode = "message";
             this.scroll = 0;
@@ -573,6 +611,7 @@ export class RequestInspector implements Component {
             this.deps.onAction?.(item.action, r);
           }
         }
+        if (previous !== this.actionSelected) this.scroll = 0;
         break;
       }
       case "message": {
@@ -600,9 +639,8 @@ export class RequestInspector implements Component {
         else if (/^[1-9]$/.test(data) && Number(data) <= n) this.sectionSelected = Number(data) - 1;
         else if (matchesKey(data, Key.enter) && states) {
           const s = states[this.sectionSelected];
-          if (this.busy())
-            this.busyNote =
-              "cannot change the context while running · Esc in the transcript stops the turn";
+          const reason = this.contextReadOnlyReason();
+          if (reason) this.busyNote = reason;
           else if (s) this.deps.onSection?.(s.name);
         }
         break;
@@ -665,11 +703,6 @@ export class RequestInspector implements Component {
   private enterRow(row: WorkbenchRow): void {
     switch (row.kind) {
       case "message":
-        if (this.busy()) {
-          this.busyNote =
-            "cannot change the context while running · Esc in the transcript stops the turn";
-          return;
-        }
         if (row.row.stages.some((s) => s.startsWith("summary"))) {
           const comps = this.compactions();
           const k = comps.findIndex((cmp) => cmp.index === row.row.event);
@@ -682,15 +715,22 @@ export class RequestInspector implements Component {
           }
         }
         this.mode = "actions";
-        this.actionSelected = 0;
+        this.actionSelected = "view";
+        this.scroll = 0;
         return;
       case "system":
+        if (this.contextReadOnlyReason()) {
+          this.mode = "message";
+          this.scroll = 0;
+          return;
+        }
         this.mode = "sections";
         this.sectionSelected = 0;
         this.busyNote = undefined;
         return;
       case "tools":
-        this.deps.onTools?.();
+        if (this.contextReadOnlyReason()) this.busyNote = this.contextReadOnlyReason();
+        else this.deps.onTools?.();
         return;
       case "covered":
         this.mode = "covered";
@@ -831,9 +871,12 @@ export class RequestInspector implements Component {
 
     if (this.mode === "list") {
       const recs = this.records();
-      const title = `${c.bold(c.ink("Requests"))}  ${c.soft(`${recs.length} requests`)}  ${c.faint("one line per API request · Tab: events · compactions · context")}`;
+      const narrow = w < 90;
+      const title = `${c.bold(c.ink("Requests"))}  ${c.soft(`${recs.length} requests`)}  ${c.faint(narrow ? "two lines per request" : "one line per API request · Tab: events · compactions · context")}`;
       const columns = c.faint(
-        "  #    time      model  sent (msgs · est. tok)  → measured (cache)  +out  latency  stop",
+        narrow
+          ? "  #    time      model · sent / result · cache · stop"
+          : "  #    time      model  sent (msgs · est. tok)  → measured (cache)  +out  latency  stop",
       );
       const head = withSession([pad(title), pad(columns), pad(rule)]);
       const foot = [
@@ -841,21 +884,27 @@ export class RequestInspector implements Component {
         pad(c.faint("↑↓ select · Enter details · Tab next view · s session · Esc close")),
       ];
       const viewport = rows - head.length - foot.length;
-      this.lastViewport = viewport;
+      const pageItems = narrow ? Math.max(1, Math.floor(viewport / 2)) : viewport;
+      this.lastViewport = pageItems;
       let body: string[];
       if (recs.length === 0) body = [pad(c.faint("No requests yet. Send a message first."))];
       else {
-        const start = windowStart(this.selected, recs.length, viewport);
+        const start = windowStart(this.selected, recs.length, pageItems);
         body = recs
-          .slice(start, start + viewport)
-          .map((r, i) => pad(listRow(r, start + i === this.selected)));
+          .slice(start, start + pageItems)
+          .flatMap((r, i) =>
+            (narrow
+              ? narrowListRows(r, start + i === this.selected)
+              : [listRow(r, start + i === this.selected)]
+            ).map(pad),
+          );
       }
       return [...head, ...fill(body, viewport), ...foot];
     }
 
     if (this.mode === "events") {
       const idx = filteredIndices(events, this.eventFilter);
-      const title = `${c.bold(c.ink("Events"))}  ${c.soft(`${events.length} events · this array is the whole kernel state`)}   ${this.tabs(EVENT_FILTERS, this.eventFilter)}`;
+      const title = `${c.bold(c.ink("Events"))}  ${c.soft(`${events.length} events · recorded session history`)}   ${this.tabs(EVENT_FILTERS, this.eventFilter)}`;
       const columns = c.faint(
         "   #     time      type             what                                                   ≈tok  model sees",
       );
@@ -903,7 +952,11 @@ export class RequestInspector implements Component {
         () => {
           const lines =
             this.eventSection === 1
-              ? eventViewLines(events, this.eventSelected)
+              ? eventViewLines(
+                  events,
+                  this.eventSelected,
+                  this.sessions()[this.sessionIndex]?.recordingDirectory,
+                )
               : this.eventSection === 2
                 ? eventLines(events, this.eventSelected)
                 : projectionLines(events, this.eventSelected, this.deps.currentProvider?.());
@@ -953,19 +1006,33 @@ export class RequestInspector implements Component {
 
     if (this.mode === "composition") {
       const wb = this.workbench();
-      const window = this.deps.contextWindow?.();
-      const size = `≈${fmtTok(wb.total)}${window ? ` of ${fmtTok(window)} · ${pctOf(wb.total, window)}` : " tok"}`;
-      const cacheNote =
-        wb.prefixTokens === undefined
+      const hasImages = wb.rows.some(
+        (r) =>
+          r.kind === "message" && r.row.message.role === "user" && !!r.row.message.images?.length,
+      );
+      const main = events === this.deps.events();
+      const window = main ? this.deps.contextWindow?.() : undefined;
+      const size = `≈${fmtTok(wb.total)}${hasImages ? " text tok" : " tok"}${window ? ` of ${fmtTok(window)} · ${pctOf(wb.total, window)}${hasImages ? " text only" : ""}` : ""}`;
+      const cacheNote = !main
+        ? ""
+        : wb.prefixTokens === undefined
           ? c.faint("nothing sent yet")
           : wb.broken
             ? c.jin(`same prefix ≈${fmtTok(wb.prefixTokens)} · changed tail`)
             : c.faint(`same prefix ≈${fmtTok(wb.prefixTokens)}`);
-      const title = `${c.bold(c.ink("Context"))}  ${c.soft("what the model sees on the next request")}   ${c.soft(size)}   ${cacheNote}`;
+      const title = `${c.bold(c.ink("Context"))}  ${c.soft(main ? "what the model sees on the next request" : "derived from sub-session history")}   ${c.soft(size)}   ${cacheNote}`;
       const columns = c.faint(
         "   #     what                                                              tok  share",
       );
       const head = withSession([pad(title), pad(columns), pad(rule)]);
+      if (hasImages)
+        head.splice(
+          1,
+          0,
+          pad(c.jin("Image tokens unknown before next request · estimate covers text only")),
+        );
+      if (!main)
+        head.splice(1, 0, pad(c.soft("Read-only · messages only; tools in request details")));
       const last = this.records().at(-1);
       if (last)
         head.splice(
@@ -977,6 +1044,13 @@ export class RequestInspector implements Component {
           ]
             .flatMap((line) => wrapTextWithAnsi(c.soft(line), inner))
             .map(pad),
+        );
+      const measured = last?.response?.usage ?? last?.compaction?.usage;
+      if (measured)
+        head.splice(
+          1,
+          0,
+          pad(c.soft(`Last API input: ${fmtTok(measured.inputTokens)} tok measured by provider`)),
         );
       const row = this.selectedRow();
       const maxTok = wb.rows.reduce(
@@ -990,7 +1064,7 @@ export class RequestInspector implements Component {
         ? previewLines(events, wb, row, {
             width: inner,
             lines: PREVIEW_LINES - 1,
-            busy: this.busyNote,
+            busy: this.busyNote ?? (!main ? this.contextReadOnlyReason() : undefined),
           })
         : [];
       const previewBox = fill(preview.map(pad), PREVIEW_LINES);
@@ -1031,39 +1105,59 @@ export class RequestInspector implements Component {
         return this.render(width);
       }
       const crows = this.composition().rows;
-      const items = actionsFor(events, r, crows.length);
-      const sel = Math.min(this.actionSelected, items.length - 1);
+      const items = this.contextActions(r, crows.length);
+      const sel = Math.max(
+        0,
+        items.findIndex((item) => item.action === this.actionSelected),
+      );
+      this.actionSelected = items[sel]?.action ?? "view";
       const m = r.message;
-      const title = `${c.bold(c.ink(`#${r.event} ${roleLabel(m)}`))}  ${c.soft(`≈${messageTokens(m)} tok${m.edited ? ` · ${c.jin("edited")}` : ""}`)}`;
-      const head = [pad(title), focusLine, pad(rule)];
-      const previewSrc = m.content
-        ? m.content.split("\n").slice(0, 6)
-        : m.role === "assistant" && m.toolCalls.length > 0
-          ? m.toolCalls.map((t) => `${G.call} ${t.name} ${JSON.stringify(t.args)}`)
-          : ["(empty)"];
+      const edited = editState(events).edits.has(r.event);
+      const title = `${c.bold(c.ink(`#${r.event} ${roleLabel(m)}`))}  ${c.soft(`≈${messageTokens(m)} tok${edited ? ` · ${c.jin("edited")}` : ""}${r.stages.includes("unknown-result") ? " · result unknown" : ""}`)}`;
+      const head = rows < 12 ? [pad(title), pad(rule)] : [pad(title), focusLine, pad(rule)];
       const chosen = items[sel] as ActionItem;
-      const body = [
-        ...previewSrc.map((l) => pad(c.faint(`  ${truncateToWidth(l, inner - 4, "…")}`))),
-        pad(""),
-        pad(c.soft("Actions")),
-        ...items.map((it, i) =>
-          pad(
-            i === sel
-              ? `  ${c.zhu(G.cursor)} ${c.bold(c.ink(`${i + 1}  ${it.label.padEnd(24)}`))} ${c.faint(it.hint)}`
-              : `    ${c.soft(`${i + 1}  ${it.label.padEnd(24)}`)} ${c.faint(it.hint)}`,
-          ),
-        ),
-        pad(""),
-        // 后果一行说不完就换行,不截断:这是面板存在的理由。
+      const foot = [
+        pad(rule),
         ...wrapTextWithAnsi(
-          `${c.soft("If you do this")}  ${c.faint(consequenceOf(chosen.action, r, crows, events, this.deps.currentProvider?.()))}`,
+          c.faint(
+            rows < 12
+              ? "↑↓ choose · Enter · Esc"
+              : "↑↓ or 1–9 choose · Enter do it · PgUp/PgDn details · Esc back",
+          ),
           inner,
         ).map(pad),
       ];
-      const foot = [pad(rule), pad(c.faint("↑↓ or 1–9 choose · Enter do it · Esc back"))];
-      const viewport = rows - head.length - foot.length;
+      const available = Math.max(3, rows - head.length - foot.length);
+      const listHeight = Math.min(items.length, Math.max(1, Math.floor(available / 2)));
+      const start = windowStart(sel, items.length, listHeight);
+      const list = items.slice(start, start + listHeight).map((item, i) => {
+        const index = start + i;
+        return pad(
+          index === sel
+            ? `${c.zhu(G.cursor)} ${c.bold(c.ink(`${index + 1}  ${item.label}`))}`
+            : `  ${c.soft(`${index + 1}  ${item.label}`)}`,
+        );
+      });
+      const reason = this.contextReadOnlyReason();
+      const details = [
+        ...(reason ? [c.jin(reason)] : []),
+        c.soft(chosen.hint),
+        c.faint(consequenceOf(chosen.action, r, crows, events, this.deps.currentProvider?.())),
+      ].flatMap((line) => wrapTextWithAnsi(line, inner));
+      const viewport = Math.max(1, available - listHeight - 1);
       this.lastViewport = viewport;
-      return [...head, ...fill(body.slice(0, viewport), viewport), ...foot];
+      this.scroll = Math.min(this.scroll, Math.max(0, details.length - viewport));
+      return [
+        ...head,
+        ...list,
+        pad(
+          c.soft(
+            `Details ${this.scroll + 1}-${Math.min(details.length, this.scroll + viewport)}/${details.length}`,
+          ),
+        ),
+        ...fill(details.slice(this.scroll, this.scroll + viewport).map(pad), viewport),
+        ...foot,
+      ];
     }
 
     if (this.mode === "message") {

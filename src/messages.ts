@@ -29,18 +29,52 @@ export type Message =
       edited?: true;
     };
 
+export type EditField = Extract<AgentEvent, { type: "context/edit" }>["field"];
+
+/** 上下文字段的事实:主字段在前;只读思考仍可比较原文,但不能作为编辑入口。 */
+export function contextFields(
+  event: AgentEvent | undefined,
+  edits: Partial<Record<EditField, string>> = {},
+): { field: EditField; original: string; current: string; readOnlyReason?: string }[] {
+  const field = (name: EditField, original: string, readOnlyReason?: string) => ({
+    field: name,
+    original,
+    current: edits[name] ?? original,
+    ...(readOnlyReason && { readOnlyReason }),
+  });
+  switch (event?.type) {
+    case "assistant/message":
+      return [
+        field("text", event.text),
+        field(
+          "reasoning",
+          event.reasoning ?? "",
+          event.reasoningKind === "full"
+            ? undefined
+            : `thinking is ${event.reasoningKind === "summary" ? "a summary" : "of unknown kind"}: the model reads the opaque block, so editing it changes nothing. To steer, append a message, or use a model that echoes full thinking (DeepSeek)`,
+        ),
+      ];
+    case "user/message":
+      return [field("content", event.text)];
+    case "tool/result":
+    case "tool/unresolved":
+      return [field("content", event.content)];
+    case "session/start":
+      return [field("system", event.system)];
+    default:
+      return [];
+  }
+}
+
 /** 编辑状态:每个目标事件各字段的最新值,以及被丢弃的事件下标。 */
 export function editState(
   events: readonly AgentEvent[],
   upTo = events.length,
 ): {
-  edits: Map<number, Partial<Record<"text" | "reasoning" | "content" | "system", string>>>;
+  edits: Map<number, Partial<Record<EditField, string>>>;
   dropped: Set<number>;
 } {
-  const edits = new Map<
-    number,
-    Partial<Record<"text" | "reasoning" | "content" | "system", string>>
-  >();
+  const edits = new Map<number, Partial<Record<EditField, string>>>();
   const dropped = new Set<number>();
   for (let k = 0; k < upTo; k++) {
     const e = events[k];
@@ -51,15 +85,19 @@ export function editState(
       edits.set(e.target, cur);
     } else if (e.type === "context/drop") {
       dropped.add(e.target);
-      const t = events[e.target];
-      if (t?.type === "assistant/message") {
-        // 丢一条带调用的助手消息,它的应答也得一起走,否则序列非法。
-        const ids = new Set(t.toolCalls.map((c) => c.id));
-        for (let i = 0; i < upTo; i++) {
-          const x = events[i];
-          if (x?.type === "tool/result" && ids.has(x.callId)) dropped.add(i);
-          if (x?.type === "tool/unresolved" && x.callEvent === e.target) dropped.add(i);
-        }
+    }
+  }
+  // 结果归属于最近一次同 ID 调用。丢弃旧调用时不能删掉后续轮次复用 ID 的结果。
+  if ([...dropped].some((i) => events[i]?.type === "assistant/message")) {
+    const owners = new Map<string, number>();
+    for (let i = 0; i < upTo; i++) {
+      const e = events[i];
+      if (e?.type === "assistant/message") {
+        for (const call of e.toolCalls) owners.set(call.id, i);
+      } else if (e?.type === "tool/result" && dropped.has(owners.get(e.callId) ?? -1)) {
+        dropped.add(i);
+      } else if (e?.type === "tool/unresolved" && dropped.has(e.callEvent)) {
+        dropped.add(i);
       }
     }
   }

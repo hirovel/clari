@@ -3,6 +3,7 @@
 // 由测试逐项核对它认得表里的每个键(tests/settings.test.ts)。加一个开关就是加一行,屏上不会漏。
 // 键名是 defaults 下的路径:foldSteps、facts.repeats、prompt.sections、tools.disable。
 import type { Preset } from "./config.js";
+import { DEFAULT_STATUS_WIDGETS, STATUS_STYLES, STATUS_WIDGETS } from "./status-bar.js";
 
 export type SettingGroup = "display" | "context" | "tools" | "strategy" | "notifications" | "model";
 
@@ -36,6 +37,22 @@ export const GROUP_ORDER: readonly SettingGroup[] = [
 ];
 
 const onOff: readonly SettingValue[] = [{ label: "on" }, { label: "off" }];
+
+export const DEFAULT_SKILL_SOURCES: Record<string, "on" | "off"> = {
+  "user-clari": "on",
+  "user-claude": "on",
+  "project-agents": "on",
+  "project-claude": "on",
+};
+
+export function parseSkillSources(value: unknown): Record<string, "on" | "off"> {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("Skill sources must be an object of directory: on/off pairs.");
+  for (const [name, enabled] of Object.entries(value))
+    if (!name.trim() || (enabled !== "on" && enabled !== "off"))
+      throw new Error("Each skill source needs a nonempty name or path and on/off value.");
+  return value as Record<string, "on" | "off">;
+}
 
 export const SETTINGS: readonly SettingDef[] = [
   {
@@ -90,6 +107,33 @@ export const SETTINGS: readonly SettingDef[] = [
     ],
     note: "newest steps stay open, older ones fold to a ledger line · 0 never",
     builtin: 3,
+    scope: "now",
+  },
+  {
+    key: "statusStyle",
+    group: "display",
+    type: "enum",
+    values: STATUS_STYLES.map(({ label, note }) => ({ label, note })),
+    note: "status-bar layout; preview each choice before applying",
+    builtin: "rail",
+    scope: "now",
+  },
+  {
+    key: "statusWidgets",
+    group: "display",
+    type: "list",
+    items: STATUS_WIDGETS.map(({ id }) => id),
+    note: "status-bar readings; errors and recording failures always remain visible",
+    builtin: DEFAULT_STATUS_WIDGETS,
+    scope: "now",
+  },
+  {
+    key: "showCostEstimate",
+    group: "display",
+    type: "bool",
+    values: onOff,
+    note: "show a token-based cost estimate, never an exact bill; incomplete usage hides the amount",
+    builtin: false,
     scope: "now",
   },
   {
@@ -213,6 +257,15 @@ export const SETTINGS: readonly SettingDef[] = [
     ],
     note: "who chooses when to load a skill",
     builtin: "manual",
+    scope: "now",
+  },
+  {
+    key: "prompt.skills.sources",
+    group: "context",
+    type: "map",
+    values: onOff,
+    note: "skill discovery directories; enable, add or remove sources",
+    builtin: DEFAULT_SKILL_SOURCES,
     scope: "now",
   },
   {
@@ -483,6 +536,7 @@ export function parseSetting(def: SettingDef, text: string): unknown {
         if (t === "all") return "all";
         if (t === "[]" || t === "none") return [];
       }
+      if (def.key === "statusWidgets" && (t === "[]" || t === "none")) return [];
       if (/^(none|unset|-)$/i.test(t)) return undefined;
       const items = t.split(/[\s,]+/).filter(Boolean);
       if (def.items) {
@@ -492,6 +546,7 @@ export function parseSetting(def: SettingDef, text: string): unknown {
       return items;
     }
     case "map": {
+      if (def.key === "prompt.skills.sources") return parseSkillSources(JSON.parse(t));
       // "read count bash tail" 或 "read=count"
       if (/^(none|unset|-)$/i.test(t)) return undefined;
       const parts = t.split(/[\s,=]+/).filter(Boolean);

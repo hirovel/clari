@@ -1,12 +1,12 @@
-// SSE 读流(两个适配器共用):按行切分、逐行旁路(trace)、停滞超时、data 行的 JSON 解析。
+// SSE 读流(三个适配器共用):按行切分、逐行旁路(trace)、停滞超时、data 行的 JSON 解析。
 // 网络层的三种失败在这里归一成 ProviderError:停滞(可重试)、烂 JSON(不可重试)、打断(交给调用方判定)。
-import { ProviderError } from "./errors.js";
+import { errorMessage, isRetryable, ProviderError } from "./errors.js";
 
 export const DEFAULT_STALL_MS = 90_000;
 
 export class StreamStall extends ProviderError {
   constructor(ms: number) {
-    super(`stream stalled: ${ms}ms 内没有收到任何字节`, { retryable: true });
+    super(`stream stalled: no bytes received for ${ms}ms`, { retryable: true });
     this.name = "StreamStall";
   }
 }
@@ -61,7 +61,7 @@ function parseData(data: string): unknown {
     return JSON.parse(data);
   } catch {
     // 服务器发来一行解析不了的东西:不猜、不跳过。原文随错误一起进日志。
-    throw new ProviderError(`provider stream: 无法解析的一行 ${data.slice(0, 200)}`, {
+    throw new ProviderError(`provider stream: invalid JSON data line ${data.slice(0, 200)}`, {
       retryable: false,
       body: data,
     });
@@ -88,10 +88,17 @@ async function nextChunk(
   }
 }
 
-/** 停滞发生在已经吐字之后就不能重试(会重复输出);之前可以。 */
-export function stallToError(err: unknown, streamed: boolean): unknown {
-  if (err instanceof StreamStall && streamed) {
-    return new ProviderError(err.message, { retryable: false });
+/** 已向界面输出内容后,停滞、断连或流内错误都不能自动重试(会重复输出)。 */
+export function streamError(err: unknown, streamed: boolean): unknown {
+  if (streamed && isRetryable(err)) {
+    const error = new ProviderError(
+      err instanceof StreamStall
+        ? err.message
+        : `provider stream interrupted: ${errorMessage(err)}`,
+      { retryable: false, ...(err instanceof ProviderError && err.body && { body: err.body }) },
+    );
+    error.cause = err;
+    return error;
   }
   return err;
 }

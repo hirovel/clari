@@ -11,7 +11,7 @@ import {
 } from "../src/config.js";
 import { COMPACTION_TRIGGERS, type CompactionTrigger, type ExecutionPolicy } from "../src/loop.js";
 import { EFFORT_LEVELS, type EffortLevel, parseEffort } from "../src/provider.js";
-import { SETTINGS, setSetting } from "../src/settings.js";
+import { parseSkillSources, SETTINGS, setSetting } from "../src/settings.js";
 import { isToolPromptStyle } from "./tool-prompts.js";
 
 export const PROMPT_SECTION_NAMES: PromptSectionName[] = [
@@ -44,6 +44,9 @@ export type CommonArgs = {
   planReminder?: number;
   /** 账簿保持展开的最新步数(配置 foldSteps)。 */
   foldSteps?: number;
+  statusStyle?: Preset["statusStyle"];
+  statusWidgets?: string[];
+  showCostEstimate?: boolean;
   /** 屏幕模式(--screen / 配置 screen)。 */
   screen?: "alt" | "main";
   /** 桌面通知(--notify / 配置 notify)。 */
@@ -83,6 +86,7 @@ export type CommonArgs = {
   skillsMode?: "manual" | "auto";
   skillsInclude?: "all" | string[];
   skillsLoad?: "read" | "tool";
+  skillsSources?: Record<string, "on" | "off">;
   /** 执行槽:sequential 缺省;parallel = 并行安全的相邻只读调用同时跑。 */
   execution?: ExecutionPolicy;
   /** 扩展模块路径(可多个):default 导出一个函数,返回要加的工具与槽实现。 */
@@ -114,6 +118,7 @@ export function settingsFromArgs(args: CommonArgs): Preset {
     "prompt.skills.mode": args.skillsMode,
     "prompt.skills.include": args.skillsInclude,
     "prompt.skills.load": args.skillsLoad,
+    "prompt.skills.sources": args.skillsSources,
   };
   let snapshot: Preset = {};
   for (const def of SETTINGS)
@@ -219,6 +224,12 @@ export function parseCommonArgs(argv: string[]): CommonArgs {
       case "--fold":
         out.fold = true;
         out.foldExplicit = true;
+        break;
+      case "--show-cost-estimate":
+        out.showCostEstimate = true;
+        break;
+      case "--hide-cost-estimate":
+        out.showCostEstimate = false;
         break;
       case "--screen": {
         const v = argv[++i];
@@ -362,7 +373,7 @@ Options
   --compaction llm|clear|pipeline|./strategy.mjs   default llm
   --resume <session file> | --continue   resume a session and keep appending to the same file
   --system-prompt <file> | --append-system-prompt <file>
-  --approve all|policy|ask       all (default, pi stance) = never ask; policy = allow/deny rules from config, ask when no rule matches; ask = every call
+  --approve all|policy|ask       all (default) = never ask; policy = allow/deny rules from config, ask when no rule matches; ask = every call
   --tool-prompts brief|explain|rules   tool description level (default explain); edit single descriptions with /toolprompts edit <tool>
   --preset name                  apply the parameter set presets.name from config; explicit flags still win
   --memory | --no-memory         cross-session memory (memory section in AGENTS.md + remember tool); default off
@@ -378,6 +389,7 @@ Options
   --subagent                     add the task tool (sub-agents)
   --no-save-inputs               disable local draft and pending-input saving (default: on)
   --fold                         tool results start folded (the default; config fold: false starts unfolded; Ctrl+O toggles)
+  --show-cost-estimate           show a token-based estimate, not the provider bill (default: off)
   --screen alt|main              alt (default): fixed header and status, own scrolling, mouse, search; main keeps the terminal scrollback
   --notify unfocused|always|off  desktop notification when a turn ends or approval is needed (default: only while the terminal is unfocused)
   --json                         one-shot mode: print a structured result
@@ -386,12 +398,14 @@ Options
 
 Config
   ${DEFAULT_CONFIG_PATH}
-  CLARI_CONFIG overrides the path; keys come from the env var named by apiKeyEnv, or /key provider secret in the UI
+  CLARI_CONFIG overrides the path; keys come from the env var named by apiKeyEnv, or /login in the UI
   every option above has a config counterpart: defaults.<name> is the global default, presets.<name>.<option> a named set; flags > preset > defaults > built-in
   clari sessions [--dir D]        list session files; clari sessions prune --older-than 30d | --keep N [--yes]
   session files default to ./sessions/; override with sessionsDir in config or CLARI_SESSIONS
   prompt templates: ~/.clari/prompts/*.md and <git root>/.clari/prompts/*.md; /name args in the UI
-  skills: ~/.clari/skills/<name>/SKILL.md and <git root>/.agents/skills/<name>/SKILL.md; listed in the system prompt's skills section`;
+  skills (first name wins): ~/.clari/skills, ~/.claude/skills, <git root>/.agents/skills, <git root>/.claude/skills
+  each location loads direct <name>/SKILL.md; invoke with /name args (manual by default); /inspect skills shows sources
+  automatic skills: enable in /settings; selected catalogs go in the system prompt (read mode) or the skill tool definition (tool mode)`;
 
 export function applyPreset(args: CommonArgs, config: KernelConfig): CommonArgs {
   const out: CommonArgs = { ...args };
@@ -448,6 +462,12 @@ export function applyPreset(args: CommonArgs, config: KernelConfig): CommonArgs 
       out.planReminder = layer.planReminder;
     if (out.foldSteps === undefined && layer.foldSteps !== undefined)
       out.foldSteps = layer.foldSteps;
+    if (out.statusStyle === undefined && layer.statusStyle !== undefined)
+      out.statusStyle = layer.statusStyle;
+    if (out.statusWidgets === undefined && layer.statusWidgets !== undefined)
+      out.statusWidgets = [...layer.statusWidgets];
+    if (out.showCostEstimate === undefined && layer.showCostEstimate !== undefined)
+      out.showCostEstimate = layer.showCostEstimate;
     if (out.screen === undefined && layer.screen !== undefined) out.screen = layer.screen;
     if (out.notify === undefined && layer.notify !== undefined) out.notify = layer.notify;
     if (out.toolPrompts === undefined && layer.toolPrompts) out.toolPrompts = layer.toolPrompts;
@@ -498,5 +518,6 @@ export function applyPreset(args: CommonArgs, config: KernelConfig): CommonArgs 
   if (skills.mode) out.skillsMode = skills.mode;
   if (skills.include !== undefined) out.skillsInclude = skills.include;
   if (skills.load) out.skillsLoad = skills.load;
+  if (skills.sources !== undefined) out.skillsSources = parseSkillSources(skills.sources);
   return out;
 }

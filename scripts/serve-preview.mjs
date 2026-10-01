@@ -19,4 +19,4 @@ createServer(async (req, res) => {
     res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
     res.end("404");
   }
-}).listen(PORT, () => console.log(`预览 http://localhost:${PORT}/`));
+}).listen(PORT, "127.0.0.1", () => console.log(`预览 http://localhost:${PORT}/`));

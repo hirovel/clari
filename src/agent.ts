@@ -5,6 +5,7 @@ import type { EventLog } from "./log.js";
 import { runTurn, type TurnDeps, type TurnOutcome } from "./loop.js";
 import { editState } from "./messages.js";
 import type { EffortLevel, Provider } from "./provider.js";
+import { RECORDING_FULL } from "./recording.js";
 import type { Tool } from "./tools.js";
 
 export type AgentOptions = {
@@ -81,9 +82,13 @@ export class Agent {
 
   async continuePending(): Promise<TurnOutcome | undefined> {
     if (!this.queue.length) return;
-    for (const item of this.queue) item.paused = false;
-    this.changed();
-    if (this.active) return this.active;
+    if (this.stopping) throw new Error("cannot continue pending while stopping; wait for idle");
+    this.ensureStorage();
+    if (this.active) {
+      for (const item of this.queue) item.paused = false;
+      this.changed();
+      return this.active;
+    }
     const first = this.queue[0];
     if (!first) return;
     this.opts.log.append({
@@ -94,12 +99,28 @@ export class Agent {
       ...(first.images?.length && { images: first.images }),
     });
     this.queue.shift();
+    for (const item of this.queue) item.paused = false;
     this.changed();
     return this.run();
   }
 
   get running(): boolean {
     return this.active !== undefined;
+  }
+
+  get stopping(): boolean {
+    return this.running && (this.ac?.signal.aborted ?? false);
+  }
+
+  get storagePaused(): boolean {
+    return this.opts.log.recording?.full ?? false;
+  }
+
+  private ensureStorage(): void {
+    if (!this.storagePaused) return;
+    this.opts.log.recording?.flush();
+    if (this.storagePaused)
+      throw new Error("Recording buffer full; saving must recover before new work can start");
   }
 
   async waitForIdle(): Promise<void> {
@@ -181,19 +202,20 @@ export class Agent {
     text: string,
     opts: { deliverAs?: DeliverAs; inputId?: string; images?: ImageInput[] } = {},
   ): Promise<TurnOutcome> {
+    this.ensureStorage();
     const log = this.opts.log;
     if (this.active) {
       this.queue.push({
         id: opts.inputId ?? randomUUID(),
         text,
         deliverAs: opts.deliverAs ?? "steer",
-        paused: false,
+        paused: this.stopping,
         ...(opts.images?.length && { images: structuredClone(opts.images) }),
       });
       this.changed();
       return this.active;
     }
-    // 暂停内容必须手动继续;新输入不会夹带中断或恢复留下的消息。
+    // 暂停内容必须手动继续;新输入不会夹带中断、失败或恢复留下的消息。
     for (const leftover of this.queue.filter((item) => !item.paused)) {
       log.append({
         type: "user/message",
@@ -221,6 +243,7 @@ export class Agent {
    */
   async retry(): Promise<TurnOutcome> {
     if (this.active) throw new Error("cannot retry while running; interrupt first");
+    this.ensureStorage();
     const events = this.opts.log.events;
     const dropped = editState(events).dropped;
     let target = -1;
@@ -235,9 +258,26 @@ export class Agent {
     return this.run();
   }
 
-  private async run(): Promise<TurnOutcome> {
+  /** 手动压缩也占用同一个运行周期:Esc、退出等待和排队输入与普通 turn 一致。 */
+  async compact(instructions = ""): Promise<TurnOutcome> {
+    if (this.active) throw new Error("cannot compact while running; interrupt first");
+    if (!this.opts.compaction) throw new Error("Compaction is not configured");
+    this.ensureStorage();
+    return this.run(instructions);
+  }
+
+  private async run(manualCompaction?: string): Promise<TurnOutcome> {
     const log = this.opts.log;
-    this.ac = new AbortController();
+    const controller = new AbortController();
+    this.ac = controller;
+    const stopIfFull = () => {
+      if (!log.recording?.full || controller.signal.aborted) return;
+      for (const item of this.queue) item.paused = true;
+      controller.abort(RECORDING_FULL);
+      this.changed();
+    };
+    const stopWatching = log.recording?.subscribe(stopIfFull);
+    stopIfFull();
     const unsubscribe = log.subscribe((event) => {
       if (event.type !== "user/message" || !event.inputId) return;
       this.queue = this.queue.filter((item) => item.id !== event.inputId);
@@ -247,7 +287,7 @@ export class Agent {
       log,
       provider: this.opts.provider,
       tools: () => this.tools,
-      signal: this.ac.signal,
+      signal: controller.signal,
       drainQueue: (boundary) => {
         const take = (q: PendingInput) =>
           !q.paused && (boundary === "turn" || q.deliverAs === "steer");
@@ -260,6 +300,7 @@ export class Agent {
       },
       ...(this.opts.slots && { slots: this.opts.slots }),
       ...(this.opts.compaction && { compaction: this.opts.compaction }),
+      ...(manualCompaction !== undefined && { manualCompaction }),
       ...(this.opts.onDelta && { onDelta: this.opts.onDelta }),
       ...(this.opts.onReasoning && { onReasoning: this.opts.onReasoning }),
       ...(this.opts.onRaw && { onRaw: this.opts.onRaw }),
@@ -268,19 +309,37 @@ export class Agent {
       ...(this.opts.agent && { agent: this.opts.agent }),
       ...(this.opts.facts && { facts: this.opts.facts }),
       ...(this.opts.planReminder !== undefined && { planReminder: this.opts.planReminder }),
-    }).finally(async () => {
-      await log.checkpoint();
-      unsubscribe();
-      this.active = undefined;
-      this.ac = undefined;
-      this.changed();
-    });
+    })
+      .catch((error) => {
+        // 失败后保留尚未投递的消息,与中断一样等待用户明确继续。
+        for (const item of this.queue) item.paused = true;
+        throw error;
+      })
+      .finally(async () => {
+        try {
+          if (controller.signal.reason === RECORDING_FULL)
+            log.append({
+              type: "ext/event",
+              at: now(),
+              source: "recording",
+              kind: "buffer/full",
+              payload: { pendingBytes: log.recording?.pendingBytes },
+            });
+          await log.checkpoint();
+        } finally {
+          stopWatching?.();
+          unsubscribe();
+          this.active = undefined;
+          this.ac = undefined;
+          this.changed();
+        }
+      });
     return this.active;
   }
 
   /** 即时打断:interrupt 事件只给人看,模型看到的是打断的后果。 */
   interrupt(): void {
-    if (!this.running) return;
+    if (!this.running || this.ac?.signal.aborted) return;
     for (const item of this.queue) item.paused = true;
     try {
       this.changed();

@@ -1,17 +1,12 @@
-// fetch 工具:抓一个 URL,按 Content-Type 分流成可读文本。安全边界全是配置项:
-// 私网地址拒绝(DNS 解析后查特殊用途地址段,重定向逐跳再查)、字节上限、超时、重定向只在同主机内自动跟、
-// 每主机限流。不用小模型摘要:模型看到的就是页面,结果按 read 同一套截断策略分页。
+// fetch 工具:抓一个 URL,按 Content-Type 分流成可读文本。URL、字节上限、超时与重定向受控,
+// 不用小模型摘要:模型看到的就是页面,结果按 read 同一套截断策略分页。
 // 会话内缓存 15 分钟(分页续读不重下);GitHub blob 改写成 raw;Cloudflare 403 用浏览器 UA 重试一次。
-import { lookup } from "node:dns/promises";
-import { isIP } from "node:net";
 import { Type } from "@sinclair/typebox";
 import { defineTool, described } from "../../src/tools.js";
 import { htmlToText } from "./html.js";
 import { capLineLength, keepHead, type TruncationPolicy } from "./truncate.js";
 
 export type FetchConfig = {
-  /** 允许回环与私网地址(本机开发服务器、测试)。缺省拒绝。 */
-  allowPrivate?: boolean;
   /** 整个请求(含读 body)的超时毫秒数,缺省 30000。 */
   timeoutMs?: number;
   /** body 字节上限,缺省 5 MB;超过即中断并注明。 */
@@ -21,8 +16,6 @@ export type FetchConfig = {
   userAgent?: string;
   /** 会话内缓存的存活毫秒数,缺省 15 分钟;0 关。 */
   cacheTtlMs?: number;
-  /** 每主机每分钟最多几次真实请求,缺省 10;0 不限。 */
-  perHostPerMinute?: number;
 };
 
 const DEFAULTS = {
@@ -30,49 +23,12 @@ const DEFAULTS = {
   maxBytes: 5 * 1024 * 1024,
   maxRedirects: 5,
   cacheTtlMs: 15 * 60 * 1000,
-  perHostPerMinute: 10,
   userAgent: "Mozilla/5.0 (compatible; clari/0.1; +https://github.com/hirovel/clari)",
 };
 const BROWSER_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 /** 缓存总量上限(字符数)。 */
 const CACHE_CHARS = 20 * 1024 * 1024;
-
-/** IANA 特殊用途 IPv4 段与常见 IPv6 段:回环、私网、链路本地、CGNAT、保留。 */
-const PRIVATE_V4: [number, number][] = [
-  ["0.0.0.0", 8],
-  ["10.0.0.0", 8],
-  ["100.64.0.0", 10],
-  ["127.0.0.0", 8],
-  ["169.254.0.0", 16],
-  ["172.16.0.0", 12],
-  ["192.0.0.0", 24],
-  ["192.168.0.0", 16],
-  ["198.18.0.0", 15],
-  ["240.0.0.0", 4],
-].map(([ip, bits]) => [v4ToInt(ip as string), bits as number]);
-
-function v4ToInt(ip: string): number {
-  return ip.split(".").reduce((n, part) => n * 256 + Number(part), 0) >>> 0;
-}
-
-export function isPrivateAddress(ip: string): boolean {
-  const family = isIP(ip);
-  if (family === 4) {
-    const n = v4ToInt(ip);
-    return PRIVATE_V4.some(([base, bits]) => n >>> (32 - bits) === base >>> (32 - bits));
-  }
-  if (family === 6) {
-    const low = ip.toLowerCase();
-    if (low === "::1" || low === "::") return true;
-    if (low.startsWith("fc") || low.startsWith("fd")) return true; // fc00::/7
-    if (/^fe[89ab]/.test(low)) return true; // fe80::/10
-    const mapped = low.match(/^(?:::ffff:)(\d+\.\d+\.\d+\.\d+)$/);
-    if (mapped) return isPrivateAddress(mapped[1] as string);
-    return false;
-  }
-  return false;
-}
 
 /** GitHub blob 与 gist 页面是 JS 壳,改写成 raw 才有正文。返回改写后的 URL 与说明。 */
 export function rewriteUrl(u: URL): { url: URL; note?: string } {
@@ -124,9 +80,6 @@ export type FetchToolOptions = {
   convert?: (html: string, url: string) => string;
   truncate?: TruncationPolicy;
   maxLineChars?: number;
-  /** 测试注入。 */
-  fetchImpl?: typeof fetch;
-  resolve?: (host: string) => Promise<string[]>;
   now?: () => number;
 };
 
@@ -135,45 +88,8 @@ export function createFetchTool(opts: FetchToolOptions = {}) {
   const convert = opts.convert ?? htmlToText;
   const truncate = opts.truncate ?? keepHead();
   const cap = capLineLength(opts.maxLineChars ?? 2000);
-  const doFetch = opts.fetchImpl ?? fetch;
   const clock = opts.now ?? Date.now;
-  const resolveHost =
-    opts.resolve ??
-    (async (host: string) =>
-      isIP(host) ? [host] : (await lookup(host, { all: true })).map((a) => a.address));
   const cache = new Map<string, Fetched>();
-  const hits = new Map<string, number[]>();
-
-  const guard = async (u: URL): Promise<void> => {
-    if (u.protocol !== "http:" && u.protocol !== "https:")
-      throw new Error(`only http and https URLs are fetched, got ${u.protocol}`);
-    if (cfg.allowPrivate) return;
-    const host = u.hostname.replace(/^\[|\]$/g, "");
-    let addrs: string[];
-    try {
-      addrs = await resolveHost(host);
-    } catch (err) {
-      throw new Error(`cannot resolve ${host}: ${(err as Error).message}`);
-    }
-    if (host === "localhost" || addrs.some(isPrivateAddress)) {
-      throw new Error(
-        `${host} resolves to a private or loopback address; refused (set fetch.allowPrivate to allow)`,
-      );
-    }
-  };
-
-  const rateLimit = (host: string): void => {
-    if (!cfg.perHostPerMinute) return;
-    const t = clock();
-    const recent = (hits.get(host) ?? []).filter((x) => t - x < 60000);
-    if (recent.length >= cfg.perHostPerMinute) {
-      throw new Error(
-        `rate limit: more than ${cfg.perHostPerMinute} requests to ${host} in 60 s; wait before fetching it again`,
-      );
-    }
-    recent.push(t);
-    hits.set(host, recent);
-  };
 
   const cacheGet = (key: string): Fetched | undefined => {
     const hit = cache.get(key);
@@ -196,27 +112,39 @@ export function createFetchTool(opts: FetchToolOptions = {}) {
     }
   };
 
-  const request = async (url: URL, signal: AbortSignal, ua: string): Promise<Response> =>
-    doFetch(url.toString(), {
-      redirect: "manual",
-      signal,
-      headers: {
-        "User-Agent": ua,
-        Accept: "text/html, text/plain, text/markdown, application/json;q=0.9, */*;q=0.1",
-      },
-    });
+  const request = async (url: URL, signal: AbortSignal, ua: string): Promise<Response> => {
+    try {
+      return await fetch(url.toString(), {
+        redirect: "manual",
+        signal,
+        headers: {
+          "User-Agent": ua,
+          Accept: "text/html, text/plain, text/markdown, application/json;q=0.9, */*;q=0.1",
+        },
+      });
+    } catch (error) {
+      if (error instanceof Error && error.cause instanceof Error) {
+        const cause = error.cause as Error & { code?: string };
+        throw new Error(`fetch ${url}: ${cause.message || cause.code || cause.name}`, {
+          cause: error,
+        });
+      }
+      throw error;
+    }
+  };
 
   const download = async (
     start: URL,
     ctxSignal: AbortSignal | undefined,
+    maxBytes: number,
     onChunk?: (data: Uint8Array) => void,
   ): Promise<Fetched> => {
     const notes: string[] = [];
     let current = start;
     let response: Response | undefined;
     for (let hop = 0; ; hop++) {
-      await guard(current);
-      rateLimit(current.host);
+      if (current.protocol !== "http:" && current.protocol !== "https:")
+        throw new Error(`only http and https URLs are fetched, got ${current.protocol}`);
       const signal = ctxSignal
         ? AbortSignal.any([ctxSignal, AbortSignal.timeout(cfg.timeoutMs)])
         : AbortSignal.timeout(cfg.timeoutMs);
@@ -279,7 +207,7 @@ export function createFetchTool(opts: FetchToolOptions = {}) {
           onChunk?.(value);
           chunks.push(value);
           total += value.byteLength;
-          if (total > cfg.maxBytes) {
+          if (total > maxBytes) {
             cut = true;
             await reader.cancel().catch(() => {});
             break;
@@ -319,7 +247,7 @@ export function createFetchTool(opts: FetchToolOptions = {}) {
       core:
         "Fetch a URL over http(s) and return its content as text. HTML is converted to markdown; JSON is pretty-printed; other text is returned as-is; binary content is refused. " +
         "GitHub blob and gist pages are rewritten to their raw form. Redirects to another host are reported, not followed. " +
-        "Long pages are truncated; continue with offset. Set raw=true to get the body unconverted.",
+        "Long pages are shortened for context; offset reads later lines already downloaded. If the download reaches its byte limit, retry with a larger maxBytes only when the rest is needed. Set raw=true to get the body unconverted.",
       guidance:
         "Pages are cached for 15 minutes, so paging is free. Fetch a page again with raw=true only when the conversion lost something you need.",
       rules:
@@ -327,19 +255,32 @@ export function createFetchTool(opts: FetchToolOptions = {}) {
     }),
     parameters: Type.Object({
       url: Type.String({ description: "http or https URL" }),
-      offset: Type.Optional(Type.Number({ description: "starting line number, 1-based" })),
-      limit: Type.Optional(Type.Number({ description: "maximum number of lines to return" })),
+      offset: Type.Optional(
+        Type.Integer({ minimum: 1, description: "starting line number, 1-based" }),
+      ),
+      limit: Type.Optional(
+        Type.Integer({ minimum: 1, description: "maximum number of lines to return" }),
+      ),
+      maxBytes: Type.Optional(
+        Type.Integer({
+          minimum: 1,
+          description: `response byte budget for this call; default ${cfg.maxBytes}`,
+        }),
+      ),
       raw: Type.Optional(Type.Boolean({ description: "return the body without conversion" })),
     }),
     concurrency: "parallel",
     async execute(args, ctx) {
+      const maxBytes = args.maxBytes ?? cfg.maxBytes;
+      if (!Number.isSafeInteger(maxBytes) || maxBytes < 1)
+        throw new Error("maxBytes must be a positive safe integer.");
       const rewritten = rewriteUrl(new URL(args.url));
       const key = rewritten.url.toString();
       let fetched = cacheGet(key);
       let cached = true;
       if (!fetched) {
         cached = false;
-        fetched = await download(rewritten.url, ctx.signal, ctx.output?.write);
+        fetched = await download(rewritten.url, ctx.signal, maxBytes, ctx.output?.write);
         if (fetched.status < 400 && !fetched.cut) cachePut(key, fetched);
       }
       if (cached || fetched.notes.includes("cross-host redirect")) ctx.output?.write(fetched.text);
@@ -360,19 +301,50 @@ export function createFetchTool(opts: FetchToolOptions = {}) {
         ...(rewritten.note ? [rewritten.note] : []),
         ...fetched.notes,
         ...(cached ? ["cached"] : []),
-        ...(fetched.cut ? [`stopped at the ${cfg.maxBytes}-byte limit`] : []),
+        ...(fetched.cut
+          ? [
+              `download may be incomplete: stopped at the ${maxBytes}-byte limit; retry with a larger maxBytes if the rest is needed`,
+            ]
+          : []),
         ...(fetched.isHtml && !args.raw && body.length < 200 && fetched.total > 20000
           ? ["page is probably rendered by JavaScript; content may be missing"]
           : []),
       ];
       const lines = body.split("\n");
-      const start = Math.max(1, args.offset ?? 1);
-      const slice = lines.slice(start - 1, args.limit ? start - 1 + args.limit : undefined);
-      const t = truncate(cap(slice.join("\n")));
+      const start = args.offset ?? 1;
+      if (
+        !Number.isSafeInteger(start) ||
+        start < 1 ||
+        (args.limit !== undefined && (!Number.isSafeInteger(args.limit) || args.limit < 1))
+      ) {
+        throw new Error("offset and limit must be positive integers.");
+      }
+      if (start > lines.length)
+        throw new Error(`offset ${start} is beyond the end of the page (${lines.length} lines).`);
+      const slice = lines.slice(
+        start - 1,
+        args.limit === undefined ? undefined : start - 1 + args.limit,
+      );
+      const selected = slice.join("\n");
+      const capped = cap(selected);
+      const t = truncate(capped);
       const head = `${args.url}${fetched.finalUrl !== args.url ? ` → ${fetched.finalUrl}` : ""} · ${fetched.status} · ${fetched.type || "unknown type"} · ${fetched.total} bytes → ${body.length} chars, ${lines.length} lines${notes.length > 0 ? ` (${notes.join("; ")})` : ""}`;
-      if (!t.truncated && !args.limit) return `${head}\n\n${t.text}`;
+      const missingFrom = ctx.output?.ref.missingFrom;
+      const sourceLabel =
+        missingFrom !== undefined
+          ? `Recording incomplete from byte ${missingFrom}; available prefix`
+          : fetched.cut
+            ? "Captured prefix"
+            : "Original downloaded body";
+      const source =
+        (fetched.cut || capped !== selected || t.truncated || missingFrom !== undefined) &&
+        ctx.output?.path
+          ? `\n[${sourceLabel}: ${ctx.output.path}]`
+          : "";
+      if (!t.truncated && start - 1 + slice.length >= lines.length)
+        return `${head}\n\n${t.text}${source}`;
       const shown = t.text.split("\n").length;
-      return `${head}\n\n${t.text}\n[${t.note ?? "truncated"}; page has ${lines.length} lines, continue with offset=${start + shown}]`;
+      return `${head}\n\n${t.text}\n[${t.note ?? "truncated"}; page has ${lines.length} lines, continue with offset=${start + shown}]${source}`;
     },
   });
 }

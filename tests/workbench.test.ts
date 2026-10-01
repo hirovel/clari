@@ -7,6 +7,7 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { systemPromptFor } from "../cli/bootstrap.js";
+import { RequestInspector } from "../cli/inspector.js";
 import { workbench, workbenchLine } from "../cli/inspector-workbench.js";
 import { replaceSystemSection, sectionStates, systemWithSections } from "../cli/prompt-sections.js";
 import { createTuiApp } from "../cli/tui-app.js";
@@ -15,6 +16,7 @@ import { EventLog } from "../src/log.js";
 import { deriveMessages } from "../src/messages.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
 import { defineTool } from "../src/tools.js";
+import { testImage } from "./helpers/image.js";
 import { stripAnsi, VirtualTerminal } from "./helpers/virtual-terminal.js";
 
 const at = "2026-09-07T10:00:00.000Z";
@@ -199,6 +201,34 @@ describe("工作台的界面", () => {
     return { app, log, ins, doc, term };
   }
 
+  it("图片用量在下次请求前标未知,上次输入显示供应商实测", () => {
+    const { app, log, ins } = boot();
+    log.append({ type: "user/message", at, text: "first" });
+    log.append({
+      type: "request",
+      at,
+      model: "m",
+      messages: 2,
+      tools: [],
+      estimatedTokens: 2,
+      reason: "turn",
+    });
+    log.append({
+      type: "assistant/message",
+      at,
+      text: "ok",
+      toolCalls: [],
+      stopReason: "end",
+      usage: { inputTokens: 1200, outputTokens: 2 },
+    });
+    log.append({ type: "user/message", at, text: "look", images: [testImage] });
+    app.inspector.openComposition(0);
+    expect(ins()).toContain("text tok of 100k");
+    expect(ins()).toContain("Image tokens unknown before next request");
+    expect(ins()).toContain("Last API input: 1.2k tok measured by provider");
+    app.stop();
+  });
+
   it("头行有总量与缓存;预览随光标;Enter 在消息上出编号动作单;Ctrl+E 再按关闭", async () => {
     const { app, ins, term } = boot();
     await app.submit("first");
@@ -208,7 +238,7 @@ describe("工作台的界面", () => {
     expect(app.inspector.isOpen()).toBe(true);
     let s = ins();
     expect(s).toContain("what the model sees on the next request");
-    expect(s).toMatch(/≈\d+ of 100k/);
+    expect(s).toMatch(/≈\d+ tok of 100k/);
     expect(s).toContain("same prefix ≈");
     expect(s).toMatch(/#0\s+system\s+role · env/);
     expect(s).toMatch(/tools\s+1 definition\s+echo/);
@@ -223,7 +253,7 @@ describe("工作台的界面", () => {
     app.inspector.key("\r");
     s = ins();
     expect(s).toContain("1  View full message");
-    expect(s).toContain("If you do this");
+    expect(s).toContain("read-only · nothing changes");
     app.inspector.key("\x1b");
     term.feed("\x05");
     await tick();
@@ -288,7 +318,7 @@ describe("工作台的界面", () => {
     app.stop();
   });
 
-  it("运行中 Enter 不开动作单,预览区说明;tools 行 Enter 开 /tools 选单", async () => {
+  it("tools 行 Enter 开 /tools 选单", async () => {
     const { app, ins } = boot();
     await app.submit("hi");
     app.inspector.openComposition();
@@ -301,5 +331,64 @@ describe("工作台的界面", () => {
     expect(app.dialogLines().map(stripAnsi).join("\n")).toContain("Tools");
     app.dialogInput("\x1b");
     app.stop();
+  });
+
+  it("短终端菜单跟随选择,详情可翻页;运行或只读状态变化后不执行旧动作", () => {
+    const events = sample();
+    const source = events[3];
+    if (source?.type !== "assistant/message") throw new Error("missing assistant");
+    source.text = "long preview\n".repeat(20);
+    source.reasoning = "thinking";
+    source.reasoningKind = "full";
+    events.push({ type: "context/edit", at, target: 3, field: "text", value: source.text });
+    let running = false;
+    let readOnly: string | undefined;
+    const actions: string[] = [];
+    const inspector = new RequestInspector({
+      events: () => events,
+      providerFor: () => undefined,
+      tools: () => [],
+      rows: () => 12,
+      running: () => running,
+      readOnlyReason: () => readOnly,
+      onAction: (action) => actions.push(action),
+      onClose() {},
+      requestRender() {},
+    });
+    const screen = () => {
+      const lines = inspector.render(60);
+      expect(lines).toHaveLength(12);
+      expect(lines.every((line) => visibleWidth(line) <= 60)).toBe(true);
+      return lines.map(stripAnsi).join("\n");
+    };
+    inspector.showComposition(3);
+    inspector.handleInput("\r");
+    inspector.handleInput("9");
+    expect(screen()).toContain("▸ 9  Fork here");
+    inspector.handleInput("2");
+    expect(screen()).toContain("▸ 2  Edit content");
+    expect(screen()).not.toContain("message to use this context");
+    inspector.handleInput("\x1b[6~");
+    inspector.handleInput("\x1b[6~");
+    expect(screen()).toContain("message to use this context");
+    // 选中编辑后任务才开始,Enter 不能继续使用原选项下标。
+    running = true;
+    inspector.handleInput("\r");
+    expect(actions).toEqual([]);
+    expect(screen()).not.toContain("Edit content");
+    inspector.handleInput("1");
+    inspector.handleInput("\r");
+    expect(inspector.currentMode).toBe("message");
+    running = false;
+    inspector.showComposition(3);
+    inspector.handleInput("\r");
+    inspector.handleInput("3"); // 原来是Edit thinking,只读筛选后第三项会成为Fork。
+    readOnly = "Fixture session is read-only.";
+    inspector.handleInput("\r");
+    expect(actions).toEqual([]);
+    expect(screen()).not.toContain("Retry last step");
+    inspector.handleInput("2");
+    inspector.handleInput("\r");
+    expect(actions).toEqual(["compare"]); // 当前主会话只读时仍允许比较。
   });
 });

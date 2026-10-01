@@ -1,5 +1,7 @@
 // 命令面板:Ctrl+K 打开,模糊过滤,Enter 跑命令或填输入框,模型条目切模型,Esc 关。
-import { describe, expect, it } from "vitest";
+
+import { visibleWidth } from "@earendil-works/pi-tui";
+import { describe, expect, it, vi } from "vitest";
 import type { ModelSettings } from "../cli/model-settings.js";
 import { createTuiApp } from "../cli/tui-app.js";
 import { Palette, type PaletteItem } from "../cli/tui-palette.js";
@@ -31,7 +33,14 @@ describe("Palette 组件", () => {
     expect(out).not.toContain("/memory");
     p.handleInput("\x7f");
     p.handleInput("\x7f");
-    p.handleInput("\x1b[A"); // 从第 0 项上翻到末项
+    p.handleInput("\x1b[200~ds\x1b[201~");
+    expect(plain(p.render())).toContain("› ds");
+    p.handleInput("\x7f");
+    p.handleInput("\x7f");
+    p.handleInput("🙂");
+    p.handleInput("\x1b[127u");
+    expect(plain(p.render())).not.toContain("no match");
+    p.handleInput("\x1bOA"); // 应用光标模式的方向键也要从第 0 项上翻到末项。
     expect(plain(p.render())).toContain("▸ deepseek/deepseek-v4-pro");
     p.handleInput("\r");
     expect(ran).toEqual(["ds"]);
@@ -41,6 +50,39 @@ describe("Palette 组件", () => {
     p.handleInput("z");
     p.handleInput("z");
     expect(plain(p.render())).toContain("no match");
+    let chosen = -1;
+    let height = 18;
+    const many = new Palette(
+      Array.from({ length: 35 }, (_, index) => ({
+        kind: "skill" as const,
+        label: `/skill-${index + 1}-中文`,
+        note: `${"Long description 中文. ".repeat(45)}END-${index + 1}`,
+        run: () => {
+          chosen = index;
+        },
+      })),
+      () => {},
+      () => {},
+      () => height,
+    );
+    for (let i = 0; i < 30; i++) many.handleInput("\x1bOB");
+    const screen = many.render(40);
+    expect(plain(screen)).toContain("Selected 31/35");
+    expect(screen.length).toBeLessThanOrEqual(16);
+    expect(screen.every((line) => visibleWidth(line) <= 40)).toBe(true);
+    expect(plain(screen)).toContain("Esc close");
+    for (let i = 0; i < 60; i++) {
+      many.handleInput("\x1b[6~");
+      many.render(40);
+    }
+    expect(plain(many.render(40))).toContain("END-31");
+    height = 10;
+    const resized = many.render(24);
+    expect(resized.length).toBeLessThanOrEqual(8);
+    expect(resized.every((line) => visibleWidth(line) <= 24)).toBe(true);
+    expect(plain(resized)).toContain("Esc close");
+    many.handleInput("\r");
+    expect(chosen).toBe(30);
   });
 });
 
@@ -107,6 +149,29 @@ describe("Ctrl+K", () => {
     expect(app.dialogLines().length).toBeGreaterThan(0);
     term.feed("\x0b"); // 再按一次关闭
     expect(app.dialogLines()).toEqual([]);
+    const compact = () => {
+      term.feed("\x0b");
+      app.dialogInput("/compact");
+      app.dialogInput("\r");
+    };
+    app.setDraft("unfinished request");
+    compact();
+    expect(plain(app.dialogLines())).toContain("Replace the current draft");
+    app.dialogInput("\r"); // 默认保留。
+    await Promise.resolve();
+    expect(app.draft()).toBe("unfinished request");
+    compact();
+    term.feed("\x0b"); // 从别处关闭也要取消,不能留下迟到替换。
+    await Promise.resolve();
+    expect(app.draft()).toBe("unfinished request");
+    compact();
+    app.dialogInput("\x1b[B");
+    app.dialogInput("\r");
+    await vi.waitFor(() => expect(app.draft()).toBe("/compact "));
+    app.setDraft("");
+    compact();
+    expect(app.dialogLines()).toEqual([]);
+    expect(app.draft()).toBe("/compact ");
     app.stop();
   });
 });

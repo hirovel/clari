@@ -36,6 +36,9 @@ describe("开关登记表", () => {
       fold: false,
       foldLines: 7,
       foldSteps: 9,
+      statusStyle: "tiles",
+      statusWidgets: ["model", "queue"],
+      showCostEstimate: true,
       results: { bash: "all" },
       compactionReserve: 12345,
       "facts.repeats": false,
@@ -49,6 +52,7 @@ describe("开关登记表", () => {
       "prompt.skills.mode": "auto",
       "prompt.skills.include": ["review"],
       "prompt.skills.load": "tool",
+      "prompt.skills.sources": { "user-clari": "off", "./custom skills": "on" },
 
       "tools.disable": ["bash"],
       mcpReconnect: ["browser"],
@@ -75,6 +79,9 @@ describe("开关登记表", () => {
       fold: args.fold,
       foldLines: args.foldLines,
       foldSteps: args.foldSteps,
+      statusStyle: args.statusStyle,
+      statusWidgets: args.statusWidgets,
+      showCostEstimate: args.showCostEstimate,
       results: args.results,
       compactionReserve: args.compactionReserve,
       "facts.repeats": args.facts?.repeats,
@@ -88,6 +95,7 @@ describe("开关登记表", () => {
       "prompt.skills.mode": args.skillsMode,
       "prompt.skills.include": args.skillsInclude,
       "prompt.skills.load": args.skillsLoad,
+      "prompt.skills.sources": args.skillsSources,
 
       "tools.disable": args.disabledTools,
       mcpReconnect: args.mcpReconnect,
@@ -106,6 +114,10 @@ describe("开关登记表", () => {
       model: args.model,
     };
     for (const s of SETTINGS) expect(seen[s.key], s.key).toEqual(probe[s.key]);
+    expect(
+      applyPreset(parseCommonArgs(["--hide-cost-estimate"]), config({ showCostEstimate: true }))
+        .showCostEstimate,
+    ).toBe(false);
   });
 
   it("按路径读写:写 undefined 删项,空对象一并删;不改原对象", () => {
@@ -131,6 +143,11 @@ describe("开关登记表", () => {
     });
     expect(parseSetting(def("prompt.sections"), "role,env")).toEqual(["role", "env"]);
     expect(parseSetting(def("tools.disable"), "bash fetch")).toEqual(["bash", "fetch"]);
+    expect(
+      parseSetting(def("prompt.skills.sources"), '{"./custom  skills":"on","user-clari":"off"}'),
+    ).toEqual({ "./custom  skills": "on", "user-clari": "off" });
+    for (const bad of ["[]", "null", '{"":"on"}', '{"./skills":true}'])
+      expect(() => parseSetting(def("prompt.skills.sources"), bad)).toThrow();
     expect(() => parseSetting(def("foldSteps"), "many")).toThrow("whole number");
     expect(() => parseSetting(def("notify"), "loud")).toThrow("unfocused · always · off");
     expect(() => parseSetting(def("prompt.sections"), "role,nope")).toThrow("nope is not one of");

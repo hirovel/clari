@@ -1,15 +1,9 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { diffLines, hunks } from "../cli/tools/diff.js";
-import {
-  createGrepTool,
-  globTool,
-  globToRegExp,
-  grepFiles,
-  walkFiles,
-} from "../cli/tools/search.js";
+import { createGrepTool, globTool } from "../cli/tools/search.js";
 
 let tmp: string | undefined;
 afterEach(() => {
@@ -29,54 +23,80 @@ function project(): string {
 }
 
 describe("只读工具", () => {
-  it("walkFiles 跳过 node_modules 等目录,路径用正斜杠", () => {
+  it("glob 按整个路径匹配,包含隐藏文件并跳过构建目录", async () => {
     const root = project();
-    expect(walkFiles(root)).toEqual(["README.md", "src/a.ts", "src/deep/b.ts"]);
+    writeFileSync(join(root, ".hidden.ts"), "export {};");
+    writeFileSync(join(root, ".gitignore"), "src/a.ts\n");
+    expect(
+      await globTool.execute(
+        { pattern: "src/**/*.ts", path: root },
+        { signal: new AbortController().signal },
+      ),
+    ).toBe("src/a.ts\nsrc/deep/b.ts");
+    expect(
+      await globTool.execute(
+        { pattern: "*.ts", path: root },
+        { signal: new AbortController().signal },
+      ),
+    ).toBe(".hidden.ts");
+    expect(
+      await globTool.execute(
+        { pattern: "**/*.js", path: root },
+        { signal: new AbortController().signal },
+      ),
+    ).toBe("(no matches)");
   });
 
-  it("glob → 正则:** 跨层级,* 单段", () => {
-    expect(globToRegExp("src/**/*.ts").test("src/deep/b.ts")).toBe(true);
-    expect(globToRegExp("src/**/*.ts").test("src/a.ts")).toBe(true);
-    expect(globToRegExp("*.ts").test("src/a.ts")).toBe(false);
-    expect(globToRegExp("*.md").test("README.md")).toBe(true);
-    expect(globToRegExp("src/?.ts").test("src/a.ts")).toBe(true);
-  });
-
-  it("grepFiles:正则、文件过滤、结果上限", () => {
+  it("grep 返回可交给 read 的路径,支持文件过滤和大小写选项", async () => {
     const root = project();
-    const all = grepFiles(root, /alpha/i);
-    expect(all.matches.map((m) => `${m.file}:${m.line}`)).toEqual([
-      "README.md:1",
-      "src/a.ts:1",
-      "src/deep/b.ts:1",
-    ]);
-    const ts = grepFiles(root, /alpha/i, { glob: "*.ts" });
-    expect(ts.matches.map((m) => m.file)).toEqual(["src/a.ts", "src/deep/b.ts"]);
-    const capped = grepFiles(root, /alpha/i, { maxResults: 1 });
-    expect(capped.matches).toHaveLength(1);
-    expect(capped.truncated).toBe(true);
-  });
-
-  it("grep 工具(JS 回退):输出 路径:行号:内容,无匹配时说明;glob 与 ls 工具", async () => {
-    const root = project();
-    const grep = createGrepTool({ useRipgrep: false });
+    const grep = createGrepTool();
     const out = await grep.execute(
-      { pattern: "beta", path: root },
+      { pattern: "alpha", path: root, glob: "*.ts", ignoreCase: true },
       { signal: new AbortController().signal },
     );
-    // 路径带上用户给的 path 前缀,原样可再喂给 read。
-    expect(out).toBe(`${root.split("\\").join("/")}/src/a.ts:2:function beta() {}`);
+    expect(out).toContain(`${root.split("\\").join("/")}/src/a.ts:1:export const alpha`);
+    expect(out).toContain(`${root.split("\\").join("/")}/src/deep/b.ts:1:const Alpha`);
+    expect(out).not.toContain("README.md");
+    expect(out).not.toContain("node_modules");
+    expect(
+      await grep.execute(
+        { pattern: "alpha", path: root, glob: "*.js" },
+        { signal: new AbortController().signal },
+      ),
+    ).toBe("(no matches)");
     const none = await grep.execute(
       { pattern: "zzz", path: root },
       { signal: new AbortController().signal },
     );
-    expect(none).toContain("no matches");
+    expect(none).toBe("(no matches)");
+    await expect(
+      grep.execute({ pattern: "(", path: root }, { signal: new AbortController().signal }),
+    ).rejects.toThrow(/search failed/);
+  });
 
+  it("执行中的搜索可被取消", async () => {
+    const root = project();
+    const controller = new AbortController();
+    const pending = globTool.execute(
+      { pattern: "**/*", path: root },
+      { signal: controller.signal },
+    );
+    controller.abort();
+    await expect(pending).rejects.toThrow(/search interrupted/);
+  });
+
+  it("目录链接回环不会使已有搜索结果失败", async () => {
+    const root = project();
+    symlinkSync(
+      root,
+      join(root, "src", "deep", "loop"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
     const files = await globTool.execute(
-      { pattern: "**/*.ts", path: root },
+      { pattern: "src/**/*.ts", path: root },
       { signal: new AbortController().signal },
     );
-    expect(files.split("\n")).toEqual(["src/a.ts", "src/deep/b.ts"]);
+    expect(files).toBe("src/a.ts\nsrc/deep/b.ts");
   });
 });
 

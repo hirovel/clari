@@ -1,3 +1,4 @@
+import { setTimeout as delay } from "node:timers/promises";
 import type { CompleteOptions } from "../provider.js";
 import { isContextOverflow, isRetryable, ProviderError } from "./errors.js";
 
@@ -19,9 +20,10 @@ export async function withRetry<T>(fn: () => Promise<T>, opts: RetryOptions = {}
   const maxRetries = opts.maxRetries ?? 2;
   const base = opts.baseDelayMs ?? 500;
   const cap = opts.maxDelayMs ?? 8000;
-  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const sleep = opts.sleep ?? ((ms: number) => delay(ms, undefined, { signal: opts.signal }));
 
   for (let attempt = 0; ; attempt++) {
+    opts.signal?.throwIfAborted();
     try {
       return await fn();
     } catch (err) {

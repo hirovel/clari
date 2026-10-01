@@ -13,6 +13,7 @@ import {
   maxSteps,
   type TurnDeps,
 } from "./loop.js";
+import { deriveMessages } from "./messages.js";
 import type { Provider } from "./provider.js";
 import { recordUnresolvedCalls } from "./recovery.js";
 import {
@@ -68,10 +69,10 @@ export function fork(): ContextScope {
  * 压缩事件按下标引用历史,过滤后下标失效,一并去掉。
  */
 export function userMessagesOnly(): ContextScope {
-  return ({ events }) =>
+  return ({ events, system }) =>
     events
       .filter((e) => e.type === "session/start" || e.type === "user/message")
-      .map((e) => ({ ...e }));
+      .map((e) => (e.type === "session/start" ? { ...e, system } : { ...e }));
 }
 
 export const DEFAULT_SCOPES: ScopeRegistry = {
@@ -413,23 +414,27 @@ export function createTaskTool(opts: TaskToolOptions): TaskTool {
           id = `sub-${counter}`;
           path = pathFor(id);
         } while (children.has(id) || (path && existsSync(path)));
-        const head = opts.parent.events[0];
         const parentSnapshot: ParentSnapshot = {
           events: opts.parent.events,
-          system: head?.type === "session/start" ? head.system : "",
+          system:
+            deriveMessages(opts.parent.events).find((m) => m.role === "system")?.content ?? "",
           model: provider.model,
         };
-        const start = entry
-          .scope(parentSnapshot)
-          .map((e) =>
-            type.system !== undefined && e.type === "session/start"
-              ? { ...e, system: type.system }
-              : e,
-          );
+        const start = entry.scope(parentSnapshot);
         log = new EventLog(path);
         try {
           log.recording?.copyAttachments(start, opts.parent.recording);
           for (const e of start) log.append(e);
+          // 显式覆盖在继承之后生效,避免继承的旧编辑再次改写它;续聊不重置子会话。
+          const systemTarget = start.findIndex((e) => e.type === "session/start");
+          if (type.system !== undefined && systemTarget >= 0)
+            log.append({
+              type: "context/edit",
+              at: now(),
+              target: systemTarget,
+              field: "system",
+              value: type.system,
+            });
         } catch (error) {
           log.recording?.dispose();
           if (path) rmSync(path, { force: true });

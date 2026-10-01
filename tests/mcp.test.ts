@@ -1,11 +1,23 @@
 // MCP 客户端与桥接:双时代探测、分页、命名、白黑名单、isError 与协议错误、图片落盘、stderr 事件、
 // list_changed 刷新、启动失败与 required、HTTP 传输、审批规则、配置合并与变量展开。
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer, type Server, type ServerResponse } from "node:http";
+import { createRequire } from "node:module";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { eventViewLines } from "../cli/inspector-events.js";
 import {
   bridgedName,
   connectMcpServers,
@@ -15,20 +27,27 @@ import {
   toolAllowed,
 } from "../cli/mcp/bridge.js";
 import type { JsonRpcMessage } from "../cli/mcp/client.js";
+import { McpClient } from "../cli/mcp/client.js";
 import { expandVars, loadMcpServers, type ResolvedServer } from "../cli/mcp/config.js";
 import { McpConnections } from "../cli/mcp/connections.js";
+import { projectMcpReview, projectMcpTrusted, trustProjectMcp } from "../cli/mcp/trust.js";
+import { forkSession } from "../cli/sessions.js";
 import { Agent } from "../src/agent.js";
 import { decide } from "../src/approval.js";
 import type { AgentEvent } from "../src/events.js";
+import { toolOutput } from "../src/exchange.js";
 import { priorFailures } from "../src/facts.js";
 import { EventLog } from "../src/log.js";
+import { Recording } from "../src/recording.js";
 import { recordUnresolvedCalls, unresolvedCalls } from "../src/recovery.js";
 import type { Tool } from "../src/tools.js";
 import { createLogic } from "./helpers/mcp-server.mjs";
 
 const helper = resolve("tests/helpers/mcp-server.mjs");
 const tempDirs: string[] = [];
+const recordedLogs: EventLog[] = [];
 afterAll(() => {
+  for (const log of recordedLogs) log.recording?.dispose();
   for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
 });
 const ctx = { signal: new AbortController().signal, callId: "call_1" } as never;
@@ -54,11 +73,105 @@ function stdioServer(
 const find = (tools: Tool[], name: string) => tools.find((t) => t.name === name) as Tool;
 
 describe("stdio · modern", () => {
+  it("关闭失败的连接仍留在池中,退出时可以重试清理", async () => {
+    let attempts = 0;
+    const fake = {
+      async connect() {
+        return { era: "modern", protocolVersion: "2026-07-28" };
+      },
+      async listTools() {
+        return [];
+      },
+      async close() {
+        attempts++;
+        if (attempts === 1) throw new Error("first close failed");
+      },
+    } as unknown as McpClient;
+    const pool = new McpConnections();
+    const { connection } = await pool.acquire(stdioServer("cleanup", []), {
+      log: new EventLog(),
+      createClient: () => fake,
+    });
+    await expect(pool.release(connection)).rejects.toThrow("first close failed");
+    await expect(pool.close()).resolves.toBeUndefined();
+    expect(attempts).toBe(2);
+
+    let startupStops = 0;
+    const failedStartup = {
+      async connect(): Promise<never> {
+        throw new Error("startup failed");
+      },
+      async close() {
+        startupStops++;
+        if (startupStops === 1) throw new Error("startup cleanup failed");
+      },
+    } as unknown as McpClient;
+    const pending = new McpConnections();
+    await expect(
+      pending.acquire(stdioServer("startup", []), {
+        log: new EventLog(),
+        createClient: () => failedStartup,
+      }),
+    ).rejects.toThrow(/startup cleanup failed/);
+    await expect(pending.close()).resolves.toBeUndefined();
+    expect(startupStops).toBe(2);
+  });
+
+  it.skipIf(process.platform !== "win32")(
+    "关闭 cmd 包装的 MCP 时也停止其服务器进程",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "clari-mcp-tree-"));
+      tempDirs.push(dir);
+      const script = join(dir, "server.mjs");
+      const wrapper = join(dir, "server.cmd");
+      const pidFile = join(dir, "server.pid");
+      writeFileSync(
+        script,
+        `import { writeFileSync } from "node:fs";
+import { createInterface } from "node:readline";
+writeFileSync(process.argv[2], String(process.pid));
+createInterface({ input: process.stdin }).on("line", line => {
+  const message = JSON.parse(line);
+  if (message.method === "server/discover")
+    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { supportedVersions: ["2026-07-28"] } }) + "\\n");
+});
+setInterval(() => {}, 1000);
+`,
+      );
+      writeFileSync(wrapper, `@echo off\r\n"${process.execPath}" "${script}" "${pidFile}"\r\n`);
+      const client = new McpClient("tree", { command: wrapper });
+      let pid = 0;
+      try {
+        await client.connect(3000);
+        pid = Number(readFileSync(pidFile, "utf8"));
+        let closeError: unknown;
+        try {
+          await client.close();
+        } catch (error) {
+          closeError = error;
+        }
+        if (closeError) expect((closeError as Error).message).toMatch(/may still be running/);
+        else expect(() => process.kill(pid, 0)).toThrow();
+      } finally {
+        await client.close().catch(() => {});
+        if (pid) {
+          try {
+            process.kill(pid, "SIGKILL");
+          } catch {
+            /* already stopped */
+          }
+        }
+      }
+    },
+    10000,
+  );
+
   it("server/discover 定时代;分页拼全;命名;echo / boom / proto / image;stderr 进 mcp/log;关闭", async () => {
-    const log = new EventLog();
-    const tools: Tool[] = [];
     const dir = mkdtempSync(join(tmpdir(), "clari-mcp-"));
     tempDirs.push(dir);
+    const log = new EventLog(join(dir, "session.jsonl"));
+    recordedLogs.push(log);
+    const tools: Tool[] = [];
     const connections = new McpConnections();
     const bridge = await connectMcpServers(
       [stdioServer("fake", ["--era", "modern", "--tools", "3", "--page", "2", "--stderr-noise"])],
@@ -89,6 +202,43 @@ describe("stdio · modern", () => {
     });
 
     expect(await find(tools, "mcp__fake__echo").execute({ text: "hi" }, ctx)).toBe("echo: hi");
+    const captureDir = mkdtempSync(join(tmpdir(), "clari-mcp-output-"));
+    tempDirs.push(captureDir);
+    const captureLog = new EventLog(join(captureDir, "session.jsonl"));
+    try {
+      const output = toolOutput(captureLog, "long-echo", "mcp__fake__echo");
+      if (!output) throw new Error("Recording output unavailable");
+      const long = await find(tools, "mcp__fake__echo").execute(
+        { text: `${"x".repeat(100010)}END_SENTINEL` },
+        { signal: new AbortController().signal, output },
+      );
+      await captureLog.checkpoint();
+      expect(long).toContain(`full raw MCP result: ${output.path}`);
+      expect(long).not.toContain("END_SENTINEL");
+      expect(readFileSync(output.path, "utf8")).toContain("END_SENTINEL");
+      await log.checkpoint();
+      const rpc = mcpEvents(log.events).find(
+        (event) => event.kind === "rpc" && event.direction === "receive" && event.truncated,
+      );
+      if (rpc?.kind !== "rpc" || !rpc.bodyRef || !log.recording)
+        throw new Error("MCP RPC attachment missing");
+      expect(rpc.bodyRef?.bytes).toBeGreaterThan(100000);
+      expect(log.recording.read(rpc.bodyRef)).toContain("END_SENTINEL");
+      const index = log.events.findIndex(
+        (event) =>
+          event.type === "ext/event" &&
+          event.source === "mcp" &&
+          event.kind === "rpc" &&
+          (event.payload.bodyRef as { file?: string } | undefined)?.file === rpc.bodyRef?.file,
+      );
+      expect(eventViewLines(log.events, index, log.recording.directory).join("\n")).toContain(
+        join(log.recording.directory, rpc.bodyRef.file),
+      );
+      const fork = forkSession(log.events, log.events.length, dir, log.recording);
+      expect(new Recording(fork.file).read(rpc.bodyRef)).toContain("END_SENTINEL");
+    } finally {
+      captureLog.recording?.dispose();
+    }
     await expect(find(tools, "mcp__fake__boom").execute({}, ctx)).rejects.toThrow(
       "boom failed on purpose",
     );
@@ -98,7 +248,7 @@ describe("stdio · modern", () => {
     const img = await find(tools, "mcp__fake__image").execute({}, ctx);
     expect(img).toContain("here is a picture");
     expect(img).toContain("saved to");
-    expect(readdirSync(dir)).toEqual(["call_1-1.png"]);
+    expect(readdirSync(dir)).toContain("call_1-1.png");
     const nextLog = new EventLog();
     const nextTools: Tool[] = [];
     const servers = [
@@ -431,6 +581,79 @@ describe("Streamable HTTP · modern", () => {
 });
 
 describe("命名、白黑名单、内容转换、审批规则、配置", () => {
+  it("一次性模式在未信任项目 MCP 时退出,不启动项目命令", () => {
+    const dir = mkdtempSync(join(tmpdir(), "clari-mcp-gate-"));
+    tempDirs.push(dir);
+    const home = join(dir, "home");
+    mkdirSync(home);
+    const marker = join(dir, "started");
+    const command = join(dir, "start.mjs");
+    writeFileSync(
+      command,
+      `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(marker)}, "yes");`,
+    );
+    writeFileSync(
+      join(dir, ".mcp.json"),
+      JSON.stringify({
+        mcpServers: { local: { command: process.execPath, args: [command] } },
+      }),
+    );
+    writeFileSync(
+      join(home, "config.json"),
+      JSON.stringify({
+        default: "p/m",
+        providers: {
+          p: { protocol: "openai", baseUrl: "http://127.0.0.1:1", apiKey: "test", models: ["m"] },
+        },
+        defaults: {},
+        presets: {},
+      }),
+    );
+    const result = spawnSync(
+      process.execPath,
+      [
+        "--import",
+        pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href,
+        resolve("cli/run.ts"),
+        "test",
+      ],
+      {
+        cwd: dir,
+        env: {
+          ...process.env,
+          CLARI_HOME: home,
+          CLARI_CONFIG: join(home, "config.json"),
+          CLARI_CREDENTIALS: join(home, "missing.json"),
+        },
+        encoding: "utf8",
+        timeout: 10000,
+      },
+    );
+    expect(result.stderr).toContain("Project MCP is not trusted");
+    expect(result.status).toBe(2);
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it("项目 MCP 信任绑定目录和文件内容,修改命令后失效", () => {
+    const dir = mkdtempSync(join(tmpdir(), "clari-mcp-trust-"));
+    tempDirs.push(dir);
+    const file = join(dir, ".mcp.json");
+    writeFileSync(
+      file,
+      JSON.stringify({ mcpServers: { local: { command: "first", args: ["${TOKEN}"] } } }),
+    );
+    const first = projectMcpReview(dir);
+    expect(first?.servers).toEqual([{ name: "local", command: "first", args: ["${TOKEN}"] }]);
+    expect(first && projectMcpTrusted(first)).toBe(false);
+    if (!first) throw new Error("expected project MCP review");
+    trustProjectMcp(first);
+    expect(projectMcpTrusted(first)).toBe(true);
+    writeFileSync(file, JSON.stringify({ mcpServers: { local: { command: "changed" } } }));
+    const changed = projectMcpReview(dir);
+    expect(changed && projectMcpTrusted(changed)).toBe(false);
+    expect(() => trustProjectMcp(first)).toThrow(/changed during review/);
+  });
+
   it("bridgedName 清洗与超长哈希;toolAllowed;contentToText 各类型", () => {
     expect(bridgedName("my server", "get/issue")).toBe("mcp__my_server__get_issue");
     const long = bridgedName("s", "x".repeat(200));

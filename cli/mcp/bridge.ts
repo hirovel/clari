@@ -6,6 +6,7 @@ import { join } from "node:path";
 import type { TSchema } from "@sinclair/typebox";
 import { type AgentEvent, now } from "../../src/events.js";
 import type { EventLog } from "../../src/log.js";
+import type { ContentRef } from "../../src/recording.js";
 import { type Tool, ToolOutcomeUnknownError } from "../../src/tools.js";
 import {
   type McpClient,
@@ -41,6 +42,7 @@ export type McpBridge = {
 
 /** 桥接记的四种事件,装在 ext/event 的 payload 里;kind 是判别字段。 */
 export type McpEvent =
+  | { kind: "project-trusted" | "project-skipped"; file: string }
   | {
       kind: "server";
       server: string;
@@ -67,6 +69,8 @@ export type McpEvent =
       bytes: number;
       /** 原文,Authorization 已遮蔽。 */
       body: string;
+      truncated?: boolean;
+      bodyRef?: ContentRef;
     }
   | { kind: "log"; server: string; line: string }
   | { kind: "tools"; server: string; added: string[]; removed: string[]; total: number };
@@ -88,6 +92,11 @@ export function renderMcpEvent(
 ): { tone: "jin" | "zhu" | "faint"; text: string } | undefined {
   const m = mcpEvent(e);
   if (!m) return undefined;
+  if (m.kind === "project-trusted" || m.kind === "project-skipped")
+    return {
+      tone: m.kind === "project-trusted" ? "jin" : "zhu",
+      text: `◇ project MCP ${m.kind === "project-trusted" ? "trusted" : "skipped"}: ${m.file}`,
+    };
   if (m.kind === "server") {
     if (m.phase === "ready")
       return {
@@ -222,8 +231,14 @@ export async function connectMcpServers(
         bindings.map(async ({ connection, install, status }) => {
           connection.listeners.delete(install);
           if (connection.active === opts.log) connection.active = undefined;
-          status.phase = "closed";
-          await pool.release(connection);
+          try {
+            await pool.release(connection);
+            status.phase = "closed";
+          } catch (error) {
+            status.phase = "failed";
+            status.error = `cleanup failed: ${(error as Error).message}`;
+            throw error;
+          }
         }),
       );
       const errors = results.flatMap((r) => (r.status === "rejected" ? [r.reason] : []));
@@ -295,8 +310,18 @@ export async function connectMcpServers(
             if (result.structuredContent !== undefined && !text.trim())
               text = JSON.stringify(result.structuredContent, null, 2);
             const max = opts.mcp?.maxResultChars ?? 100000;
-            if (text.length > max)
-              text = `${text.slice(0, max)}\n[truncated to ${max} chars of ${text.length}]`;
+            if (text.length > max) {
+              const length = text.length;
+              const end = /[\uD800-\uDBFF]/.test(text[max - 1] ?? "") ? max - 1 : max;
+              const original = ctx.output?.path;
+              const location =
+                ctx.output?.ref.missingFrom !== undefined
+                  ? `; raw recording incomplete from byte ${ctx.output.ref.missingFrom}; available prefix: ${original}`
+                  : original
+                    ? `; full raw MCP result: ${original}`
+                    : "";
+              text = `${text.slice(0, end)}\n[truncated to ${end} chars of ${length}${location}]`;
+            }
             if (result.isError) throw new Error(text || "tool reported an error without a message");
             return text;
           },

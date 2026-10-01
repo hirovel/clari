@@ -1,23 +1,28 @@
 // 对照 pi 吸收的部分:每一项都是槽或可选项,缺省行为不变。
-// 执行槽(并行/串行)、后续留言、实测优先的上下文口径、宽松编辑、提示词模板、@文件、技能段、分叉、扩展模块。
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+// 执行槽(并行/串行)、后续留言、实测优先的上下文口径、提示词模板、@文件、技能段、分叉、扩展模块。
+import * as fs from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { expandFileRefs } from "../cli/attachments.js";
 import { forkSession, loadExtensions } from "../cli/bootstrap.js";
 import { buildSystemPrompt, discoverSkills, parseSkill } from "../cli/prompt.js";
 import { discoverTemplates, expandTemplate, parseTemplate, splitArgs } from "../cli/templates.js";
-import { fuzzyReplace, normalizeLine } from "../cli/tools/fs.js";
 import { Agent } from "../src/agent.js";
-import { contextTokens, estimateAfter } from "../src/compaction.js";
+import { contextSize, contextTokens, estimateAfter } from "../src/compaction.js";
 import type { AgentEvent } from "../src/events.js";
 import { EventLog } from "../src/log.js";
 import { runTurn } from "../src/loop.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
 import { openaiCompat } from "../src/providers/openai-chat.js";
 import { defineTool } from "../src/tools.js";
+import { testDirectory } from "./helpers/setup.js";
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return { ...actual, readFileSync: vi.fn(actual.readFileSync) };
+});
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -170,7 +175,7 @@ describe("留言投递方式:steer 步边界,followUp 等到 turn 边界", () =>
 });
 
 describe("上下文口径:实测优先", () => {
-  it("最近 assistant 有用量且其后无压缩:实测输入+输出+新增估算;否则纯估算", () => {
+  it("实测加新增估算;压缩、编辑或排除后重算,新实测到来再接替", () => {
     const events: AgentEvent[] = [
       { type: "session/start", at: "", model: "m", system: "x".repeat(400) },
       { type: "user/message", at: "", text: "hi" },
@@ -192,27 +197,59 @@ describe("上下文口径:实测优先", () => {
       },
     ];
     expect(contextTokens(events)).toBe(5000 + 20 + 100);
+    expect(contextSize(events).basis).toBe("usage");
     expect(contextTokens(events.slice(0, 2))).toBe(estimateAfter(events.slice(0, 2)));
+    expect(contextSize(events.slice(0, 2)).basis).toBe("messages");
+    expect(
+      contextSize([
+        ...events.slice(0, 2),
+        {
+          type: "assistant/message",
+          at: "",
+          text: "no usage",
+          toolCalls: [],
+          stopReason: "end",
+          usage: { inputTokens: 0, outputTokens: 0 },
+        },
+      ]).basis,
+    ).toBe("messages");
     const after: AgentEvent[] = [...events, { type: "compaction", at: "", cleared: [3] }];
     expect(contextTokens(after)).toBe(estimateAfter(after));
-  });
-});
-
-describe("edit 宽松匹配", () => {
-  it("归一化:行尾空白、弯引号、长破折号", () => {
-    expect(normalizeLine("a = “x”  ")).toBe('a = "x"');
-    expect(normalizeLine("it’s — ok")).toBe("it's - ok");
-  });
-
-  it("精确失败时按行归一化匹配,只改命中的行", () => {
-    const content = 'const a = "x";   \nconst b = 2;\n// keep   \n';
-    const r = fuzzyReplace(content, "const a = “x”;\nconst b = 2;", "const a = 1;");
-    expect(r).toEqual({ next: "const a = 1;\n// keep   \n", line: 1 });
-  });
-
-  it("多处命中报错,无命中返回 undefined", () => {
-    expect(() => fuzzyReplace("a\nb\na\nb\n", "a\nb", "c")).toThrow(/not unique/);
-    expect(fuzzyReplace("a\nb\n", "zzz", "c")).toBeUndefined();
+    expect(contextSize(after).basis).toBe("messages");
+    const changes: { event: AgentEvent; expected: number }[] = [
+      {
+        event: {
+          type: "context/edit",
+          at: "",
+          target: 1,
+          field: "content",
+          value: "u".repeat(40000),
+        },
+        expected: 10209,
+      },
+      {
+        event: { type: "context/edit", at: "", target: 1, field: "content", value: "" },
+        expected: 209,
+      },
+      { event: { type: "context/drop", at: "", target: 2 }, expected: 101 },
+    ];
+    for (const { event, expected } of changes) {
+      const revised = [...events, event];
+      expect(contextTokens(revised)).toBe(expected);
+      const fresh: AgentEvent[] = [
+        ...revised,
+        {
+          type: "assistant/message",
+          at: "",
+          text: "",
+          toolCalls: [],
+          stopReason: "end",
+          usage: { inputTokens: 8000, outputTokens: 4 },
+        },
+        { type: "user/message", at: "", text: "more" },
+      ];
+      expect(contextTokens(fresh)).toBe(8005);
+    }
   });
 });
 
@@ -227,28 +264,57 @@ describe("提示词模板", () => {
       '审查 src/a.ts,重点 错误 处理。全部:src/a.ts "错误 处理"',
     );
     expect(splitArgs(`a 'b c' "d"`)).toEqual(["a", "b c", "d"]);
+    const literal = "Keep $& $$ $` $' $1 $ARGUMENTS unchanged.\n    Indented  line";
+    expect(expandTemplate({ ...t, body: "$ARGUMENTS" }, literal)).toBe(literal);
   });
 
   it("发现:用户级 → 项目级,同名以项目级为准", () => {
-    const home = mkdtempSync(join(tmpdir(), "ak-home-"));
-    const proj = mkdtempSync(join(tmpdir(), "ak-proj-"));
+    const home = testDirectory("ak-home-");
+    const proj = testDirectory("ak-proj-");
     mkdirSync(join(home, "prompts"), { recursive: true });
     mkdirSync(join(proj, ".clari", "prompts"), { recursive: true });
     mkdirSync(join(proj, ".git"));
     writeFileSync(join(home, "prompts", "a.md"), "用户级 A");
     writeFileSync(join(home, "prompts", "b.md"), "用户级 B");
     writeFileSync(join(proj, ".clari", "prompts", "a.md"), "项目级 A");
-    const found = discoverTemplates(proj, home);
+    const unreadable = join(proj, ".clari", "prompts", "unreadable.md");
+    writeFileSync(unreadable, "Must be skipped without losing normal templates.");
+    const read = fs.readFileSync;
+    const spy = vi.spyOn(fs, "readFileSync").mockImplementation((...args) => {
+      if (args[0] === unreadable) throw new Error("EACCES: template file");
+      return read(...args);
+    });
+    const warnings: string[] = [];
+    let found: ReturnType<typeof discoverTemplates>;
+    try {
+      found = discoverTemplates(proj, home, (error) => warnings.push(error.message));
+    } finally {
+      spy.mockRestore();
+    }
     expect(found.map((t) => [t.name, t.body])).toEqual([
       ["a", "项目级 A"],
       ["b", "用户级 B"],
     ]);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain(unreadable);
+    expect(warnings[0]).toContain("EACCES");
+    const badHome = testDirectory("ak-template-source-");
+    writeFileSync(join(badHome, "prompts"), "Expected a directory, not this file.");
+    warnings.length = 0;
+    const validProject = testDirectory("ak-template-project-");
+    mkdirSync(join(validProject, ".clari", "prompts"), { recursive: true });
+    writeFileSync(join(validProject, ".clari", "prompts", "ok.md"), "Still works.");
+    expect(
+      discoverTemplates(validProject, badHome, (error) => warnings.push(error.message)),
+    ).toMatchObject([{ name: "ok", body: "Still works." }]);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain(join(badHome, "prompts"));
   });
 });
 
 describe("@文件引用", () => {
   it("存在的文本文件附成 <file> 块;不存在的原样保留;二进制与超大文件跳过并说明", () => {
-    const dir = mkdtempSync(join(tmpdir(), "ak-attach-"));
+    const dir = testDirectory("ak-attach-");
     writeFileSync(join(dir, "a.txt"), "hello");
     writeFileSync(join(dir, "bin"), Buffer.from([0, 1, 2]));
     writeFileSync(join(dir, "big.txt"), "z".repeat(60 * 1024));
@@ -260,13 +326,49 @@ describe("@文件引用", () => {
       ["bin", "binary file, not attached"],
       ["big.txt", expect.stringContaining("exceeds")],
     ]);
+    const unreadable = join(dir, "unreadable.txt");
+    writeFileSync(unreadable, "Do not attach this content.");
+    const vanished = join(dir, "vanished.txt");
+    writeFileSync(vanished, "Gone after the file check.");
+    const read = fs.readFileSync;
+    const spy = vi.spyOn(fs, "readFileSync").mockImplementation((...args) => {
+      if (args[0] === unreadable) throw new Error("EACCES: attachment file");
+      if (args[0] === vanished)
+        throw Object.assign(new Error("ENOENT: attachment disappeared"), { code: "ENOENT" });
+      return read(...args);
+    });
+    try {
+      const failed = expandFileRefs("中文要求 @unreadable.txt @a.txt @a.txt", dir);
+      expect(failed.text).toBe(
+        '中文要求 @unreadable.txt @a.txt @a.txt\n\n<file name="a.txt">\nhello\n</file>',
+      );
+      expect(failed.attachments).toEqual([
+        {
+          ref: "unreadable.txt",
+          path: unreadable,
+          bytes: 27,
+          skipped: expect.stringContaining("EACCES"),
+        },
+        { ref: "a.txt", path: join(dir, "a.txt"), bytes: 5 },
+      ]);
+      expect(expandFileRefs("@vanished.txt @nope.txt", dir).attachments).toEqual([
+        {
+          ref: "vanished.txt",
+          path: vanished,
+          bytes: 26,
+          skipped: expect.stringContaining("ENOENT"),
+        },
+      ]);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 
 describe("技能段", () => {
   it("发现 SKILL.md,frontmatter 取名与描述,注入只放名字、描述与路径", () => {
-    const home = mkdtempSync(join(tmpdir(), "ak-sk-home-"));
-    const proj = mkdtempSync(join(tmpdir(), "ak-sk-proj-"));
+    const home = testDirectory("ak-sk-home-");
+    const proj = testDirectory("ak-sk-proj-");
     mkdirSync(join(proj, ".git"));
     mkdirSync(join(home, "skills", "deploy"), { recursive: true });
     mkdirSync(join(proj, ".agents", "skills", "review"), { recursive: true });
@@ -306,7 +408,7 @@ describe("技能段", () => {
 
 describe("分叉与扩展模块", () => {
   it("forkSession:复制前 N 条事件到新文件,原日志不动", () => {
-    const dir = mkdtempSync(join(tmpdir(), "ak-fork-"));
+    const dir = testDirectory("ak-fork-");
     const events: AgentEvent[] = [
       { type: "session/start", at: "", model: "m", system: "s" },
       { type: "user/message", at: "", text: "1" },
@@ -321,7 +423,7 @@ describe("分叉与扩展模块", () => {
   });
 
   it("loadExtensions:default 导出函数,返回工具与槽,可订阅事件;非函数报错", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "ak-ext-"));
+    const dir = testDirectory("ak-ext-");
     const file = join(dir, "ext.mjs");
     writeFileSync(
       file,
@@ -374,7 +476,7 @@ describe("OpenAI 兼容:输出上限字段按方言", () => {
 
 // 让 readFileSync 的导入有用武之地:分叉文件是逐行 JSON。
 it("分叉文件是 JSONL", () => {
-  const dir = mkdtempSync(join(tmpdir(), "ak-fork2-"));
+  const dir = testDirectory("ak-fork2-");
   const r = forkSession([{ type: "session/start", at: "", model: "m", system: "s" }], 1, dir);
   expect(readFileSync(r.file, "utf8").trim().split("\n")).toHaveLength(1);
 });

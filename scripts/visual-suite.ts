@@ -593,6 +593,17 @@ scene = "10";
   shots.push(...divider("foldSteps: current value, recommendations, timing; E enters a custom value"), ...app.dialogLines());
   app.dialogInput("\x1b");
   app.dialogInput("\x1b");
+  await app.command("/settings statusStyle");
+  app.dialogInput("\r");
+  app.dialogInput("\x1b[B");
+  shots.push(...divider("status style: highlighted choice previews the live bar before applying"), ...app.dialogLines());
+  app.dialogInput("\x1b");
+  app.dialogInput("\x1b");
+  await app.command("/settings statusWidgets");
+  app.dialogInput("\r");
+  shots.push(...divider("status contents: each reading has a checkbox and a live preview"), ...app.dialogLines());
+  app.dialogInput("\x1b");
+  app.dialogInput("\x1b");
   app.stop();
   save("10-workbench", "10 Context workbench, events and settings", shots);
 }
@@ -626,6 +637,19 @@ for (const [width, height] of [[60, 24], [120, 36]] as const) {
     save(`11-runtime-${width}-${state}`, `Runtime · ${width} × ${height} · ${state}`, styled);
   };
   await capture("ready");
+  if (width === 60) {
+    await app.command("/settings statusStyle");
+    app.dialogInput("\r");
+    app.dialogInput("\x1b[B");
+    await capture("settings-style");
+    app.dialogInput("\x1b");
+    app.dialogInput("\x1b");
+    await app.command("/settings statusWidgets");
+    app.dialogInput("\r");
+    await capture("settings-contents");
+    app.dialogInput("\x1b");
+    app.dialogInput("\x1b");
+  }
   const work = app.submit("Clarify the runtime UI and keep the execution choices visible.");
   await tick();
   await capture("streaming");
@@ -704,6 +728,8 @@ for (const [width, height] of [[60, 24], [120, 36]] as const) {
     const legacy = new EventLog(legacyFile);
     legacy.append({ type: "session/start", at: "", model: "demo/local-fake", system: "Continue the existing work." });
     legacy.append({ type: "user/message", at: "", text: "Review the session architecture and preserve my choices." });
+    await legacy.checkpoint();
+    legacy.recording?.dispose();
     const restoring = host.switchSession({ kind: "resume", file: legacyFile });
     await tick();
     await capture("restore-review");
@@ -763,6 +789,8 @@ for (const [width, height] of [[60, 24], [120, 36]] as const) {
     const unknownLog = new EventLog(unknownFile);
     for (const event of EventLog.load(savedFile).events) unknownLog.append(event);
     unknownLog.append({ type: "assistant/message", at: "", text: "Updating the release notes.", toolCalls: [{ id: "unfinished-write", name: "write", args: { path: join(dir, "release-notes.md"), content: "Document the recovery behavior." } }], stopReason: "tool" });
+    await unknownLog.checkpoint();
+    unknownLog.recording?.dispose();
     await host.switchSession({ kind: "resume", file: unknownFile });
     await capture("result-unknown");
     await host.app().command("/session recovery");

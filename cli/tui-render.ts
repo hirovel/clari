@@ -11,6 +11,7 @@ import {
   cacheNote,
   callLine,
   changeNote,
+  compactionDecisionText,
   errorCardLines,
   predictedCache,
   resultLines,
@@ -340,8 +341,8 @@ function renderAssistant(
   } else if (e.text) {
     transcript.addChild(new ReplyMarkdown(e.text));
   }
+  v.lastUsage = e.usage;
   if (e.usage) {
-    v.lastUsage = e.usage;
     // 缓存命中明显低于预计才说一句;正常命中不出声。
     const note = cacheNote(e.usage, req.predictedAt.get(req.lastTurnIndex));
     if (note) transcript.addChild(new Block(note));
@@ -412,6 +413,13 @@ function renderRequest(
   // 步与步之间一个空行;用户消息前面已经有了。
   if (!ctx.view.afterUser) transcript.addChild(new Spacer(1));
   ctx.view.afterUser = false;
+  transcript.addChild(
+    new Block(
+      c.faint(
+        `── Request #${req.count} · ${e.model}${e.reason === "compaction" ? " · compaction" : ""}`,
+      ),
+    ),
+  );
   // 来历:正常步的正文就是之前事件的投影,每条都能对回事件号;摘要请求的正文由策略记的 body 重建,没有来历。
   let messages: Message[];
   let provenance: Composition["provenance"] | undefined;
@@ -498,13 +506,17 @@ export function render(ctx: TuiContext, e: AgentEvent, index: number): void {
       renderRequest(ctx, e, index);
       break;
     case "retry":
-      ctx.note(
-        c.faint(
-          `· retry ${e.attempt}: ${e.status ?? ""} ${e.error.split("\n")[0]}, next attempt in ${fmtMs(e.delayMs)}`,
+      ctx.transcript.addChild(
+        new Block(
+          c.faint(
+            `· retry ${e.attempt}: ${e.status ?? ""} ${e.error.split("\n")[0]}, next attempt in ${fmtMs(e.delayMs)}`,
+          ),
         ),
       );
+      ctx.tui.requestRender();
       break;
     case "decision":
+      if (e.slot === "termination") ctx.note(c.soft(`· stopped · ${e.reason} · send to continue`));
       if (e.slot === "steering")
         ctx.note(c.faint(`· steering: injected ${e.injected} (${e.boundary} boundary)`));
       if (e.slot === "execution")
@@ -516,6 +528,7 @@ export function render(ctx: TuiContext, e: AgentEvent, index: number): void {
           ),
         );
       if (e.slot === "facts") ctx.note(c.faint(`· ${e.note} changed; told the model`));
+      if (e.slot === "compaction") ctx.note(c.jin(`· ${compactionDecisionText(e)}`));
       break;
     case "request/error":
       renderRequestError(ctx, e);

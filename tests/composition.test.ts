@@ -108,6 +108,34 @@ describe("composeContext", () => {
     );
     expect(remoteBefore.provenance.at(-1)).toEqual({ event: 4, stages: ["unknown-result"] });
   });
+  it("丢弃旧调用时保留后续轮次复用同一 ID 的工具结果", () => {
+    const events: AgentEvent[] = [
+      { type: "session/start", at: "", model: "m", system: "S" },
+      { type: "user/message", at: "", text: "first" },
+      {
+        type: "assistant/message",
+        at: "",
+        text: "",
+        toolCalls: [{ id: "reused", name: "r", args: {} }],
+        stopReason: "tool",
+      },
+      { type: "tool/result", at: "", callId: "reused", name: "r", content: "old", isError: false },
+      { type: "user/message", at: "", text: "second" },
+      {
+        type: "assistant/message",
+        at: "",
+        text: "",
+        toolCalls: [{ id: "reused", name: "r", args: {} }],
+        stopReason: "tool",
+      },
+      { type: "tool/result", at: "", callId: "reused", name: "r", content: "new", isError: false },
+      { type: "context/drop", at: "", target: 2 },
+    ];
+    const comp = composeContext(events);
+    expect(comp.messages.filter((m) => m.role === "tool").map((m) => m.content)).toEqual(["new"]);
+    expect(comp.omitted).toContainEqual({ event: 3, reason: "dropped" });
+    expect(comp.omitted).not.toContainEqual({ event: 6, reason: "dropped" });
+  });
   it("每条消息带来源事件与阶段;摘要、清除、编辑、丢弃各有名字;省略列出原因;deriveMessages 只是它的一列", () => {
     const events: AgentEvent[] = [
       ...sample(),
@@ -232,13 +260,12 @@ describe("检视器组装视图", () => {
     expect(screen).toContain("#2–#5  4 messages · ");
     expect(screen).toContain("→ summary · Enter shows them");
     // 底部预览:最后一条的来历
-    expect(screen).toContain("sent as messages[4]");
+    expect(screen).toContain("next request messages[4] · from event user/message · not sent yet");
     // Enter 先开动作菜单,第一项"View full message"再 Enter 才进全文
     insp.handleInput("\r");
     expect(insp.currentMode).toBe("actions");
     const menu = insp.render(120).map(plain).join("\n");
     expect(menu).toContain("1  View full message");
-    expect(menu).toContain("If you do this");
     insp.handleInput("\r");
     expect(insp.currentMode).toBe("message");
     expect(insp.render(120).map(plain).join("\n")).toContain("message 6 of 6");

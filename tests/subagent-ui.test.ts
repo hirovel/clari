@@ -130,7 +130,38 @@ describe("子 agent 视图", () => {
     insp = app.inspector.lines(110).map(stripAnsi).join("\n");
     expect(insp).toContain("Events");
     expect(insp).toContain("▸ sub #1");
+    const parentCount = log.events.length;
+    const child = children[0]?.log;
+    if (!child) throw new Error("missing child");
+    const childCount = child.events.length;
+    app.inspector.key("\t"); // 事件 → 压缩 → 上下文,仍查看子会话。
+    app.inspector.key("\t");
+    insp = app.inspector.lines(110).map(stripAnsi).join("\n");
+    expect(insp).toContain("Read-only");
+    expect(insp).not.toMatch(/tools\s+\d+ definitions?/);
+    app.inspector.key("\r");
+    insp = app.inspector.lines(110).map(stripAnsi).join("\n");
+    expect(insp).toContain("View full message");
+    expect(insp).not.toContain("Edit content");
+    expect(insp).not.toContain("Retry last step");
+    expect(insp).not.toContain("Fork here");
+    app.inspector.key("\r");
+    expect(app.inspector.lines(110).map(stripAnsi).join("\n")).toContain("子完成:one");
+    expect(app.dialogLines()).toEqual([]);
+    // 子system只能查看全文,不能打开父提示词的开关或工具选单。
+    app.inspector.key("\x1b");
+    app.inspector.key("g");
+    app.inspector.key("\r");
+    app.inspector.key("2");
+    app.inspector.key("\r");
+    expect(log.events).toHaveLength(parentCount);
+    expect(child.events).toHaveLength(childCount);
+    expect(app.dialogLines()).toEqual([]);
     app.inspector.close();
+    app.inspector.openComposition();
+    expect(app.inspector.lines(110).map(stripAnsi).join("\n")).toContain("▸ main");
+    app.inspector.key("\r");
+    expect(app.inspector.lines(110).map(stripAnsi).join("\n")).toContain("Edit content");
     app.stop();
   });
 

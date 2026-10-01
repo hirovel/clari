@@ -1,16 +1,18 @@
 // 技能:frontmatter 四字段、四个发现目录、清单排除只许用户触发的、用户 /名 触发成用户消息、
-// allowed-tools 免审批、skill 工具(load = tool)、skills.mode = manual 不进系统提示词、/skills 列表。
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+// allowed-tools 免审批、skill 工具(load = tool)、skills.mode = manual 不进系统提示词、/inspect skills 列表。
+import * as fs from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { Type } from "@sinclair/typebox";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { applyPreset, buildTools, parseCommonArgs, systemPromptFor } from "../cli/bootstrap.js";
 import {
   automaticSkills,
   discoverSkills,
   expandSkill,
   parseSkill,
+  skillDirectories,
+  skillSources,
   skillsSection,
 } from "../cli/prompt.js";
 import { recordSessionSetup, restoreSessionSetup } from "../cli/session-setup.js";
@@ -20,8 +22,15 @@ import type { KernelConfig } from "../src/config.js";
 import { EventLog } from "../src/log.js";
 import { deriveMessages } from "../src/messages.js";
 import type { Provider } from "../src/provider.js";
+import { DEFAULT_SKILL_SOURCES } from "../src/settings.js";
 import { defineTool } from "../src/tools.js";
+import { testDirectory } from "./helpers/setup.js";
 import { VirtualTerminal } from "./helpers/virtual-terminal.js";
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return { ...actual, statSync: vi.fn(actual.statSync), readdirSync: vi.fn(actual.readdirSync) };
+});
 
 const ansi = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
 const plain = (s: string) => s.replace(ansi, "");
@@ -37,8 +46,8 @@ Deploy to $1. Full args: $ARGUMENTS
 Run ./scripts/release.sh`;
 
 function project(): { home: string; proj: string } {
-  const home = mkdtempSync(join(tmpdir(), "clari-sk-home-"));
-  const proj = mkdtempSync(join(tmpdir(), "clari-sk-proj-"));
+  const home = testDirectory("clari-sk-home-");
+  const proj = testDirectory("clari-sk-proj-");
   mkdirSync(join(proj, ".git"));
   mkdirSync(join(home, "skills", "deploy"), { recursive: true });
   writeFileSync(join(home, "skills", "deploy", "SKILL.md"), DEPLOY);
@@ -102,14 +111,43 @@ describe("SKILL.md 解析与发现", () => {
     mkdirSync(join(home, "skills", "broken"), { recursive: true });
     writeFileSync(broken, "---\nname: [unclosed\n---\nbody");
     const warnings: string[] = [];
-    const skills = discoverSkills(proj, {
-      home,
-      root: proj,
-      onError: (error) => warnings.push(error.message),
+    const deniedDirectory = join(dirname(home), ".claude", "skills");
+    const deniedFile = join(proj, ".agents", "skills", "unreadable", "SKILL.md");
+    const duplicate = join(proj, ".agents", "skills", "deploy", "SKILL.md");
+    mkdirSync(deniedDirectory, { recursive: true });
+    mkdirSync(dirname(deniedFile), { recursive: true });
+    mkdirSync(dirname(duplicate), { recursive: true });
+    writeFileSync(deniedFile, "This file cannot be inspected.");
+    writeFileSync(duplicate, "This duplicate must not replace the user skill.");
+    const stat = fs.statSync;
+    const readDirectory = fs.readdirSync;
+    const statSpy = vi.spyOn(fs, "statSync").mockImplementation((...args) => {
+      if (args[0] === deniedFile) throw new Error("EACCES: skill file");
+      return stat(...args);
     });
-    expect(warnings).toHaveLength(1);
+    const directorySpy = vi.spyOn(fs, "readdirSync").mockImplementation((...args) => {
+      if (args[0] === deniedDirectory) throw new Error("EACCES: skill directory");
+      return readDirectory(...args);
+    });
+    let skills: ReturnType<typeof discoverSkills>;
+    try {
+      skills = discoverSkills(proj, {
+        home,
+        root: proj,
+        onError: (error) => warnings.push(error.message),
+      });
+    } finally {
+      statSpy.mockRestore();
+      directorySpy.mockRestore();
+    }
+    expect(warnings).toHaveLength(4);
     expect(warnings[0]).toContain(broken);
     expect(warnings[0]).toContain("Invalid skill");
+    expect(warnings.some((w) => w.includes(deniedDirectory) && w.includes("EACCES"))).toBe(true);
+    expect(warnings.some((w) => w.includes(deniedFile) && w.includes("EACCES"))).toBe(true);
+    expect(
+      warnings.some((w) => w.includes(duplicate) && w.includes(join(home, "skills", "deploy"))),
+    ).toBe(true);
     expect(skills.map((x) => [x.name, x.disableModelInvocation])).toEqual([
       ["deploy", false],
       ["secret", true],
@@ -118,6 +156,36 @@ describe("SKILL.md 解析与发现", () => {
     expect(sec?.text).toContain("- deploy: Ship a release");
     expect(sec?.text).not.toContain("secret");
     expect(skillsSection(skills.filter((x) => x.disableModelInvocation))).toBeUndefined();
+    const custom = join(proj, "custom  skills");
+    mkdirSync(join(custom, "deploy"), { recursive: true });
+    writeFileSync(join(custom, "deploy", "SKILL.md"), "Custom deployment instructions.");
+    const sources = {
+      "./custom  skills": "on",
+      ...DEFAULT_SKILL_SOURCES,
+      "user-clari": "off",
+      [custom]: "on",
+    } as const;
+    expect(skillDirectories(proj, { home, root: proj, sources })).toEqual([
+      custom,
+      deniedDirectory,
+      join(proj, ".agents", "skills"),
+      join(proj, ".claude", "skills"),
+    ]);
+    expect(skillSources(proj, { home, root: proj, sources })[1]).toMatchObject({
+      name: "user-clari",
+      enabled: false,
+      path: join(home, "skills"),
+    });
+    const customSkills = discoverSkills(proj, {
+      home,
+      root: proj,
+      sources,
+      onError: (error) => warnings.push(error.message),
+    });
+    expect(customSkills.find((skill) => skill.name === "deploy")?.body).toBe(
+      "Custom deployment instructions.",
+    );
+    expect(discoverSkills(proj, { home, root: proj, sources: {} })).toEqual([]);
   });
 
   it("技能正文不作模板替换,带来源并完整保留用户要求,无参数时只加载正文", () => {
@@ -198,6 +266,13 @@ describe("SKILL.md 解析与发现", () => {
       presets: { p: { prompt: { skills: { load: "tool" } } } },
     };
     expect(applyPreset(parseCommonArgs(["--preset", "p"]), preset).skillsLoad).toBe("tool");
+    const sourceArgs = applyPreset(parseCommonArgs([]), {
+      ...base,
+      defaults: { prompt: { skills: { mode: "auto", sources: { "project-claude": "on" } } } },
+    });
+    const sourcePrompt = systemPromptFor(sourceArgs, proj, { home, root: proj });
+    // secret 是 manual-only,源切换不能偷偷把它放进自动清单。
+    expect(sourcePrompt.sections.some((s) => s.name === "Skills")).toBe(false);
     expect(() =>
       applyPreset(parseCommonArgs([]), {
         ...base,
@@ -220,6 +295,7 @@ describe("界面里的技能", () => {
     const log = new EventLog();
     const term = new VirtualTerminal(60, 28);
     const requests: { system: string; tools: string[]; description: string }[] = [];
+    let pending: Promise<void> | undefined;
     const app = createTuiApp({
       terminal: term,
       log,
@@ -233,6 +309,7 @@ describe("界面里的技能", () => {
             tools: tools.map((t) => t.name),
             description: tools.find((t) => t.name === "skill")?.description ?? "",
           });
+          await pending;
           return { text: "ok", toolCalls: [], stopReason: "end" };
         },
       },
@@ -293,9 +370,76 @@ describe("界面里的技能", () => {
     expect(requests.at(-1)?.tools).not.toContain("skill");
     expect(requests.at(-1)?.system).toBe("My exact base instructions.");
     expect(JSON.stringify(deriveMessages(log.events))).toContain("User request:\\nstaging");
+    // 来源的增删开关验证实际发现、后续请求与历史,不对样式建立快照。
+    await app.command("/settings prompt.skills.sources {}");
+    expect(skills).toEqual([]);
+    const custom = join(proj, "custom  skills");
+    mkdirSync(join(custom, "review"), { recursive: true });
+    writeFileSync(
+      join(custom, "review", "SKILL.md"),
+      "---\nname: review\ndescription: Custom review\n---\nCheck custom instructions.",
+    );
+    await app.command("/settings prompt.skills.sources");
+    app.dialogInput("\r");
+    app.dialogInput("\x1b[F");
+    app.dialogInput("\r");
+    app.dialogInput(custom);
+    app.dialogInput("\r");
+    await tick();
+    expect(skills.map((s) => s.name)).toEqual(["review"]);
+    app.dialogInput("i");
+    expect(menu()).toContain(custom.slice(0, 25));
+    app.dialogInput("\x1b");
+    app.dialogInput("\r"); // 禁用自定义来源。
+    await tick();
+    expect(skills).toEqual([]);
+    app.dialogInput("\r");
+    await tick();
+    expect(skills.map((s) => s.name)).toEqual(["review"]);
+    app.dialogInput("\x1b");
+    app.dialogInput("\x1b");
+    app.dialogInput("\x1b");
+    await app.command("/settings prompt.skills.mode auto");
+    await app.command("/settings prompt.skills.include all");
+    await app.command("/settings prompt.skills.load read");
+    await app.submit("continue with custom source");
+    expect(requests.at(-1)?.system).toContain("Custom review");
+    expect(requests.at(-1)?.system).not.toContain("- deploy:");
+    const sources = restoreSessionSetup(log.events, {}).setup.values.prompt?.skills?.sources;
+    expect(sources).toEqual({ [custom]: "on" });
+    expect(
+      applyPreset(parseCommonArgs([]), {
+        default: "m",
+        providers: {},
+        defaults: restoreSessionSetup(log.events, {}).setup.values,
+      }).skillsSources,
+    ).toEqual(sources);
+    let finish!: () => void;
+    pending = new Promise<void>((r) => {
+      finish = r;
+    });
+    const turn = app.submit("running request");
+    await tick();
+    await app.command("/settings prompt.skills.sources {}");
+    expect(skills.map((s) => s.name)).toEqual(["review"]);
+    expect(restoreSessionSetup(log.events, {}).setup.values.prompt?.skills?.sources).toEqual(
+      sources,
+    );
+    finish();
+    await turn;
+    pending = undefined;
+    await app.command("/settings prompt.skills.sources");
+    app.dialogInput("\r");
+    app.dialogInput("\x1b[H");
+    app.dialogInput("\x1b[3~"); // 自定义来源在配置首位;删除只删配置。
+    await tick();
+    expect(skills).toEqual([]);
+    expect(restoreSessionSetup(log.events, {}).setup.values.prompt?.skills?.sources).toEqual({});
+    expect(fs.existsSync(join(custom, "review", "SKILL.md"))).toBe(true);
+    expect(JSON.stringify(deriveMessages(log.events))).toContain("User request:\\nstaging");
     app.stop();
   });
-  it("/deploy staging 变成一条用户消息;allowed-tools 免审批,turn 结束后恢复;/skills 列表", async () => {
+  it("/deploy staging 变成一条用户消息;allowed-tools 免审批,turn 结束后恢复;/inspect skills 列表", async () => {
     const { home, proj } = project();
     const skills = discoverSkills(proj, { home, root: proj });
     const asked: string[] = [];

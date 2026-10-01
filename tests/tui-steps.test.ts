@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createTuiApp } from "../cli/tui-app.js";
 import { EventLog } from "../src/log.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
+import { DEFAULT_STATUS_WIDGETS } from "../src/status-bar.js";
 import { testImage } from "./helpers/image.js";
 import { stripAnsi, VirtualTerminal } from "./helpers/virtual-terminal.js";
 
@@ -120,6 +121,21 @@ describe("账簿折叠", () => {
   it("PgUp/PgDn 移动光标,状态行显示位置;Enter 折起或展开;Esc 放开;手动展开的不再自动折", async () => {
     const log = new EventLog();
     const { app, term, doc } = boot({ log, readClipboard: async () => ({ image: testImage }) });
+    await app.command("/help");
+    app.setDraft("keep draft");
+    app.tui.renderNow(true);
+    const bottom = (await term.screen()).join("\n");
+    term.feed("\x1b[5~");
+    app.tui.renderNow(true);
+    const earlier = (await term.screen()).join("\n");
+    expect(earlier).not.toBe(bottom);
+    expect(earlier).toContain("Commands");
+    term.feed("\x1b[6~");
+    app.tui.renderNow(true);
+    expect((await term.screen()).join("\n")).toBe(bottom);
+    expect(app.draft()).toBe("keep draft");
+    expect(log.events.some((e) => e.type === "user/message")).toBe(false);
+    app.setDraft("");
     for (let i = 1; i <= 4; i++) await app.submit(`q ${i}`);
     term.feed("\x1b[5~"); // PgUp:从最后一步起
     expect(doc()).toContain("step 4/4");
@@ -159,7 +175,10 @@ describe("账簿折叠", () => {
   });
 
   it("foldSteps 0 从不折;脉搏在两次请求后出现在状态行", async () => {
-    const { app, doc } = boot({ foldSteps: 0 });
+    const { app, doc } = boot({
+      foldSteps: 0,
+      statusWidgets: [...DEFAULT_STATUS_WIDGETS, "trend"],
+    });
     for (let i = 1; i <= 5; i++) await app.submit(`q ${i}`);
     const d = doc();
     expect(d).not.toContain("≡ #");

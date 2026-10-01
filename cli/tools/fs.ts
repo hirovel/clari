@@ -4,6 +4,7 @@
 // 描述文案的写法:每条说清输出形状、硬限制、失败原因与该换哪个工具;不写行为以外的话。
 import {
   closeSync,
+  createReadStream,
   mkdirSync,
   openSync,
   readdirSync,
@@ -17,7 +18,7 @@ import { Type } from "@sinclair/typebox";
 import { defineTool, described } from "../../src/tools.js";
 import { capLineLength, keepHead, type TruncationPolicy } from "./truncate.js";
 
-/** 单次整读的文件大小上限:再大就要求分段,不把整个文件拉进内存。 */
+/** 整读上限;大文件走按行流式读取,不把整个文件拉进内存。 */
 export const MAX_READ_BYTES = 20 * 1024 * 1024;
 
 /** 头部采样里出现 NUL 即视为二进制;文本文件不会有它。 */
@@ -32,16 +33,71 @@ export function looksBinary(path: string): boolean {
   }
 }
 
+/** 大文件的原文边读边记录,内存只保留所选行的可显示前缀。 */
+async function readLargeRange(
+  path: string,
+  start: number,
+  limit: number,
+  maxLineChars: number,
+  signal: AbortSignal,
+  record?: (text: string) => void,
+): Promise<{ lines: string[]; more: boolean; total?: number; clipped: boolean }> {
+  const lines: string[] = [];
+  let line = 1;
+  let prefix = "";
+  let clipped = false;
+  let anyClipped = false;
+  let rawLineStarted = false;
+  const end = start + limit - 1;
+  const beginRawLine = () => {
+    if (rawLineStarted) return;
+    if (lines.length > 0) record?.("\n");
+    rawLineStarted = true;
+  };
+  const append = (part: string) => {
+    if (line < start || line > end) return;
+    beginRawLine();
+    if (part) record?.(part);
+    const room = Math.max(0, maxLineChars - prefix.length);
+    prefix += part.slice(0, room);
+    if (part.length > room) clipped = true;
+  };
+  const finish = () => {
+    if (line >= start && line <= end) {
+      beginRawLine();
+      lines.push(clipped ? `${prefix}…[line truncated to ${maxLineChars} chars]` : prefix);
+      anyClipped ||= clipped;
+    }
+    prefix = "";
+    clipped = false;
+    rawLineStarted = false;
+    line++;
+  };
+  for await (const chunk of createReadStream(path, { encoding: "utf8" })) {
+    signal.throwIfAborted();
+    const text = String(chunk);
+    let from = 0;
+    for (let at = text.indexOf("\n"); at !== -1; at = text.indexOf("\n", from)) {
+      append(text.slice(from, at));
+      finish();
+      if (line > end) return { lines, more: true, clipped: anyClipped };
+      from = at + 1;
+    }
+    append(text.slice(from));
+  }
+  finish(); // 与 split("\n") 一样,末尾换行后仍有一个空行。
+  return { lines, more: false, total: line - 1, clipped: anyClipped };
+}
+
 export function createReadTool(opts: { truncate?: TruncationPolicy; maxLineChars?: number } = {}) {
-  // 保头+分页是全行业共识(pi/Claude Code/opencode/Cline 现行版一致,保尾无一家)。
   const truncate = opts.truncate ?? keepHead();
-  const capLine = capLineLength(opts.maxLineChars ?? 2000);
   return defineTool({
     name: "read",
     ...described({
       core:
         "Read a text file as numbered lines, or list a directory (one entry per line; directories end with /, files show their size). " +
-        "Output past the limit is truncated and the note gives the offset to continue from; overlong lines are cut. " +
+        "Output defaults to 2000 lines / 50 KiB; maxOutputBytes can raise the byte budget for one call. " +
+        "Output past the limit is shortened; the note gives a next-line offset only when displayed lines are complete. Overlong lines can be recovered with a larger maxOutputBytes. " +
         "Text only: binary files and images are refused.",
       guidance:
         "Use offset and limit to read only the part you need, and read several files in one turn when you know which ones. " +
@@ -51,17 +107,47 @@ export function createReadTool(opts: { truncate?: TruncationPolicy; maxLineChars
     }),
     parameters: Type.Object({
       path: Type.String({ description: "file or directory path, relative or absolute" }),
-      offset: Type.Optional(Type.Number({ description: "starting line number, 1-based" })),
-      limit: Type.Optional(Type.Number({ description: "maximum number of lines to return" })),
+      offset: Type.Optional(
+        Type.Integer({ minimum: 1, description: "starting line number, 1-based" }),
+      ),
+      limit: Type.Optional(
+        Type.Integer({ minimum: 1, description: "maximum number of lines to return" }),
+      ),
+      maxOutputBytes: Type.Optional(
+        Type.Integer({
+          minimum: 51200,
+          description:
+            "raise the 50 KiB output byte budget for this call; the 2000-line limit still applies",
+        }),
+      ),
     }),
     concurrency: "parallel",
     async execute(args, ctx) {
       const path = resolve(args.path);
       const st = statSync(path);
-      if (st.isDirectory()) return listDirectory(path);
-      if (st.size > MAX_READ_BYTES) {
+      if (st.isDirectory()) {
+        const listing = listDirectory(path);
+        ctx.output?.write(listing);
+        const shown = truncate(
+          listing,
+          args.maxOutputBytes ? { maxBytes: args.maxOutputBytes } : undefined,
+        );
+        return shown.truncated
+          ? `${shown.text}\n[${shown.note ?? "directory listing truncated"}; use glob to narrow the list]`
+          : shown.text;
+      }
+      const start = args.offset ?? 1;
+      const limit = args.limit;
+      if (
+        !Number.isSafeInteger(start) ||
+        start < 1 ||
+        (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1))
+      ) {
+        throw new Error("offset and limit must be positive integers.");
+      }
+      if (st.size > MAX_READ_BYTES && limit === undefined) {
         throw new Error(
-          `file is ${Math.round(st.size / 1024 / 1024)} MB, exceeds the single-read limit of ${MAX_READ_BYTES / 1024 / 1024} MB. Use bash head/sed/grep to take the part you need.`,
+          `file is ${Math.round(st.size / 1024 / 1024)} MB; specify offset and limit to read a range without loading the whole file.`,
         );
       }
       if (st.size > 0 && looksBinary(path)) {
@@ -69,15 +155,58 @@ export function createReadTool(opts: { truncate?: TruncationPolicy; maxLineChars
           `${args.path} is a binary file (${st.size} bytes); read only handles text.`,
         );
       }
-      const lines = readFileSync(path, "utf8").split("\n");
-      const start = Math.max(1, args.offset ?? 1);
-      const slice = lines.slice(start - 1, args.limit ? start - 1 + args.limit : undefined);
-      ctx.output?.write(slice.join("\n"));
-      const numbered = slice.map((l, i) => `${start + i}\t${capLine(l)}`).join("\n");
-      const t = truncate(numbered);
-      if (!t.truncated) return t.text;
-      const shown = t.text.split("\n").length;
-      return `${t.text}\n[${t.note ?? "truncated"}; file has ${lines.length} lines, continue with offset=${start + shown}]`;
+      const maxLineChars = Math.max(
+        opts.maxLineChars ?? 2000,
+        args.maxOutputBytes ? Math.floor(args.maxOutputBytes / 4) - 100 : 0,
+      );
+      const capLine = capLineLength(maxLineChars);
+      const range =
+        st.size > MAX_READ_BYTES
+          ? await readLargeRange(path, start, limit as number, maxLineChars, ctx.signal, (text) =>
+              ctx.output?.write(text),
+            )
+          : undefined;
+      const allLines = range ? undefined : readFileSync(path, "utf8").split("\n");
+      const slice =
+        range?.lines ??
+        allLines?.slice(start - 1, limit === undefined ? undefined : start - 1 + limit) ??
+        [];
+      if (slice.length === 0 && allLines && start > allLines.length) {
+        throw new Error(
+          `offset ${start} is beyond the end of the file (${allLines.length} lines).`,
+        );
+      }
+      if (slice.length === 0 && range?.total !== undefined && start > range.total) {
+        throw new Error(`offset ${start} is beyond the end of the file (${range.total} lines).`);
+      }
+      if (!range) ctx.output?.write(slice.join("\n"));
+      const lineClipped = range?.clipped ?? slice.some((line) => line.length > maxLineChars);
+      const numberedLines = slice.map((l, i) => `${start + i}\t${range ? l : capLine(l)}`);
+      const numbered = numberedLines.join("\n");
+      const t = truncate(
+        numbered,
+        args.maxOutputBytes ? { maxBytes: args.maxOutputBytes } : undefined,
+      );
+      const source = ctx.output?.path ? `; original selected text: ${ctx.output.path}` : "";
+      const lineNote = lineClipped
+        ? `\n[one or more lines shortened; raise maxOutputBytes to see more of each line${source}]`
+        : "";
+      if (
+        !t.truncated &&
+        !range?.more &&
+        (allLines === undefined || start - 1 + slice.length >= allLines.length)
+      )
+        return t.text + lineNote;
+      const shownLines = t.text.split("\n");
+      const completeLines =
+        !lineClipped && shownLines.every((line, i) => line === numberedLines[i]);
+      const total = range?.total ?? allLines?.length;
+      const next = completeLines
+        ? `continue with offset=${start + shownLines.length}`
+        : lineClipped
+          ? `one or more selected lines are shortened; raise maxOutputBytes or read fewer lines${source}`
+          : `current line is incomplete; raise maxOutputBytes or read fewer lines${source}`;
+      return `${t.text}\n[${t.note ?? "more lines available"}${total === undefined ? "" : `; file has ${total} lines`}; ${next}]`;
     },
   });
 }
@@ -118,62 +247,12 @@ export const writeTool = defineTool({
   },
 });
 
-/** 归一化一行用于宽松匹配:去行尾空白,弯引号与长破折号换成 ASCII,特殊空格换成普通空格。 */
-export function normalizeLine(line: string): string {
-  return line
-    .replace(/[‘’‚‛]/g, "'")
-    .replace(/[“”„‟]/g, '"')
-    .replace(/[–—−]/g, "-")
-    .replace(/[  -​  　]/g, " ")
-    .replace(/\s+$/, "");
-}
-
-/**
- * 精确匹配失败后的宽松匹配:按行归一化后找唯一的连续行窗口。命中时只替换这几行,
- * 文件其余部分一字不动。返回 undefined = 也没匹配到;抛错 = 匹配到多处。
- */
-export function fuzzyReplace(
-  content: string,
-  oldText: string,
-  newText: string,
-): { next: string; line: number } | undefined {
-  const lines = content.split("\n");
-  const target = oldText.split("\n").map(normalizeLine);
-  // 去掉 oldText 首尾的空行,模型常多带一行。
-  while (target.length > 0 && target[0] === "") target.shift();
-  while (target.length > 0 && target.at(-1) === "") target.pop();
-  if (target.length === 0) return undefined;
-  const norm = lines.map(normalizeLine);
-  const hits: number[] = [];
-  for (let i = 0; i + target.length <= norm.length; i++) {
-    let ok = true;
-    for (let k = 0; k < target.length; k++) {
-      if (norm[i + k] !== target[k]) {
-        ok = false;
-        break;
-      }
-    }
-    if (ok) hits.push(i);
-  }
-  if (hits.length === 0) return undefined;
-  if (hits.length > 1) {
-    throw new Error(`fuzzy match hit ${hits.length} places, not unique. Provide more context.`);
-  }
-  const at = hits[0] as number;
-  const replacement = newText.split("\n");
-  const next = [...lines.slice(0, at), ...replacement, ...lines.slice(at + target.length)].join(
-    "\n",
-  );
-  return { next, line: at + 1 };
-}
-
 export const editTool = defineTool({
   name: "edit",
   ...described({
     core:
       "Replace text in a file. oldText must match the file exactly, indentation included, and occur exactly once unless replaceAll is set. " +
-      "When the exact match fails, one retry ignores trailing whitespace and quote style and the result says so. " +
-      "No match or several matches fail with the reason.",
+      "Uniform CRLF files also accept LF in oldText. No match or several matches fail with the reason.",
     guidance:
       "Keep oldText as short as it can be while still unique. Set replaceAll to change every occurrence, e.g. for a rename. " +
       "Read the file in this session before editing it.",
@@ -188,12 +267,22 @@ export const editTool = defineTool({
   }),
   async execute(args) {
     const path = resolve(args.path);
-    const raw = readFileSync(path, "utf8");
-    // 换行风格:文件是 CRLF 时按 LF 匹配、按 CRLF 写回;模型给的原文里不必带 \r。
-    const crlf = raw.includes("\r\n");
+    // 编辑会重写文件;解码失败时拒绝修改,避免把未知字节变成替换字符。
+    const bytes = readFileSync(path);
+    if (bytes.includes(0)) {
+      throw new Error(`${args.path} contains NUL bytes; edit only handles UTF-8 text.`);
+    }
+    let raw: string;
+    try {
+      raw = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+    } catch {
+      throw new Error(`${args.path} is not valid UTF-8 text; edit refused without writing.`);
+    }
+    // 仅对统一 CRLF 文件归一化。混合换行按原文匹配,保留未触及的行。
+    const crlf = raw.includes("\r\n") && !raw.replaceAll("\r\n", "").includes("\n");
     const content = crlf ? raw.replaceAll("\r\n", "\n") : raw;
-    const oldText = args.oldText.replaceAll("\r\n", "\n");
-    const newText = args.newText.replaceAll("\r\n", "\n");
+    const oldText = crlf ? args.oldText.replaceAll("\r\n", "\n") : args.oldText;
+    const newText = crlf ? args.newText.replaceAll("\r\n", "\n") : args.newText;
     if (!oldText) throw new Error("oldText must not be empty.");
     const count = content.split(oldText).length - 1;
     if (args.replaceAll && count > 0) {
@@ -208,21 +297,13 @@ export const editTool = defineTool({
         `oldText occurs ${count} times in ${args.path}, not unique. Provide more context, or set replaceAll to change every occurrence.`,
       );
     }
-    let next: string;
-    let note = "";
-    if (count === 1) {
-      next = content.replace(oldText, () => newText);
-    } else {
-      const fuzzy = fuzzyReplace(content, oldText, newText);
-      if (!fuzzy) {
-        throw new Error(`oldText not found in ${args.path}; read the file first to confirm it.`);
-      }
-      next = fuzzy.next;
-      note = ` (exact match failed; fuzzy match ignoring trailing whitespace and quote style hit line ${fuzzy.line})`;
+    if (count === 0) {
+      throw new Error(`oldText not found in ${args.path}; read the file first to confirm it.`);
     }
+    const next = content.replace(oldText, () => newText);
     if (next === content)
       throw new Error("replacement is identical to the original; nothing written.");
     writeFileSync(path, crlf ? next.replaceAll("\n", "\r\n") : next, "utf8");
-    return `replaced one occurrence in ${args.path}.${note}`;
+    return `replaced one occurrence in ${args.path}.`;
   },
 });

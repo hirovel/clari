@@ -4,6 +4,7 @@
 // 每条收发的消息都交给 onRpc,检视器据此可见;stderr 逐行交给 onLog,不当错误。
 import { type ChildProcess, spawn } from "node:child_process";
 import { createInterface } from "node:readline";
+import { stopProcessTree } from "../process-tree.js";
 
 export const MODERN_VERSION = "2026-07-28";
 export const LEGACY_VERSION = "2025-06-18";
@@ -111,6 +112,7 @@ export class McpClient {
   private version = MODERN_VERSION;
   private sessionId: string | undefined;
   private closed = false;
+  private closing: Promise<void> | undefined;
 
   constructor(
     readonly name: string,
@@ -399,6 +401,7 @@ export class McpClient {
       cwd: t.cwd ?? process.cwd(),
       env,
       stdio: ["pipe", "pipe", "pipe"],
+      detached: process.platform !== "win32",
       shell: process.platform === "win32" && /\.(cmd|bat)$/i.test(t.command),
     });
     this.child = child;
@@ -466,28 +469,56 @@ export class McpClient {
     this.pending.clear();
   }
 
-  /** 关闭:停止等待 HTTP 应答;stdio 先关 stdin,1 秒后 SIGTERM,再 1 秒 SIGKILL。 */
-  async close(): Promise<void> {
+  /** 关闭:先让 stdio 服务处理 EOF,仍在运行时停止整个进程树。 */
+  close(): Promise<void> {
+    if (!this.closing)
+      this.closing = this.stop().catch((error) => {
+        this.closing = undefined;
+        throw error;
+      });
+    return this.closing;
+  }
+
+  private async stop(): Promise<void> {
     this.closed = true;
     this.failAll(new Error(`mcp ${this.name}: closed`));
     const child = this.child;
-    if (!child || child.exitCode !== null) return;
-    await new Promise<void>((resolve) => {
-      const done = () => {
-        clearTimeout(t1);
-        clearTimeout(t2);
-        resolve();
+    if (!child || child.exitCode !== null || child.signalCode !== null) return;
+    await new Promise<void>((resolve, reject) => {
+      let t1: NodeJS.Timeout | undefined;
+      let t2: NodeJS.Timeout | undefined;
+      let finished = false;
+      const done = (error?: Error) => {
+        if (finished) return;
+        finished = true;
+        if (t1) clearTimeout(t1);
+        if (t2) clearTimeout(t2);
+        child.off("exit", onExit);
+        if (error) reject(error);
+        else resolve();
       };
-      child.once("exit", done);
+      const onExit = () => done();
+      child.once("exit", onExit);
       try {
         child.stdin?.end();
       } catch {
         // 已关闭
       }
-      const t1 = setTimeout(() => child.kill("SIGTERM"), 1000);
-      const t2 = setTimeout(() => {
-        child.kill("SIGKILL");
-        done();
+      t1 = setTimeout(() => {
+        try {
+          stopProcessTree(child, process.platform !== "win32");
+        } catch (error) {
+          child.stdout?.destroy();
+          child.stderr?.destroy();
+          done(new Error(`mcp ${this.name}: ${(error as Error).message}`));
+        }
+      }, 1000);
+      t2 = setTimeout(() => {
+        done(
+          new Error(
+            `mcp ${this.name}: process did not exit after stop; children may still be running`,
+          ),
+        );
       }, 2000);
     });
   }

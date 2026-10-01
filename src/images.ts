@@ -18,7 +18,7 @@ export function imageSummary(images?: readonly ImageInput[]): string {
     ? images
         .map(
           (image, i) =>
-            `[Image ${i + 1}: ${image.name ?? image.mimeType}, ${imageBytes(image)} bytes]`,
+            `[Image ${i + 1}: ${image.name ?? image.mimeType}, ${imageBytes(image)} bytes; visual tokens unknown before response]`,
         )
         .join("\n")
     : "";

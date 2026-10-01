@@ -16,9 +16,10 @@ export class EventLog {
   private listeners = new Set<(e: AgentEvent) => void>();
   readonly recording?: Recording;
 
-  constructor(filePath?: string) {
+  constructor(filePath?: string, recordingBufferBytes?: number) {
     if (filePath) {
-      this.recording = new Recording(filePath);
+      this.recording = new Recording(filePath, recordingBufferBytes);
+      this.recording.claim();
       this.recording.onGap = (ref) =>
         this.append({
           type: "ext/event",
@@ -67,8 +68,13 @@ export class EventLog {
 
   static load(filePath: string, opts: { attach?: boolean } = {}): EventLog {
     const log = new EventLog(opts.attach ? filePath : undefined);
-    const events = (log.recording ?? new Recording(filePath)).loadEvents(opts.attach);
-    for (const event of events) log.entries.push(seal(event));
-    return log;
+    try {
+      const events = (log.recording ?? new Recording(filePath)).loadEvents(opts.attach);
+      for (const event of events) log.entries.push(seal(event));
+      return log;
+    } catch (error) {
+      log.recording?.dispose();
+      throw error;
+    }
   }
 }

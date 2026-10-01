@@ -8,7 +8,13 @@ export type ExtLine = { tone: "jin" | "zhu" | "faint"; text: string };
 type Renderer = (e: Extract<AgentEvent, { type: "ext/event" }>) => ExtLine | undefined;
 
 const renderers: Record<string, Renderer> = {
-  recording: () => undefined,
+  recording: (event) =>
+    event.kind === "buffer/full"
+      ? {
+          tone: "zhu",
+          text: "· Work stopped: recording buffer full. Check unknown tool results.",
+        }
+      : undefined,
   skills: (event) =>
     event.kind === "load-error" ? { tone: "zhu", text: String(event.payload.message) } : undefined,
   mcp: renderMcpEvent,

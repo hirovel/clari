@@ -14,7 +14,7 @@ import type { Agent } from "../src/agent.js";
 import type { ApprovalConfig } from "../src/approval.js";
 import type { Preset, ResultView, ToolPromptsConfig } from "../src/config.js";
 import type { Price, UsageAccumulator } from "../src/cost.js";
-import type { AgentEvent } from "../src/events.js";
+import type { AgentEvent, Usage } from "../src/events.js";
 import type { ImageInput } from "../src/images.js";
 import type { EventLog } from "../src/log.js";
 import type { CompactionConfig } from "../src/loop.js";
@@ -99,7 +99,7 @@ export type ViewState = {
   loaderTimer: ReturnType<typeof setInterval> | undefined;
   resultNodes: ({ node: Block } & ResultRecord)[];
   reasoningNodes: { node: Block; text: string; kind?: "full" | "summary" }[];
-  lastUsage: { inputTokens: number; outputTokens: number } | undefined;
+  lastUsage: Usage | undefined;
 };
 
 /** 请求层记录:发出每个请求时用的 provider、预计缓存。都不进日志。 */
@@ -180,7 +180,7 @@ export type TuiContext = {
   dialog: {
     overlay: OverlayHandle | undefined;
     component: Component | undefined;
-    open(component: Component): void;
+    open(component: Component, onClose?: () => void): void;
     close(): void;
     /** 一条命令弹出选单时叫一声,命令就此返回;由 command 设置与清除。 */
     onOpen?: (() => void) | undefined;

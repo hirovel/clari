@@ -14,10 +14,10 @@ import {
   modelNames,
   resolveApiKey,
   resolveModel,
-  saveConfig,
   setApiKey,
   setDefaultModel,
   type ToolPromptsConfig,
+  updateConfig,
 } from "../src/config.js";
 import { now } from "../src/events.js";
 import type { EventLog } from "../src/log.js";
@@ -157,16 +157,16 @@ export function bootstrap(): Bootstrap {
         })(),
         models: modelNames(p),
       })),
-    verifyKey: async (providerName, key) => {
+    verifyKey: async (providerName, key, signal) => {
       const p = config.providers[providerName];
       if (!p) throw new Error(`unknown provider "${providerName}"`);
       const r = resolveModel(config, `${providerName}/${modelNames(p)[0] ?? ""}`);
       const provider = createProvider(r, key);
       if (!provider.listModels) return [];
-      return provider.listModels();
+      return provider.listModels(signal);
     },
     setDefault: (model) => {
-      config = setDefaultModel(config, model);
+      config = setDefaultModel(model);
     },
     // 配置里没有的模型:models.dev 命中只写名字(数据保持活的)→ 抄最像的 → 只写名字按假设。
     describeModel: async (providerName, modelId) => {
@@ -175,14 +175,14 @@ export function bootstrap(): Bootstrap {
       return inferModelConfig(providerName, p, modelId, await registry());
     },
     addModel: (providerName, model) => {
-      config = addModel(config, providerName, model);
+      config = addModel(providerName, model);
     },
     // /settings:只改 defaults 下的那一个键,其余原样落盘。
     saveSetting: (key, value) => {
-      if (key === "model" && value != null) resolveModel(config, String(value));
-      const next = { ...config, defaults: setSetting(config.defaults, key, value) };
-      saveConfig(next);
-      config = next;
+      config = updateConfig((current) => {
+        if (key === "model" && value != null) resolveModel(current, String(value));
+        return { ...current, defaults: setSetting(current.defaults, key, value) };
+      });
     },
     listPresets: () =>
       Object.entries(config.presets ?? {}).map(([name, values]) => ({
@@ -198,22 +198,27 @@ export function bootstrap(): Bootstrap {
           "Use 1–64 letters, digits, hyphens or underscores; choose a name other than recommended.",
         );
       }
-      if (Object.hasOwn(config.presets ?? {}, name))
-        throw new Error(`Preset ${name} already exists. Choose a new name.`);
-      const next = { ...config, presets: { ...config.presets, [name]: structuredClone(values) } };
-      const args = applyPreset(parseCommonArgs(["--preset", name]), next);
-      if (args.model) resolveModel(next, args.model);
-      saveConfig(next);
-      config = next;
+      config = updateConfig((current) => {
+        if (Object.hasOwn(current.presets ?? {}, name))
+          throw new Error(`Preset ${name} already exists. Choose a new name.`);
+        const next = {
+          ...current,
+          presets: { ...current.presets, [name]: structuredClone(values) },
+        };
+        const args = applyPreset(parseCommonArgs(["--preset", name]), next);
+        if (args.model) resolveModel(next, args.model);
+        return next;
+      });
     },
     usePreset: (name) => {
-      const values = name === "recommended" ? defaultPreset() : config.presets?.[name];
-      if (!values) throw new Error(`No preset named ${name}.`);
-      const next = { ...config, defaults: replaceSetup(config.defaults, values) };
-      const args = applyPreset(parseCommonArgs([]), next);
-      if (args.model) resolveModel(next, args.model);
-      saveConfig(next);
-      config = next;
+      config = updateConfig((current) => {
+        const values = name === "recommended" ? defaultPreset() : current.presets?.[name];
+        if (!values) throw new Error(`No preset named ${name}.`);
+        const next = { ...current, defaults: replaceSetup(current.defaults, values) };
+        const args = applyPreset(parseCommonArgs([]), next);
+        if (args.model) resolveModel(next, args.model);
+        return next;
+      });
     },
     capabilityNote: async (providerName, modelId) => {
       const p = config.providers[providerName];
@@ -288,6 +293,7 @@ type PromptArgs = Pick<
   | "skillsMode"
   | "skillsInclude"
   | "skillsLoad"
+  | "skillsSources"
 >;
 
 // chars 是修剪后的长度:composeSystemPrompt 修剪每段再以空行相接,所以各段长度加空行正好等于全文,
@@ -327,6 +333,7 @@ export function systemPromptFor(
       ...(args.skillsMode && { mode: args.skillsMode }),
       ...(args.skillsInclude !== undefined && { include: args.skillsInclude }),
       ...(args.skillsLoad && { load: args.skillsLoad }),
+      ...(args.skillsSources && { sources: args.skillsSources }),
     },
   });
   return {

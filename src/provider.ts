@@ -102,5 +102,5 @@ export interface Provider {
    */
   wireMap?(messages: Message[]): number[];
   /** 向供应商查询当前可用的模型名(GET /models)。发现模型下线与新模型靠这个,不靠猜。 */
-  listModels?(): Promise<string[]>;
+  listModels?(signal?: AbortSignal): Promise<string[]>;
 }

@@ -1,6 +1,7 @@
 // Agent 组成的说明数据。终端与未来客户端共用;不执行策略,不保存另一份运行状态。
 import type { Preset } from "./config.js";
 import { defaultPreset, getSetting, SETTINGS, type SettingDef, setSetting } from "./settings.js";
+import { STATUS_STYLES } from "./status-bar.js";
 
 export type SetupSection = {
   id: string;
@@ -27,6 +28,7 @@ export const SETUP_SECTIONS: readonly SetupSection[] = [
       "prompt.instructionsAs",
       "prompt.memory",
       "prompt.skills.mode",
+      "prompt.skills.sources",
       "prompt.skills.include",
       "prompt.skills.load",
     ],
@@ -65,7 +67,17 @@ export const SETUP_SECTIONS: readonly SetupSection[] = [
     id: "display",
     title: "Display & notifications",
     description: "How work appears on screen. These choices do not change model context.",
-    keys: ["screen", "fold", "foldLines", "foldSteps", "results", "notify"],
+    keys: [
+      "screen",
+      "statusStyle",
+      "statusWidgets",
+      "fold",
+      "foldLines",
+      "foldSteps",
+      "results",
+      "showCostEstimate",
+      "notify",
+    ],
   },
   {
     id: "recording",
@@ -132,6 +144,15 @@ export const SETUP_GUIDE: Readonly<Record<string, Guide>> = {
       "Manual keeps requests smaller and choices explicit. Auto saves prompting but adds descriptions and selection work. This is not a file access restriction.",
     example:
       "Manual: /review check this patch. Auto: ask to review the patch; the model decides whether to load review.",
+  },
+  "prompt.skills.sources": {
+    title: "Skill sources",
+    effect:
+      "Choose which directories are scanned for manual commands and automatic catalogs. Add or remove custom directories. Direct <name>/SKILL.md only; first name wins.",
+    reason:
+      "Keep useful defaults, or exclude directories you do not want discovered. This does not restrict the read tool or remove instructions already loaded in history.",
+    example:
+      "user-clari follows CLARI_HOME; project sources follow the project root. Custom relative paths start at the project root; ~/ starts at the parent of CLARI_HOME (normally the user home).",
   },
   "prompt.skills.include": {
     title: "Automatic skill range",
@@ -286,6 +307,27 @@ export const SETUP_GUIDE: Readonly<Record<string, Guide>> = {
     effect: "Older requests fold to one line. Zero keeps all steps expanded.",
     reason: "Keep the newest three steps open while preserving access to earlier work.",
   },
+  statusStyle: {
+    title: "Status-bar style",
+    effect:
+      "Changes the layout of the live status bar. Highlight a style to preview it before applying.",
+    reason:
+      "The thin rail is the built-in starting style. All styles use the same selected readings.",
+  },
+  statusWidgets: {
+    title: "Status-bar contents",
+    effect:
+      "Choose which readings appear. Selected readings wrap instead of disappearing when the terminal is narrow. Urgent failures stay visible.",
+    reason:
+      "Start with context, cache, model, effort, compaction, queued input and reading position; add other readings when they help.",
+  },
+  showCostEstimate: {
+    title: "Estimated cost",
+    effect:
+      "Shows an estimate from reported tokens and saved price data. It is not the provider's bill. If any request lacks usage, no total is shown.",
+    reason:
+      "Off by default because rates can change and providers do not always report per-request usage.",
+  },
   results: {
     title: "Tool output previews",
     effect:
@@ -315,12 +357,19 @@ export function setupGuide(def: SettingDef): Guide {
 
 /** 展示名称只用于 UI;配置与命令仍使用同一组稳定的键和值。 */
 export function setupValue(def: SettingDef, value: unknown): string {
+  if (def.key === "prompt.skills.sources") {
+    const sources = Object.values((value ?? {}) as Record<string, string>);
+    return `${sources.filter((v) => v === "on").length}/${sources.length} enabled`;
+  }
   if (def.key === "model" && value === undefined) return "Configured default";
   if (def.key === "planReminder" && value === 0) return "Off";
   if (def.key === "maxSteps" && value === undefined) return "No limit";
   if (def.key === "preservation" && value === undefined) return "Automatic";
   if (def.key === "effort" && value === undefined) return "Model default";
   if (def.key === "prompt.skills.include" && value === "all") return "All (including new skills)";
+  if (def.key === "statusWidgets") return `${Array.isArray(value) ? value.length : 0} shown`;
+  if (def.key === "statusStyle")
+    return STATUS_STYLES.find((style) => style.label === value)?.name ?? String(value);
   if (def.key === "approve")
     return (
       ({ all: "Allow all", ask: "Ask every time", policy: "Use rules" } as Record<string, string>)[

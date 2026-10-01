@@ -1,15 +1,22 @@
 // 屏幕文本的小工具:工具参数的人读形态、edit/write 的改动详情、任务简报、百分比。渲染、审批提示、编辑命令共用。
+import { stripTerminalSequences } from "@earendil-works/pi-tui";
 import { fileUrl, osc8 } from "./terminal-extras.js";
 import { c } from "./theme.js";
 import { diffLines, hunks } from "./tools/diff.js";
 
 /** 单行设置输入保留粘贴正文,过滤终端标记和控制字符。 */
 export function printableInput(data: string): string {
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: 过滤终端粘贴标记和控制序列。
-  const ansi = /\u001b\[[0-9;]*[A-Za-z~]/g;
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: 单行输入拒绝控制字符。
-  const controls = /[\u0000-\u001f\u007f]/g;
-  return data.replace(ansi, "").replace(controls, "");
+  return cleanPasteText(data).replace(/\p{Cc}/gu, "");
+}
+
+/** 多行粘贴保留正文;完整移除终端协议序列,不让它们进入编辑器的按键解析。 */
+export function cleanPasteText(text: string): string {
+  // 宽度工具只识别显示协议;编辑前还需移除按键和粘贴边界等 CSI 序列。
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: 清除完整 CSI 控制序列。
+  const csi = /\x1b\[[0-?]*[ -/]*[@-~]/g;
+  return stripTerminalSequences(text.replace(csi, "")).replace(/\p{Cc}/gu, (char) =>
+    "\n\r\t".includes(char) ? char : "",
+  );
 }
 
 /** 任务简报的一句话形态,给会话选择器与标题用。 */

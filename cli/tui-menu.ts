@@ -22,17 +22,17 @@ export function choose(
       rows,
       hint,
       (row, key) => {
-        ctx.dialog.close();
         resolve({ row, key });
+        ctx.dialog.close();
       },
       () => {
-        ctx.dialog.close();
         resolve(undefined);
+        ctx.dialog.close();
       },
       () => ctx.tui.requestRender(),
       () => ctx.deps.terminal.rows,
     );
-    ctx.dialog.open(picker);
+    ctx.dialog.open(picker, () => resolve(undefined));
   });
 }
 

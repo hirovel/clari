@@ -124,10 +124,12 @@ export function inputBlocks(
 
 export function receivedBlocks(rec: RequestRecord, saved?: RequestRecording): BodyBlock[] {
   const blocks: BodyBlock[] = [];
-  if (rec.error)
+  if (rec.error) {
+    const detail = rec.error.status !== undefined ? `HTTP ${rec.error.status}` : rec.error.kind;
     blocks.push(
-      textBlock("error", `Request failed · HTTP ${rec.error.status ?? "unknown"}`, rec.error.error),
+      textBlock("error", `Request failed${detail ? ` · ${detail}` : ""}`, rec.error.error),
     );
+  }
   if (rec.compaction)
     blocks.push(
       textBlock(

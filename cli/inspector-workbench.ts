@@ -399,7 +399,7 @@ export function previewLines(
           ? "position unknown"
           : r.row.wire < 0
             ? "top-level field"
-            : `sent as messages[${r.row.wire}]`,
+            : `next request messages[${r.row.wire}]`,
       );
       const src = events[r.row.event];
       if (src) meta.push(`from event ${src.type}`);

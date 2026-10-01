@@ -2,7 +2,13 @@
 // 选中一条消息能做什么,每项带后果。
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { AgentEvent } from "../src/events.js";
-import { type Composition, composeContext, editState, type Message } from "../src/messages.js";
+import {
+  type Composition,
+  composeContext,
+  contextFields,
+  editState,
+  type Message,
+} from "../src/messages.js";
 import type { Provider } from "../src/provider.js";
 import { firstLine, fmtTok, indent, messageTokens, roleLabel } from "./inspector-format.js";
 import { c } from "./theme.js";
@@ -100,8 +106,6 @@ export type ContextAction =
 
 export type ActionItem = { action: ContextAction; label: string; hint: string };
 
-const EDITABLE = new Set(["user/message", "assistant/message", "tool/result", "session/start"]);
-
 /** 这条消息能做的动作。不能做的不列:没编辑过就没有 compare/restore,最后一条没有 rewind。 */
 export function actionsFor(
   events: readonly AgentEvent[],
@@ -109,7 +113,9 @@ export function actionsFor(
   total: number,
 ): ActionItem[] {
   const src = events[r.event];
-  const edited = editState(events).edits.has(r.event);
+  const state = editState(events);
+  const edited = state.edits.has(r.event);
+  const fields = contextFields(src);
   const out: ActionItem[] = [
     {
       action: "view",
@@ -117,13 +123,13 @@ export function actionsFor(
       hint: "content, thinking, tool calls, provenance",
     },
   ];
-  if (src && EDITABLE.has(src.type))
+  if (fields.some((f) => f.field !== "reasoning" && !f.readOnlyReason))
     out.push({
       action: "edit",
       label: "Edit content",
-      hint: "opens $EDITOR; the original stays in the event",
+      hint: "edit here; the original stays in history",
     });
-  if (src?.type === "assistant/message" && src.reasoningKind === "full")
+  if (fields.some((f) => f.field === "reasoning" && !f.readOnlyReason))
     out.push({
       action: "edit-reasoning",
       label: "Edit thinking",
@@ -147,17 +153,26 @@ export function actionsFor(
       label: "Drop this message",
       hint: "assistant messages take their tool results with them",
     });
-  if (r.i < total)
+  if (
+    r.i < total &&
+    events.some(
+      (e, i) =>
+        i > r.event &&
+        !state.dropped.has(i) &&
+        (e.type === "user/message" || e.type === "assistant/message"),
+    )
+  )
     out.push({
       action: "rewind",
       label: "Rewind to here",
       hint: `drop everything after #${r.event}`,
     });
-  out.push({
-    action: "retry",
-    label: "Retry last step",
-    hint: "drop the last reply and ask again, no new prompt",
-  });
+  if (events.some((e, i) => e.type === "assistant/message" && !state.dropped.has(i)))
+    out.push({
+      action: "retry",
+      label: "Retry last step",
+      hint: "drop the last reply and its tool results, then ask again",
+    });
   out.push({
     action: "fork",
     label: "Fork here",
@@ -166,7 +181,7 @@ export function actionsFor(
   return out;
 }
 
-/** 做了这个动作会怎样:多少条重算、缓存从哪失效、Anthropic 丢几个思考块。随选择实时变。 */
+/** 动作改变哪些内容;缓存影响不能从本地投影推断为供应商命中结果。 */
 export function consequenceOf(
   action: ContextAction,
   r: CompositionRow,
@@ -195,7 +210,7 @@ export function consequenceOf(
     case "edit":
     case "edit-reasoning":
     case "restore":
-      return [...fromHere, "Retry afterwards to see the effect"].join(" · ");
+      return [...fromHere, "send your next message to use this context"].join(" · ");
     case "drop": {
       const src = events[r.event];
       const calls = src?.type === "assistant/message" ? src.toolCalls.length : 0;

@@ -142,6 +142,11 @@ describe("请求检视器", () => {
     expect(doc).toContain("4 msgs");
     expect(doc).toContain("end");
     expect(doc).toContain("▸ #2"); // 打开时选中最新一条
+    const narrow = text(60);
+    expect(insp.render(60)).toHaveLength(30);
+    expect(narrow).toContain("cache 800");
+    expect(narrow).toContain("+30");
+    expect(narrow).toContain("tool");
   });
 
   it("详情六分区:概要 / 决策 / 发送(折叠可切) / 工具定义 / 线路 JSON / 接收", async () => {
@@ -153,6 +158,8 @@ describe("请求检视器", () => {
     expect(insp.isDetail).toBe(true);
     expect(doc).toContain("Request #1");
     expect(doc).toContain("[1 summary]");
+    expect(doc).toContain("HTTP body: 1 attempt(s) recorded before dispatch");
+    expect(doc).not.toContain("HTTP body: not captured");
     expect(doc).toContain("2 messages · 1 tools");
     expect(doc).toContain("threshold 80000");
     expect(doc).toContain("measured in");

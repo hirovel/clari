@@ -62,6 +62,20 @@ export class Connection {
           k.toLowerCase() === "authorization" ? "<redacted>" : v,
         );
         const limit = opts.mcp?.maxResultChars ?? 100000;
+        const truncated = body.length > limit;
+        const recording = log.recording;
+        const stored = truncated
+          ? recording?.open(`MCP ${server.name} ${direction} RPC`)
+          : undefined;
+        if (stored) {
+          for (let start = 0; start < body.length; ) {
+            let end = Math.min(start + 64 * 1024, body.length);
+            if (end < body.length && /[\uD800-\uDBFF]/.test(body[end - 1] ?? "")) end--;
+            stored.write(body.slice(start, end));
+            start = end;
+          }
+        }
+        const end = /[\uD800-\uDBFF]/.test(body[limit - 1] ?? "") ? limit - 1 : limit;
         this.emit(
           {
             kind: "rpc",
@@ -70,7 +84,9 @@ export class Connection {
             ...(message.method && { method: message.method }),
             ...(id !== undefined && { id }),
             bytes: Buffer.byteLength(body),
-            body: body.length > limit ? `${body.slice(0, limit)}…` : body,
+            body: truncated ? `${body.slice(0, end)}…` : body,
+            ...(truncated && { truncated: true }),
+            ...(stored && { bodyRef: { ...stored.ref, bytes: stored.bytes } }),
           },
           log,
         );
@@ -142,7 +158,14 @@ export class Connection {
         error: this.status.error,
         ms: this.status.ms,
       });
-      await this.close();
+      try {
+        await this.close();
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          `mcp ${name}: initialization and cleanup both failed: ${(error as Error).message}; ${(cleanupError as Error).message}`,
+        );
+      }
       throw error;
     }
   }
@@ -178,11 +201,20 @@ export class Connection {
   close(): Promise<void> {
     this.closing ??= (async () => {
       await this.client.close();
-      if (this.status.phase === "ready") this.status.phase = "closed";
+      this.status.phase = "closed";
+      delete this.status.error;
       this.requests.clear();
       this.active = undefined;
       this.listeners.clear();
-    })();
+    })().catch((error) => {
+      this.status.phase = "failed";
+      this.status.error = `cleanup failed: ${(error as Error).message}`;
+      this.requests.clear();
+      this.active = undefined;
+      this.listeners.clear();
+      this.closing = undefined;
+      throw error;
+    });
     return this.closing;
   }
 }
@@ -225,9 +257,22 @@ export class McpConnections {
       return { connection: existing, reused: true };
     }
     const connection = new Connection(key, server, opts);
-    await connection.connect();
+    try {
+      await connection.connect();
+    } catch (error) {
+      if (connection.status.phase !== "closed") this.entries.add(connection);
+      throw error;
+    }
     if (this.closed) {
-      await connection.close();
+      try {
+        await connection.close();
+      } catch (error) {
+        this.entries.add(connection);
+        throw new AggregateError(
+          [new Error("MCP connections closed during preparation"), error],
+          `MCP connections closed during preparation; cleanup failed: ${(error as Error).message}`,
+        );
+      }
       throw new Error("MCP connections closed during preparation");
     }
     connection.references = 1;
@@ -238,15 +283,17 @@ export class McpConnections {
   async release(connection: Connection): Promise<void> {
     connection.references--;
     if (connection.references > 0) return;
-    this.entries.delete(connection);
     await connection.close();
+    this.entries.delete(connection);
   }
 
   async close(): Promise<void> {
     this.closed = true;
     const entries = [...this.entries];
-    this.entries.clear();
     const results = await Promise.allSettled(entries.map((c) => c.close()));
+    results.forEach((result, index) => {
+      if (result.status === "fulfilled") this.entries.delete(entries[index] as Connection);
+    });
     const errors = results.flatMap((r) => (r.status === "rejected" ? [r.reason] : []));
     if (errors.length) throw new AggregateError(errors, "MCP connection cleanup failed");
   }

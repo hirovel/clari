@@ -1,6 +1,12 @@
 import { estimateTokens, eventTokens, messageTokens } from "./context.js";
 import type { AgentEvent, Usage } from "./events.js";
-import { compactionState, deriveMessages, isProjected, type Message } from "./messages.js";
+import {
+  compactionState,
+  composeContext,
+  deriveMessages,
+  isProjected,
+  type Message,
+} from "./messages.js";
 import type { Provider } from "./provider.js";
 
 // ---------- 保留策略槽:决定压缩时尾部保留多少原文 ----------
@@ -46,10 +52,20 @@ export function keepRatio(ratio = 0.3): PreservationPolicy {
  */
 export function legalizeCut(events: readonly AgentEvent[], cut: number): number {
   let c = Math.min(cut, events.length);
+  // 只定位一次尾部首条消息;不能每退一步都复制、扫描整个剩余历史。
+  let first: AgentEvent | undefined;
+  for (let i = c; i < events.length; i++) {
+    const e = events[i];
+    if (e && isProjected(e)) {
+      first = e;
+      break;
+    }
+  }
+  if (!first || first.type === "user/message" || first.type === "assistant/message") return c;
   while (c > 1) {
-    const first = events.slice(c).find((e) => isProjected(e));
-    if (!first || first.type === "user/message" || first.type === "assistant/message") return c;
     c--;
+    const e = events[c];
+    if (e?.type === "user/message" || e?.type === "assistant/message") break;
   }
   return c;
 }
@@ -84,20 +100,32 @@ export type CompactionInput = {
 /** 返回 null = 本策略认为无事可做或未取得足够进展。 */
 export type CompactionStrategy = (input: CompactionInput) => Promise<CompactionPayload | null>;
 
-/**
- * 当前上下文占用,实测优先:最近一次带用量的 assistant 响应之后没有压缩,就用它的实测输入+输出,
- * 加上此后新增事件(工具结果、用户消息)的估算;否则退回纯估算。触发自动压缩与 request 事件都用这个口径。
- */
-export function contextTokens(events: readonly AgentEvent[]): number {
+/** 实测基准失效时只估算消息;工具定义与协议封装要等供应商回报。 */
+export function contextSize(events: readonly AgentEvent[]): {
+  tokens: number;
+  basis: "usage" | "messages";
+} {
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i];
     if (!e) continue;
-    if (e.type === "compaction") break;
-    if (e.type === "assistant/message" && e.usage) {
-      return e.usage.inputTokens + e.usage.outputTokens + estimateAfter(events.slice(i + 1));
+    if (e.type === "compaction" || e.type === "context/edit" || e.type === "context/drop") break;
+    if (
+      e.type === "assistant/message" &&
+      e.usage &&
+      e.usage.inputTokens + e.usage.outputTokens > 0
+    ) {
+      return {
+        tokens: e.usage.inputTokens + e.usage.outputTokens + estimateAfter(events.slice(i + 1)),
+        basis: "usage",
+      };
     }
   }
-  return estimateAfter(events);
+  return { tokens: estimateAfter(events), basis: "messages" };
+}
+
+/** 当前上下文占用;自动压缩与 request 事件共用这个数值口径。 */
+export function contextTokens(events: readonly AgentEvent[]): number {
+  return contextSize(events).tokens;
 }
 
 /** 估算一份日志(可叠加未落盘的压缩载荷)投影后的 token 量。 */
@@ -194,7 +222,27 @@ export function llmSummarize(
     const instruction = input.instructions
       ? `${prompt}\n\nAdditional instructions from the user for this compaction: ${input.instructions}`
       : prompt;
-    const prefix = deriveMessages(events.slice(0, cut));
+    // 先解释截至现在的修改,再选较早的内容;截事件前缀会丢掉后置的编辑与排除。
+    const current = composeContext(events);
+    const prefix: Message[] = [];
+    const covered: Message[] = [];
+    for (const [i, message] of current.messages.entries()) {
+      const source = current.provenance[i]?.event;
+      if (source === undefined) continue;
+      const event = events[source];
+      // 合成消息的位置由其覆盖内容/对应调用决定,不是后来追加记录的位置。
+      const position =
+        event?.type === "compaction"
+          ? (event.coversFrom ?? 1)
+          : event?.type === "tool/unresolved"
+            ? event.callEvent
+            : source;
+      if (position >= cut) continue;
+      prefix.push(message);
+      if (position >= from) covered.push(message);
+    }
+    const coveredTokens = covered.reduce((n, m) => n + messageTokens(m), 0);
+    if (coveredTokens === 0) return null;
     const messages: Message[] =
       callStyle === "replay"
         ? [...prefix, { role: "user", content: instruction }]
@@ -211,16 +259,15 @@ export function llmSummarize(
       throw new Error(`Summary did not finish (${turn.stopReason}); original context retained.`);
     if (!turn.text.trim()) return null;
 
-    const summary = turn.text.trim() + fileTrailer(events, from, cut);
-    const covered = events.slice(from, cut).reduce((n, e) => n + eventTokens(e), 0);
+    const summary = turn.text.trim() + fileTrailer(covered);
     // 安全阀:摘要必须显著小于被覆盖内容,否则视为失败。
-    if (estimateTokens(summary) >= covered * 0.9) return null;
+    if (estimateTokens(summary) >= coveredTokens * 0.9) return null;
 
     return {
       summary,
       coversFrom: from,
       coversUpTo: cut,
-      tokensBefore: estimateAfter(events),
+      tokensBefore: current.messages.reduce((n, m) => n + messageTokens(m), 0),
       ...(turn.usage && { usage: turn.usage }),
       latencyMs: Date.now() - startedAt,
       strategy: `llmSummarize(${promptName(prompt)}, ${callStyle})`,
@@ -229,12 +276,12 @@ export function llmSummarize(
 }
 
 /** 读过/改过的文件清单:从工具调用参数程序化提取,不依赖模型自觉。 */
-function fileTrailer(events: readonly AgentEvent[], from: number, to: number): string {
+function fileTrailer(messages: readonly Message[]): string {
   const read = new Set<string>();
   const written = new Set<string>();
-  for (const e of events.slice(from, to)) {
-    if (e.type !== "assistant/message") continue;
-    for (const tc of e.toolCalls) {
+  for (const message of messages) {
+    if (message.role !== "assistant") continue;
+    for (const tc of message.toolCalls) {
       const path = (tc.args as { path?: unknown } | null)?.path;
       if (typeof path !== "string") continue;
       if (tc.name === "read") read.add(path);

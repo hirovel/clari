@@ -79,6 +79,9 @@ describe("入口参数与会话文件", () => {
     const file = join(tmp, "s.jsonl");
     const first = new EventLog(file);
     first.append({ type: "session/start", at: "t", model: "m", system: "sys" });
+    expect(() => openSession({ resume: file, continue: false })).toThrow("File is in use");
+    first.recording?.flush();
+    first.recording?.dispose();
     const opened = openSession({ resume: file, continue: false });
     expect(opened.resumed).toBe(true);
     expect(opened.log.events).toHaveLength(1);
@@ -95,9 +98,10 @@ describe("会话恢复", () => {
     tmp = mkdtempSync(join(tmpdir(), "ak-resume-"));
     const file = join(tmp, "s.jsonl");
     const term1 = new VirtualTerminal(100, 40);
+    const firstLog = new EventLog(file);
     const app1 = createTuiApp({
       terminal: term1,
-      log: new EventLog(file),
+      log: firstLog,
       provider: scripted("m1", [
         {
           text: "第一轮回复",
@@ -115,6 +119,7 @@ describe("会话恢复", () => {
     });
     await app1.submit("第一轮");
     app1.stop();
+    firstLog.recording?.dispose();
     const before = readFileSync(file, "utf8").trim().split("\n").length;
 
     const log = EventLog.load(file, { attach: true });
@@ -153,14 +158,19 @@ describe("会话恢复", () => {
     expect(insp).toContain('"model": "m1"');
     app2.inspector.close();
     app2.stop();
+    log.recording?.flush();
+    log.recording?.dispose();
 
     // 换模型恢复:入口层(beginSession)记一条 session/model,界面层不再碰
     const s3 = beginSession({ resume: file, continue: false }, { model: "m2" });
     expect(s3.resumed).toBe(true);
     expect(s3.log.events.at(-1)).toMatchObject({ type: "session/model", model: "m2" });
+    s3.log.recording?.flush();
+    s3.log.recording?.dispose();
     // 同模型恢复不多记
     const s4 = beginSession({ resume: file, continue: false }, { model: "m2" });
     expect(s4.log.events.filter((e) => e.type === "session/model")).toHaveLength(1);
+    s4.log.recording?.dispose();
   });
 
   it("压缩策略:内置名、外部模块路径(扩展点)、未知名报错", async () => {

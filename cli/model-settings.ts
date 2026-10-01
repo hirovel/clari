@@ -35,8 +35,8 @@ export type ModelSettings = {
   setDefault(model: string): void;
   /** 供应商清单(名、协议、key 来源、环境变量名、配置里的模型),登录对话框用。 */
   providers?(): ProviderSummary[];
-  /** 用一把 key 向供应商查模型清单;抛错即无效。登录对话框验证用。 */
-  verifyKey?(providerName: string, key: string): Promise<string[]>;
+  /** 用一把 key 向供应商查模型清单;失败可能来自凭据、接口或网络。登录验证可取消。 */
+  verifyKey?(providerName: string, key: string, signal?: AbortSignal): Promise<string[]>;
   /** 给配置里没有的模型推出配置(models.dev → 抄最像的 → 假设),带出处;选择器用来写行注与落盘。 */
   describeModel?(providerName: string, modelId: string): Promise<Inferred>;
   /** 把一个模型写进配置并落盘。 */

@@ -1,10 +1,10 @@
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
 import { editTool } from "../cli/tools/fs.js";
 import { validateArgs } from "../src/tools.js";
+import { testDirectory } from "./helpers/setup.js";
 
 const SCHEMA = Type.Object({
   path: Type.String(),
@@ -31,7 +31,7 @@ describe("validateArgs", () => {
   it("__unparsed(烂 JSON)→专门的错误文本", () => {
     const r = validateArgs(SCHEMA, { __unparsed: '{"broken' });
     expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.error).toContain("不是合法 JSON");
+    if (!r.ok) expect(r.error).toContain("not valid JSON");
   });
 
   it("校验不改动原始参数对象(历史不可变)", () => {
@@ -43,7 +43,7 @@ describe("validateArgs", () => {
 
 describe("editTool", () => {
   function tempFile(content: string): string {
-    const path = join(mkdtempSync(join(tmpdir(), "kernel-edit-")), "f.txt");
+    const path = join(testDirectory("kernel-edit-"), "f.txt");
     writeFileSync(path, content, "utf8");
     return path;
   }
@@ -59,6 +59,15 @@ describe("editTool", () => {
     await expect(editTool.execute({ path, oldText: "zzz", newText: "x" }, ctx)).rejects.toThrow(
       "not found",
     );
+  });
+
+  it("标点或空白不同时拒绝写入,让模型按文件原文重试", async () => {
+    const original = "cost—benefit  \n";
+    const path = tempFile(original);
+    await expect(
+      editTool.execute({ path, oldText: "cost-benefit", newText: "gain" }, ctx),
+    ).rejects.toThrow("not found");
+    expect(readFileSync(path, "utf8")).toBe(original);
   });
 
   it("多处匹配→报错并给出次数,提示 replaceAll", async () => {

@@ -1,10 +1,15 @@
-// fetch 工具:HTML 转文本、重定向两态、字节上限、二进制拒绝、私网拒绝、续读、超时;审批规则按 URL。
+// fetch 工具:HTML 转文本、重定向两态、字节上限、二进制拒绝、续读、超时;审批规则按 URL。
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createFetchTool, isPrivateAddress, rewriteUrl } from "../cli/tools/fetch.js";
+import { createFetchTool, rewriteUrl } from "../cli/tools/fetch.js";
 import { decodeEntities, htmlToText } from "../cli/tools/html.js";
 import { decide } from "../src/approval.js";
+import { toolOutput } from "../src/exchange.js";
+import { EventLog } from "../src/log.js";
 
 const ctx = { signal: new AbortController().signal } as never;
 let server: Server;
@@ -29,8 +34,12 @@ beforeAll(async () => {
       res.writeHead(301, { location: "https://example.com/elsewhere" });
       res.end();
     } else if (url === "/big") {
+      hits.big = (hits.big ?? 0) + 1;
       res.writeHead(200, { "content-type": "text/plain" });
-      res.end("x".repeat(20000));
+      res.write("x".repeat(12000));
+      setTimeout(() => {
+        if (!res.destroyed) res.end("y".repeat(8000));
+      }, 20);
     } else if (url === "/bin") {
       res.writeHead(200, { "content-type": "application/octet-stream" });
       res.end(Buffer.from([0, 1, 2]));
@@ -96,7 +105,7 @@ describe("htmlToText", () => {
 
 describe("fetch 工具", () => {
   const tool = createFetchTool({
-    config: { allowPrivate: true, maxBytes: 10000, timeoutMs: 200, perHostPerMinute: 0 },
+    config: { maxBytes: 10000, timeoutMs: 200 },
   });
 
   it("HTML → 文本,头行带状态与大小;同主机重定向自动跟", async () => {
@@ -119,8 +128,35 @@ describe("fetch 工具", () => {
     expect(await tool.execute({ url: `${base}/away` }, ctx)).toContain(
       "redirected to https://example.com/elsewhere (another host, not followed)",
     );
-    const big = await tool.execute({ url: `${base}/big` }, ctx);
-    expect(big).toContain("stopped at the 10000-byte limit");
+    const dir = mkdtempSync(join(tmpdir(), "kernel-fetch-prefix-"));
+    const log = new EventLog(join(dir, "session.jsonl"));
+    try {
+      const output = toolOutput(log, "big", "fetch");
+      if (!output) throw new Error("Recording output unavailable");
+      const big = await tool.execute(
+        { url: `${base}/big` },
+        { signal: new AbortController().signal, output },
+      );
+      await log.checkpoint();
+      expect(big).toContain("download may be incomplete: stopped at the 10000-byte limit");
+      expect(big).toContain(`Captured prefix: ${output.path}`);
+      expect(readFileSync(output.path, "utf8")).not.toContain("y");
+      const completeOutput = toolOutput(log, "big-retry", "fetch");
+      if (!completeOutput) throw new Error("Recording output unavailable");
+      const complete = await tool.execute(
+        { url: `${base}/big`, maxBytes: 25000 },
+        { signal: new AbortController().signal, output: completeOutput },
+      );
+      await log.checkpoint();
+      expect(complete).not.toContain("download may be incomplete");
+      expect(readFileSync(completeOutput.path, "utf8")).toContain("y".repeat(8000));
+      expect(hits.big).toBe(2);
+      expect(await tool.execute({ url: `${base}/big`, offset: 1 }, ctx)).toContain("cached");
+      expect(hits.big).toBe(2);
+    } finally {
+      log.recording?.dispose();
+      rmSync(dir, { recursive: true, force: true });
+    }
     await expect(tool.execute({ url: `${base}/bin` }, ctx)).rejects.toThrow(/binary content/);
     expect(await tool.execute({ url: `${base}/missing` }, ctx)).toContain("· 404 ·");
   });
@@ -129,38 +165,15 @@ describe("fetch 工具", () => {
     const page = await tool.execute({ url: `${base}/lines`, offset: 10, limit: 3 }, ctx);
     expect(page).toContain("L10\nL11\nL12");
     expect(page).toContain("continue with offset=13");
+    const finalPage = await tool.execute({ url: `${base}/lines`, offset: 49, limit: 10 }, ctx);
+    expect(finalPage).toContain("L49\nL50");
+    expect(finalPage).not.toContain("continue with offset=");
+    await expect(tool.execute({ url: `${base}/lines`, offset: 51, limit: 1 }, ctx)).rejects.toThrow(
+      /beyond the end/,
+    );
     expect(await tool.execute({ url: `${base}/gbk` }, ctx)).toContain("你好");
     await expect(tool.execute({ url: `${base}/slow` }, ctx)).rejects.toThrow();
     await expect(tool.execute({ url: "ftp://x/y" }, ctx)).rejects.toThrow(/only http and https/);
-  });
-
-  it("私网地址缺省拒绝(allowPrivate 才放行);地址段判定", async () => {
-    const strict = createFetchTool({ config: { timeoutMs: 200 } });
-    await expect(strict.execute({ url: `${base}/page` }, ctx)).rejects.toThrow(
-      /private or loopback/,
-    );
-    const named = createFetchTool({
-      resolve: async () => ["10.1.2.3"],
-      config: { timeoutMs: 200 },
-    });
-    await expect(named.execute({ url: "http://intranet.test/" }, ctx)).rejects.toThrow(
-      /private or loopback/,
-    );
-    for (const ip of [
-      "127.0.0.1",
-      "10.0.0.1",
-      "172.16.5.5",
-      "192.168.1.1",
-      "169.254.1.1",
-      "100.64.0.1",
-      "::1",
-      "fd00::1",
-      "fe80::1",
-      "::ffff:127.0.0.1",
-    ])
-      expect(isPrivateAddress(ip)).toBe(true);
-    for (const ip of ["8.8.8.8", "172.32.0.1", "2606:4700::1"])
-      expect(isPrivateAddress(ip)).toBe(false);
   });
 
   it("转换质量:粗斜体、嵌套与有序列表、带分隔行的表格、带语言的代码块", async () => {
@@ -173,7 +186,7 @@ describe("fetch 工具", () => {
   });
 
   it("缓存:同一 URL 15 分钟内不重下,分页命中缓存;GitHub blob 改写成 raw;JSON 美化;JS 页面提示", async () => {
-    const fresh = createFetchTool({ config: { allowPrivate: true, perHostPerMinute: 0 } });
+    const fresh = createFetchTool();
     const before = hits.rich ?? 0;
     const a = await fresh.execute({ url: `${base}/rich`, offset: 1, limit: 2 }, ctx);
     const b = await fresh.execute({ url: `${base}/rich`, offset: 3, limit: 2 }, ctx);
@@ -195,19 +208,11 @@ describe("fetch 工具", () => {
     );
   });
 
-  it("Cloudflare 403 换浏览器 UA 重试一次;每主机限流", async () => {
+  it("Cloudflare 403 换浏览器 UA 重试一次", async () => {
     const out = await tool.execute({ url: `${base}/cf` }, ctx);
     expect(out).toContain("welcome browser");
     expect(out).toContain("retried with a browser User-Agent");
     expect(hits.cf).toBe(2);
-    const limited = createFetchTool({
-      config: { allowPrivate: true, perHostPerMinute: 2, cacheTtlMs: 0 },
-    });
-    await limited.execute({ url: `${base}/lines` }, ctx);
-    await limited.execute({ url: `${base}/json` }, ctx);
-    await expect(limited.execute({ url: `${base}/lines` }, ctx)).rejects.toThrow(
-      /rate limit: more than 2 requests/,
-    );
   });
 
   it("审批规则按 URL 匹配:fetch 缺省问,fetch:https://docs.example.com/* 放行", () => {

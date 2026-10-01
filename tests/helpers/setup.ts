@@ -7,4 +7,8 @@ import { afterAll } from "vitest";
 const home = mkdtempSync(join(tmpdir(), "clari-test-home-"));
 process.env.CLARI_HOME = join(home, ".clari");
 process.env.CLARI_CONFIG = join(home, ".clari", "config.json");
+/** 临时产物放在已有隔离根下,由同一个 afterAll 回收。 */
+export function testDirectory(prefix: string): string {
+  return mkdtempSync(join(home, prefix));
+}
 afterAll(() => rmSync(home, { recursive: true, force: true }));

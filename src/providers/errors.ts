@@ -1,5 +1,35 @@
 // provider 错误归一:各家 status/body 形态不同,这里统一成一个可判定"能否重试 / 是否溢出"的错误对象。
 
+/** 保留原文,只补充规范错误码;不展开原因中的正文、地址或请求对象。 */
+export function errorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const codes = errorCodes(error).filter((code) => !message.includes(code));
+  return codes.length ? `${message} [${codes.join(", ")}]` : message;
+}
+
+/** 显示与网络判定读取同一条原因链,不依赖文案恰好包含错误码。 */
+function errorCodes(error: unknown): string[] {
+  const codes: string[] = [];
+  const pending: unknown[] = [error];
+  const seen = new Set<object>();
+  // 网络错误可能包含多地址 AggregateError,也可能形成循环原因链。
+  while (pending.length && seen.size < 8) {
+    const value = pending.shift();
+    if (!value || typeof value !== "object" || seen.has(value)) continue;
+    seen.add(value);
+    const entry = value as { code?: unknown; cause?: unknown; errors?: unknown };
+    if (
+      typeof entry.code === "string" &&
+      /^[A-Z][A-Z0-9_]{1,63}$/.test(entry.code) &&
+      !codes.includes(entry.code)
+    )
+      codes.push(entry.code);
+    if (entry.cause) pending.push(entry.cause);
+    if (Array.isArray(entry.errors)) pending.push(...entry.errors.slice(0, 8));
+  }
+  return codes;
+}
+
 export class ProviderError extends Error {
   readonly status: number | undefined;
   readonly retryable: boolean;
@@ -40,8 +70,15 @@ export function isRetryable(err: unknown): boolean {
   if (err instanceof ProviderError) return err.retryable;
   if (err instanceof Error) {
     if (err.name === "AbortError") return false;
-    return /fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|socket hang up|stream ended/i.test(
-      err.message,
+    return (
+      /fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|socket hang up|stream ended/i.test(
+        err.message,
+      ) ||
+      errorCodes(err).some((code) =>
+        /^(ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|EPIPE|UND_ERR_(SOCKET|CONNECT_TIMEOUT|HEADERS_TIMEOUT|BODY_TIMEOUT))$/.test(
+          code,
+        ),
+      )
     );
   }
   return false;
@@ -131,13 +168,13 @@ export function hintFor(
   const p = ctx.providerName ?? "the provider";
   switch (kind) {
     case "auth":
-      return `Check the API key for ${p}: /key ${ctx.providerName ?? "<provider>"} <key>, or set its apiKeyEnv variable.`;
+      return `Check the API key for ${p}: open /login, or set its apiKeyEnv variable.`;
     case "not_found":
-      return `Model ${ctx.model ?? ""} was not found. Run /models to see what ${p} serves right now, then /model <provider>/<model>.`;
+      return `Model ${ctx.model ?? ""} was not found. Open /model to choose an available model or query ${p}.`;
     case "rate_limit":
       return "Rate limited. Retries with backoff already ran; wait a moment and send again, or switch model.";
     case "overflow":
-      return "Context is too long and compaction made no progress. Run /compact, /drop N on large results, or start a new session.";
+      return "Context is too long. Open Ctrl+E to inspect or exclude messages; /compact can try another summary, or choose a larger model.";
     case "bad_request":
       return "The provider rejected the request body. Open Ctrl+R → wire JSON for this request and compare with the provider's docs; extraBody and effort are the usual suspects.";
     case "server":

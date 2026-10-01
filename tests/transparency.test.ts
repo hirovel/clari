@@ -529,7 +529,7 @@ describe("wire 层与实际发送一致", () => {
             stallTimeoutMs: 10,
           });
           if (mode === "malformed")
-            await expect(provider.complete([], [], { record })).rejects.toThrow("无法解析");
+            await expect(provider.complete([], [], { record })).rejects.toThrow("invalid JSON");
           else {
             const result = await provider.complete([], [], {
               record: async (body) => {

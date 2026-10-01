@@ -6,6 +6,8 @@ import * as http from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { restoreSessionSetup } from "../cli/session-setup.js";
+import type { AgentEvent } from "../src/events.js";
 
 const TSX = resolve("node_modules/tsx/dist/cli.mjs");
 const RUN = resolve("cli/run.ts");
@@ -191,7 +193,7 @@ describe("真实入口(子进程)", () => {
     expect(r.stderr).toContain("DEEPSEEK_API_KEY");
     expect(existsSync(cfg)).toBe(true);
     const created = JSON.parse(readFileSync(cfg, "utf8")) as { default: string };
-    expect(created.default).toBe("deepseek-v4-pro");
+    expect(created.default).toBe("deepseek-flash");
   }, 60000);
 
   it("一次性模式对着假模型跑通:JSON 输出、会话文件落在 cwd/sessions、参数错误有提示", async () => {
@@ -222,6 +224,17 @@ describe("真实入口(子进程)", () => {
     expect(first.type).toBe("session/start");
     expect(Array.isArray(first.sections)).toBe(true);
     expect(lines.some((l) => l.includes('"effort":"low"'))).toBe(true);
+    const events = lines.map((line) => JSON.parse(line) as AgentEvent);
+    const snapshotIndex = events.findIndex(
+      (event) =>
+        event.type === "ext/event" && event.source === "setup" && event.kind === "snapshot",
+    );
+    expect(snapshotIndex).toBeGreaterThan(0);
+    expect(snapshotIndex).toBeLessThan(events.findIndex((event) => event.type === "request"));
+    const restored = restoreSessionSetup(events, {});
+    expect(restored.missing).toEqual([]);
+    expect(restored.setup.values).toMatchObject({ model: "fake/m", effort: "low" });
+    expect(restored.setup.tools).toContain("read");
 
     const bad = await run(RUN, ["你好", "--effort", "ultra"], {
       cwd: tmp,

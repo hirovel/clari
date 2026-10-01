@@ -3,11 +3,14 @@ import {
   type Component,
   Key,
   matchesKey,
+  sliceByColumn,
   truncateToWidth,
+  visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import type { Preset } from "../src/config.js";
 import {
+  DEFAULT_SKILL_SOURCES,
   defaultPreset,
   formatSetting,
   parseSetting,
@@ -25,6 +28,8 @@ import {
   setupSnapshot,
   setupValue,
 } from "../src/setup.js";
+import { STATUS_WIDGETS, type StatusStyle } from "../src/status-bar.js";
+import { skillSources } from "./prompt.js";
 import { c, G } from "./theme.js";
 import type { TuiContext } from "./tui-context.js";
 import { printableInput } from "./tui-format.js";
@@ -37,7 +42,7 @@ type BrowsingMode =
   | { kind: "members"; def: SettingDef; names: string[] };
 type Mode =
   | BrowsingMode
-  | { kind: "text"; def?: SettingDef; text: string; purpose: "value" | "save" }
+  | { kind: "text"; def?: SettingDef; text: string; purpose: "value" | "save" | "source" }
   | { kind: "restore"; def: SettingDef }
   | { kind: "info"; def: SettingDef; offset: number; from: BrowsingMode; index: number }
   | { kind: "presets" }
@@ -62,6 +67,7 @@ export class SetupView implements Component {
   private searching = false;
   private notice: SettingChange | undefined;
   private busy = false;
+  private pageSize = 1;
 
   constructor(private readonly deps: SetupViewDeps) {}
   invalidate(): void {}
@@ -97,6 +103,22 @@ export class SetupView implements Component {
     return setupValue(def, this.read(def));
   }
 
+  private sourceNames(def: SettingDef): string[] {
+    return [
+      ...new Set([
+        ...Object.keys((this.read(def) ?? {}) as object),
+        ...Object.keys(DEFAULT_SKILL_SOURCES),
+      ]),
+    ];
+  }
+
+  private sourceNote(def: SettingDef, name: string): string {
+    const sources = { ...((this.read(def) ?? {}) as Record<string, "on" | "off">) };
+    sources[name] ??= "off";
+    const source = skillSources(process.cwd(), { sources }).find((s) => s.name === name);
+    return `${source?.path ?? name}\n${Object.hasOwn(DEFAULT_SKILL_SOURCES, name) ? "Built-in directory; follows the user or project location. Disable to exclude it." : "Custom directory. Delete removes this source from configuration only."}\nDirect <name>/SKILL.md; first discovered name wins.`;
+  }
+
   private settingRow(def: SettingDef): Row {
     return { title: setupGuide(def).title, value: this.value(def), def, run: () => this.edit(def) };
   }
@@ -104,14 +126,28 @@ export class SetupView implements Component {
   private summary(i: number): string {
     const section = SETUP_SECTIONS[i];
     if (!section) return "";
-    const { ctx } = this.deps;
-    if (section.id === "model")
-      return String(this.read(settingDef("model") as SettingDef) ?? "Configured default");
-    if (section.id === "tools" && this.scope === "session")
-      return `${ctx.defs().length} tools loaded`;
-    const key = section.keys[0];
-    const def = key ? settingDef(key) : undefined;
-    return def ? this.value(def) : "";
+    const value = (key: string) => {
+      const def = settingDef(key);
+      return def ? this.value(def) : "";
+    };
+    switch (section.id) {
+      case "model":
+        return `${value("model")} · effort ${value("effort")}`;
+      case "instructions":
+        return `Skills ${value("prompt.skills.mode")} · memory ${value("prompt.memory")}`;
+      case "tools":
+        return `${this.scope === "session" ? `${this.deps.ctx.defs().length} offered` : value("tools.disable")} · delegation ${value("subagent")}`;
+      case "context":
+        return `${value("compaction")} · keep ${value("preservation")}`;
+      case "execution":
+        return `${value("approve")} · ${value("execution")}`;
+      case "display":
+        return `${value("statusStyle")} · ${value("statusWidgets")}`;
+      case "recording":
+        return `Input saving ${value("saveInputs")}`;
+      default:
+        return "";
+    }
   }
 
   private rows(): Row[] {
@@ -135,7 +171,8 @@ export class SetupView implements Component {
     if (m.kind === "members") {
       const current = this.read(m.def);
       const skillRange = m.def.key === "prompt.skills.include";
-      return m.names.map((name) => {
+      const sourceRange = m.def.key === "prompt.skills.sources";
+      const rows: Row[] = m.names.map((name) => {
         const skill = skillRange ? ctx.skills.find((s) => s.name === name) : undefined;
         const manualOnly = skill?.disableModelInvocation;
         const all = skillRange && name === "";
@@ -143,9 +180,16 @@ export class SetupView implements Component {
           (skillRange && current === "all") || (Array.isArray(current) && current.includes(name));
         const enabled = m.def.key === "tools.disable" ? !listed : listed;
         return {
-          title: all ? "All (including new skills)" : name,
-          value:
-            m.def.type === "map"
+          title: all
+            ? "All (including new skills)"
+            : m.def.key === "statusWidgets"
+              ? (STATUS_WIDGETS.find((widget) => widget.id === name)?.name ?? name)
+              : name,
+          value: sourceRange
+            ? (current as Record<string, string> | undefined)?.[name] === "on"
+              ? "Enabled [x]"
+              : "Disabled [ ]"
+            : m.def.type === "map"
               ? ((current as Record<string, string> | undefined)?.[name] ?? "head")
               : manualOnly
                 ? "Manual only"
@@ -153,10 +197,17 @@ export class SetupView implements Component {
                   ? current === "all"
                     ? "[x]"
                     : "[ ]"
-                  : enabled
-                    ? "Enabled [x]"
-                    : "Disabled [ ]",
+                  : m.def.key === "statusWidgets"
+                    ? enabled
+                      ? "Shown [x]"
+                      : "Hidden [ ]"
+                    : enabled
+                      ? "Enabled [x]"
+                      : "Disabled [ ]",
           ...(skillRange && { note: this.skillNote(name) }),
+          ...(m.def.key === "statusWidgets" && {
+            note: STATUS_WIDGETS.find((widget) => widget.id === name)?.note ?? "Status reading",
+          }),
           run: () => {
             if (manualOnly) {
               this.notice = {
@@ -171,7 +222,9 @@ export class SetupView implements Component {
             }
             if (m.def.type === "map") {
               const values = m.def.values?.map((v) => v.label) ?? [];
-              const old = (current as Record<string, string> | undefined)?.[name] ?? "head";
+              const old =
+                (current as Record<string, string> | undefined)?.[name] ??
+                (sourceRange ? "off" : "head");
               void this.commit(
                 m.def,
                 {
@@ -192,6 +245,13 @@ export class SetupView implements Component {
           },
         };
       });
+      if (sourceRange)
+        rows.push({
+          title: "Add directory",
+          value: "+",
+          run: () => this.startText("source", m.def),
+        });
+      return rows;
     }
     if (m.kind === "presets")
       return [
@@ -302,25 +362,27 @@ export class SetupView implements Component {
             ? (this.read(def) as string[])
             : [];
       const names =
-        def.key === "prompt.skills.include"
-          ? ["", ...new Set([...this.deps.ctx.skills.map((s) => s.name), ...configured])]
-          : def.key === "mcpReconnect"
-            ? [
-                ...new Set([
-                  ...(this.deps.ctx.deps.mcp?.statuses().map((server) => server.name) ?? []),
-                  ...configured,
-                ]),
-              ]
-            : def.items
-              ? [...def.items]
-              : [
+        def.key === "prompt.skills.sources"
+          ? this.sourceNames(def)
+          : def.key === "prompt.skills.include"
+            ? ["", ...new Set([...this.deps.ctx.skills.map((s) => s.name), ...configured])]
+            : def.key === "mcpReconnect"
+              ? [
                   ...new Set([
-                    ...this.deps.ctx.tools
-                      .filter((t) => def.key !== "tools.disable" || t.name !== "plan")
-                      .map((t) => t.name),
+                    ...(this.deps.ctx.deps.mcp?.statuses().map((server) => server.name) ?? []),
                     ...configured,
                   ]),
-                ];
+                ]
+              : def.items
+                ? [...def.items]
+                : [
+                    ...new Set([
+                      ...this.deps.ctx.tools
+                        .filter((t) => def.key !== "tools.disable" || t.name !== "plan")
+                        .map((t) => t.name),
+                      ...configured,
+                    ]),
+                  ];
       this.mode = { kind: "members", def, names };
       return;
     }
@@ -352,7 +414,7 @@ export class SetupView implements Component {
     this.mode = { kind: "choices", def, items };
   }
 
-  private startText(purpose: "value" | "save", def?: SettingDef): void {
+  private startText(purpose: "value" | "save" | "source", def?: SettingDef): void {
     this.notice = undefined;
     this.mode = {
       kind: "text",
@@ -396,6 +458,25 @@ export class SetupView implements Component {
   private submitText(): void {
     const m = this.mode;
     if (m.kind !== "text") return;
+    if (m.purpose === "source" && m.def) {
+      const def = m.def;
+      void this.run(async () => {
+        const name = m.text.trim();
+        if (!name) throw new Error("Enter a directory path.");
+        const result = await this.deps.set(
+          def,
+          { ...((this.read(def) ?? {}) as object), [name]: "on" },
+          this.scope,
+        );
+        if (result.ok) {
+          const names = this.sourceNames(def);
+          this.mode = { kind: "members", def, names };
+          this.index = names.indexOf(name);
+        }
+        return result;
+      });
+      return;
+    }
     if (m.purpose === "value" && m.def) {
       try {
         void this.commit(m.def, parseSetting(m.def, m.text), true);
@@ -435,6 +516,9 @@ export class SetupView implements Component {
       if (m.kind === "info") {
         this.mode = m.from;
         this.index = m.index;
+      } else if (m.kind === "text" && m.purpose === "source" && m.def) {
+        this.mode = { kind: "members", def: m.def, names: this.sourceNames(m.def) };
+        this.index = this.sourceNames(m.def).length;
       } else if (m.kind !== "browse") {
         this.mode = { kind: "browse" };
         this.index = this.returnIndex;
@@ -451,9 +535,32 @@ export class SetupView implements Component {
     }
     if (m.kind === "text") {
       if (matchesKey(data, Key.enter)) this.submitText();
-      else if (data === "\x7f" || data === "\b") m.text = Array.from(m.text).slice(0, -1).join("");
+      else if (matchesKey(data, Key.backspace) || data === "\b")
+        m.text = Array.from(m.text).slice(0, -1).join("");
       else if (matchesKey(data, Key.ctrl("u"))) m.text = "";
       else m.text += printableInput(data);
+      this.deps.onChange();
+      return;
+    }
+    if (
+      m.kind === "members" &&
+      m.def.key === "prompt.skills.sources" &&
+      matchesKey(data, Key.delete)
+    ) {
+      const name = m.names[this.index];
+      if (name && !Object.hasOwn(DEFAULT_SKILL_SOURCES, name)) {
+        const next = { ...((this.read(m.def) ?? {}) as Record<string, string>) };
+        delete next[name];
+        void this.run(async () => {
+          const result = await this.deps.set(m.def, next, this.scope);
+          if (result.ok) m.names = this.sourceNames(m.def);
+          return result;
+        });
+      } else
+        this.notice = {
+          ok: false,
+          message: "Built-in sources can be disabled. Only custom directories can be removed.",
+        };
       this.deps.onChange();
       return;
     }
@@ -497,7 +604,7 @@ export class SetupView implements Component {
       !matchesKey(data, Key.up) &&
       !matchesKey(data, Key.down)
     ) {
-      if (data === "\x7f" || data === "\b")
+      if (matchesKey(data, Key.backspace) || data === "\b")
         this.query = Array.from(this.query).slice(0, -1).join("");
       else this.query += printableInput(data);
       this.index = 0;
@@ -532,16 +639,16 @@ export class SetupView implements Component {
         this.index = Math.min(Math.max(0, rows.length - 1), this.index + 1);
       else if (matchesKey(data, Key.home)) this.index = 0;
       else if (matchesKey(data, Key.end)) this.index = Math.max(0, rows.length - 1);
-      else if (matchesKey(data, Key.pageUp)) this.index = Math.max(0, this.index - 6);
+      else if (matchesKey(data, Key.pageUp)) this.index = Math.max(0, this.index - this.pageSize);
       else if (matchesKey(data, Key.pageDown))
-        this.index = Math.min(Math.max(0, rows.length - 1), this.index + 6);
+        this.index = Math.min(Math.max(0, rows.length - 1), this.index + this.pageSize);
       else if (/^[1-9]$/.test(data) && rows.length >= Number(data)) this.index = Number(data) - 1;
       else if (matchesKey(data, Key.enter)) rows[this.index]?.run();
     }
     this.deps.onChange();
   }
 
-  private detail(row: Row | undefined, compact = false): string[] {
+  private detail(row: Row | undefined, compact = false, previewWidth = 70): string[] {
     const m = this.mode;
     const { ctx } = this.deps;
     const def = "def" in m ? m.def : row?.def;
@@ -553,11 +660,43 @@ export class SetupView implements Component {
       const index = m.kind === "info" ? m.index : this.index;
       const choice = browsing.kind === "choices" ? browsing.items[index] : undefined;
       const memberName = browsing.kind === "members" ? browsing.names[index] : undefined;
-      const member = memberName === "" ? "All (including new skills)" : memberName;
+      const member =
+        memberName === ""
+          ? "All (including new skills)"
+          : def.key === "statusWidgets"
+            ? (STATUS_WIDGETS.find((widget) => widget.id === memberName)?.name ?? memberName)
+            : memberName;
       const memberNote =
-        memberName !== undefined && def.key === "prompt.skills.include"
-          ? this.skillNote(memberName)
-          : undefined;
+        memberName === undefined
+          ? undefined
+          : def.key === "prompt.skills.include"
+            ? this.skillNote(memberName)
+            : def.key === "prompt.skills.sources"
+              ? this.sourceNote(def, memberName)
+              : def.key === "statusWidgets"
+                ? STATUS_WIDGETS.find((widget) => widget.id === memberName)?.note
+                : undefined;
+      const statusPreview =
+        def.key === "statusStyle" || def.key === "statusWidgets"
+          ? [
+              c.bold(c.jin("Live preview")),
+              ...ctx.status.render(previewWidth, {
+                style: (def.key === "statusStyle" && choice
+                  ? choice.value
+                  : setupRead(
+                      ctx,
+                      settingDef("statusStyle") as SettingDef,
+                      this.scope,
+                    )) as StatusStyle,
+                widgets: setupRead(
+                  ctx,
+                  settingDef("statusWidgets") as SettingDef,
+                  this.scope,
+                ) as string[],
+              }),
+              c.faint("─".repeat(Math.max(0, Math.min(30, previewWidth - 2)))),
+            ]
+          : [];
       const valueText = (value: unknown) => {
         const label = setupValue(def, value);
         const raw = formatSetting(def, value);
@@ -569,20 +708,25 @@ export class SetupView implements Component {
       ];
       const skillPlacement = !def.key.startsWith("prompt.skills.")
         ? []
-        : setupRead(ctx, settingDef("prompt.skills.mode") as SettingDef, this.scope) !== "auto"
+        : def.key === "prompt.skills.sources"
           ? [
-              "Manual mode: no catalog added; range inactive.",
-              "/name sends instructions + request as a user message.",
+              "Discovery: manual commands and automatic catalogs.",
+              "Already loaded instructions stay in history.",
             ]
-          : setupRead(ctx, settingDef("prompt.skills.load") as SettingDef, this.scope) === "tool"
+          : setupRead(ctx, settingDef("prompt.skills.mode") as SettingDef, this.scope) !== "auto"
             ? [
-                "Catalog target: skill tool definition, not system.",
-                "Names + descriptions; instructions arrive in its result.",
+                "Manual mode: no catalog added; range inactive.",
+                "/name sends instructions + request as a user message.",
               ]
-            : [
-                "Catalog target: system prompt / Skills section.",
-                "Names + descriptions + paths; instructions arrive in a read result.",
-              ];
+            : setupRead(ctx, settingDef("prompt.skills.load") as SettingDef, this.scope) === "tool"
+              ? [
+                  "Catalog target: skill tool definition, not system.",
+                  "Names + descriptions; instructions arrive in its result.",
+                ]
+              : [
+                  "Catalog target: system prompt / Skills section.",
+                  "Names + descriptions + paths; instructions arrive in a read result.",
+                ];
       // 完整说明与紧凑预览使用同一候选;进入详情只保存临时导航位置。
       return [
         ...(choice
@@ -597,6 +741,7 @@ export class SetupView implements Component {
         ...(!choice && !member ? state : []),
         ...skillPlacement.map((line) => c.jin(line)),
         ...(memberNote ? [c.soft(memberNote)] : []),
+        ...statusPreview,
         c.jin(`Applies: ${settingTiming(ctx, def, this.scope)}`),
         ...(choice || member ? [c.faint("── Current state ──"), ...state] : []),
         ...(!compact
@@ -724,11 +869,14 @@ export class SetupView implements Component {
       pad(
         `${c.bold(c.ink("Agent setup"))}${trail ? c.soft(` / ${trail}`) : c.faint("  /settings")}`,
       ),
-      pad(
-        m.kind === "presets" || m.kind === "presetReview"
-          ? c.jin("Saved defaults · preview only until you confirm")
-          : `${this.scope === "session" ? c.bold(c.jin("[This session]")) : c.soft("This session")}   ${this.scope === "defaults" ? c.bold(c.jin("[Saved defaults]")) : c.soft("Saved defaults")}  ${m.kind === "browse" ? c.faint("Tab to switch") : ""}`,
-      ),
+      ...wrap(
+        [
+          m.kind === "presets" || m.kind === "presetReview"
+            ? c.jin("Saved defaults · preview only until you confirm")
+            : `${this.scope === "session" ? c.bold(c.jin("[This session]")) : c.soft("This session")}   ${this.scope === "defaults" ? c.bold(c.jin("[Saved defaults]")) : c.soft("Saved defaults")}  ${m.kind === "browse" ? c.faint("Tab to switch") : ""}`,
+        ],
+        inner,
+      ).map(pad),
       pad(
         c.faint(
           this.scope === "session" && m.kind !== "presets" && m.kind !== "presetReview"
@@ -739,15 +887,26 @@ export class SetupView implements Component {
       pad(c.faint("─".repeat(inner))),
     ];
     if (this.searching) head.push(pad(`${c.soft("Search / ")}${c.ink(this.query)}${c.jin("▏")}`));
-    if (m.kind === "text")
-      head.push(
-        pad(
-          `${c.soft(m.purpose === "save" ? "Preset name: " : "Value: ")}${c.ink(m.text)}${c.jin("▏")}`,
-        ),
+    if (m.kind === "text") {
+      const label = truncateToWidth(
+        m.purpose === "save" ? "Preset name: " : m.purpose === "source" ? "Directory: " : "Value: ",
+        Math.max(0, inner - 1),
+        "",
       );
+      const room = Math.max(0, inner - visibleWidth(label) - 1);
+      const textWidth = visibleWidth(m.text);
+      // 单行输入始终在末尾编辑;按终端列取可见后缀,保留完整值与输入标记。
+      const text =
+        textWidth > room
+          ? room > 0
+            ? `…${sliceByColumn(m.text, textWidth - room + 1, room - 1, true)}`
+            : ""
+          : m.text;
+      head.push(pad(`${c.soft(label)}${c.ink(text)}${c.jin("▏")}`));
+    }
     const hint =
       m.kind === "text"
-        ? "Enter save · Ctrl+U clear · Esc back"
+        ? `Enter ${m.purpose === "source" ? "add" : "save"} · Ctrl+U clear · Esc back`
         : m.kind === "info"
           ? "↑↓ scroll · PgUp/PgDn · Esc back"
           : m.kind === "presetReview"
@@ -755,7 +914,7 @@ export class SetupView implements Component {
             : m.kind === "choices"
               ? `↑↓ choose · Enter apply${["number", "text"].includes(m.def.type) ? " · E custom" : ""} · I details · Esc back`
               : m.kind === "members"
-                ? `↑↓ move · Enter ${m.def.type === "map" ? "cycle" : "toggle"} · I details · Esc back`
+                ? `↑↓ move · Enter ${m.def.type === "map" && m.def.key !== "prompt.skills.sources" ? "cycle" : "toggle"}${m.def.key === "prompt.skills.sources" ? " · Del remove" : ""} · I details · Esc back`
                 : m.kind === "browse"
                   ? `↑↓ move · Enter open · / search${rows[this.index]?.def ? " · R restore · I details" : ""} · Esc back`
                   : "↑↓ move · Enter select · Esc back";
@@ -771,15 +930,18 @@ export class SetupView implements Component {
     ];
     const room = Math.max(1, height - head.length - footer.length);
     if (m.kind === "info") {
-      const info = wrap(this.detail(undefined), inner);
+      const info = wrap(this.detail(undefined, false, inner), inner);
       m.offset = Math.max(0, Math.min(m.offset, Math.max(0, info.length - room)));
       return [...head, ...info.slice(m.offset, m.offset + room).map(pad), ...footer];
     }
     const wide = width >= 100 && m.kind !== "text";
+    const home =
+      m.kind === "browse" && !this.searching && !this.query && this.section === undefined;
+    const rowHeight = home ? 3 : 1;
     const listWidth = wide ? Math.floor(inner * 0.45) : inner;
     const activeDef = "def" in m ? m.def : rows[this.index]?.def;
     const details = wrap(
-      this.detail(rows[this.index], !wide),
+      this.detail(rows[this.index], !wide, wide ? inner - listWidth - 3 : inner),
       wide ? inner - listWidth - 3 : inner,
     );
     if (m.kind === "presetReview") {
@@ -792,16 +954,40 @@ export class SetupView implements Component {
       : m.kind === "text"
         ? 0
         : Math.min(
-            Math.max(1, Math.floor(room * (activeDef ? 0.3 : 0.55))),
-            Math.max(rows.length, 1),
+            Math.max(
+              1,
+              Math.floor(
+                room *
+                  (m.kind === "members" && m.def.key === "statusWidgets"
+                    ? 0.55
+                    : activeDef
+                      ? 0.3
+                      : 0.55),
+              ),
+            ),
+            Math.max(rows.length * rowHeight, 1),
           );
-    const visible = Math.max(1, capacity - (rows.length > capacity ? 1 : 0));
+    // 首页每项占三行;导航仍按设置项移动,视口按实际终端行计算。
+    const visible = Math.max(
+      1,
+      Math.floor((capacity - (rows.length * rowHeight > capacity ? 1 : 0)) / rowHeight),
+    );
+    // 翻页跟随已显示的项数;只保存当前视口的临时读数。
+    this.pageSize = visible;
     const start = Math.max(
       0,
       Math.min(this.index - Math.floor(visible / 2), rows.length - visible),
     );
-    const list = rows.slice(start, start + visible).map((row, offset) => {
+    const list = rows.slice(start, start + visible).flatMap((row, offset) => {
       const selected = start + offset === this.index;
+      if (home) {
+        const title = `${selected ? G.cursor : " "} ${row.title}`;
+        return [
+          truncateToWidth(selected ? c.bold(c.ink(title)) : c.soft(title), listWidth, "…", true),
+          truncateToWidth(c.soft(`  ${row.value ?? ""}`), listWidth, "…", true),
+          c.faint("─".repeat(listWidth)),
+        ];
+      }
       const titleWidth = Math.max(8, Math.min(29, Math.floor(listWidth * 0.58)));
       const title = truncateToWidth(row.title, titleWidth, "…", true);
       const value = row.value ? ` ${row.value}` : "";

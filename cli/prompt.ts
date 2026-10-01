@@ -8,6 +8,7 @@ import { release, type } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { parse } from "yaml";
 import { clariHome, type PromptSectionName, type SkillsConfig } from "../src/config.js";
+import { DEFAULT_SKILL_SOURCES, parseSkillSources } from "../src/settings.js";
 import { splitMemory } from "./tools/memory.js";
 
 export type PromptSection = {
@@ -101,36 +102,91 @@ export function parseSkill(path: string, raw: string): Skill {
 
 /**
  * 技能发现:用户级 ~/.clari/skills 与 ~/.claude/skills,项目级 <git 根>/.agents/skills 与 <git 根>/.claude/skills;
- * 每个目录下 <名>/SKILL.md;同名以先发现的为准。读 .claude/skills 是为了与 Claude Code 互通。
+ * 默认四个来源可关闭,自定义路径按保存顺序添加。每个目录下 <名>/SKILL.md,不递归;同名以先发现的为准。
  */
-export function discoverSkills(
+export function skillSources(
   cwd: string,
-  opts: { home?: string; root?: string; onError?: (error: Error) => void } = {},
-): Skill[] {
+  opts: { home?: string; root?: string; sources?: SkillsConfig["sources"] } = {},
+): { name: string; path: string; enabled: boolean }[] {
   const home = opts.home ?? clariHome();
   const root = opts.root ?? findGitRoot(cwd) ?? resolve(cwd);
   // 用户级 .claude/skills 取 clari 用户目录的同级(~/.clari 与 ~/.claude 同在家目录);
   // 测试用临时 home(或 CLARI_HOME)时就不会漏到真机目录。
   const userClaude = join(dirname(home), ".claude", "skills");
-  const dirs = [
-    join(home, "skills"),
-    userClaude,
-    join(root, ".agents", "skills"),
-    join(root, ".claude", "skills"),
+  const builtin: Record<string, string> = {
+    "user-clari": join(home, "skills"),
+    "user-claude": userClaude,
+    "project-agents": join(root, ".agents", "skills"),
+    "project-claude": join(root, ".claude", "skills"),
+  };
+  return Object.entries(parseSkillSources(opts.sources ?? DEFAULT_SKILL_SOURCES)).map(
+    ([name, enabled]) => ({
+      name,
+      path: Object.hasOwn(builtin, name)
+        ? (builtin[name] as string)
+        : name.startsWith("~/") || name.startsWith("~\\")
+          ? resolve(dirname(home), name.slice(2))
+          : resolve(root, name),
+      enabled: enabled === "on",
+    }),
+  );
+}
+
+export function skillDirectories(
+  cwd: string,
+  opts: { home?: string; root?: string; sources?: SkillsConfig["sources"] } = {},
+): string[] {
+  return [
+    ...new Set(
+      skillSources(cwd, opts)
+        .filter((s) => s.enabled)
+        .map((s) => s.path),
+    ),
   ];
+}
+
+export function discoverSkills(
+  cwd: string,
+  opts: {
+    home?: string;
+    root?: string;
+    sources?: SkillsConfig["sources"];
+    onError?: (error: Error) => void;
+  } = {},
+): Skill[] {
+  const absent = (error: unknown) => {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === "ENOENT" || code === "ENOTDIR";
+  };
+  const warn = (message: string) => {
+    if (opts.onError) opts.onError(new Error(message));
+    else console.warn(message);
+  };
   const byName = new Map<string, Skill>();
-  for (const dir of dirs) {
-    if (!existsSync(dir) || !statSync(dir).isDirectory()) continue;
-    for (const name of readdirSync(dir).sort()) {
+  for (const dir of skillDirectories(cwd, opts)) {
+    let names: string[];
+    try {
+      if (!statSync(dir).isDirectory()) throw new Error("Expected a directory.");
+      names = readdirSync(dir).sort();
+    } catch (error) {
+      if (absent(error)) continue;
+      warn(`Skipped skill directory ${dir}: ${(error as Error).message}`);
+      continue;
+    }
+    for (const name of names) {
       const file = join(dir, name, "SKILL.md");
-      if (!existsSync(file) || !statSync(file).isFile()) continue;
       try {
+        if (!statSync(file).isFile()) throw new Error("Expected a file.");
         const s = parseSkill(file, readFileSync(file, "utf8"));
-        if (!byName.has(s.name)) byName.set(s.name, s);
+        const existing = byName.get(s.name);
+        if (existing) {
+          warn(`Skipped duplicate skill "${s.name}" at ${file}; using ${existing.path}.`);
+          continue;
+        }
+        byName.set(s.name, s);
       } catch (error) {
-        const warning = new Error(`Skipped skill: ${(error as Error).message}`);
-        if (opts.onError) opts.onError(warning);
-        else console.warn(warning.message);
+        if (absent(error)) continue;
+        warn(`Skipped skill ${file}: ${(error as Error).message}`);
       }
     }
   }
@@ -386,6 +442,7 @@ export function buildSystemPrompt(opts: BuildPromptOptions): BuiltPrompt {
   const skills = order.includes("skills")
     ? skillsSection(
         discoverSkills(opts.cwd, {
+          ...(opts.skills?.sources && { sources: opts.skills.sources }),
           ...(opts.discover?.home && { home: opts.discover.home }),
           ...(opts.discover?.root && { root: opts.discover.root }),
           ...(opts.onSkillError && { onError: opts.onSkillError }),

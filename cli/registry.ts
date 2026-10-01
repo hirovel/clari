@@ -122,6 +122,10 @@ export function modelConfigFromRegistry(modelId: string, m: RegistryModel): Mode
   const effort = m.reasoning_options
     ?.find((o) => o.type === "effort")
     ?.values?.filter((v): v is EffortLevel => EFFORTS.has(v));
+  // 开关与档位是两项能力;仅有开关时不猜测可用档位。
+  if (effort?.length && m.reasoning_options?.some((o) => o.type === "toggle")) {
+    effort.unshift("off");
+  }
   return {
     name: modelId,
     ...(m.limit?.context && { contextWindow: m.limit.context }),
@@ -190,13 +194,9 @@ export function resolveCapabilities(
   };
 }
 
-/** 能力数据的一行说明:窗口、价格、出处。 */
+/** 模型选择器只显示可核对的窗口与出处;静态价目不在默认界面出现。 */
 export function describeCapabilities(caps: Capabilities): string {
-  return [
-    `${fmtWindow(caps.contextWindow)} ctx`,
-    ...(caps.price ? [`$${caps.price.input}/$${caps.price.output} per 1M`] : []),
-    caps.source,
-  ].join(" · ");
+  return [`${fmtWindow(caps.contextWindow)} ctx`, caps.source].join(" · ");
 }
 
 export type Inferred = {
@@ -254,14 +254,10 @@ export function inferModelConfig(
   return { model, caps, source: `assumed ${fmtWindow(caps.contextWindow)} context` };
 }
 
-/** 一行说明:窗口与价格,给选择器的行注。 */
+/** 一行说明:窗口与出处,给选择器的行注。 */
 export function describeInferred(inf: Inferred): string {
   const k = inf.caps;
-  return [
-    `${fmtWindow(k.contextWindow)} ctx`,
-    ...(k.price ? [`$${k.price.input}/$${k.price.output} per 1M`] : []),
-    inf.source,
-  ].join(" · ");
+  return [`${fmtWindow(k.contextWindow)} ctx`, inf.source].join(" · ");
 }
 
 export function fmtWindow(n: number): string {

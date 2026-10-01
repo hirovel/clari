@@ -1,6 +1,6 @@
 // 模型登记簿:能力数据的顺序(模型配置 > models.dev > 供应商配置 > 假设)、三级推导、缓存与超时、内置快照、
 // 行注与出处;登录对话框里服务器多出来的模型可选并写进配置。
-import { mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -26,6 +26,8 @@ import {
   type KernelConfig,
   type ProviderConfig,
 } from "../src/config.js";
+import { openaiCompat } from "../src/providers/openai-chat.js";
+import { testDirectory } from "./helpers/setup.js";
 import { stripAnsi } from "./helpers/virtual-terminal.js";
 
 const REG: Registry = {
@@ -81,27 +83,69 @@ describe("能力数据的顺序", () => {
       contextWindow: 1_000_000,
       source: "models.dev",
       maxTokens: 384_000,
-      effortLevels: ["low", "high", "max"],
+      effortLevels: ["off", "low", "high", "max"],
       price: { input: 0.098, output: 0.196, cacheRead: 0.028 },
       priceSource: "models.dev",
     });
+    const provider = openaiCompat({
+      baseUrl: withIt.baseUrl,
+      apiKey: "local-fixture",
+      model: "deepseek-v4-flash-vision-exp",
+      dialect: "deepseek",
+      ...(vis.effortLevels && { effortLevels: vis.effortLevels }),
+    });
+    expect(provider.wire?.([], [], { effort: "off" })).toMatchObject({
+      thinking: { type: "disabled" },
+    });
+    const model = lookupModel(REG, "deepseek", "deepseek-v4-flash-vision-exp");
+    if (!model) throw new Error("Missing registry fixture");
+    const noToggle: Registry = {
+      deepseek: {
+        models: {
+          "deepseek-v4-flash-vision-exp": {
+            ...model,
+            reasoning_options: [{ type: "effort", values: ["low", "high", "max"] }],
+          },
+        },
+      },
+    };
+    expect(
+      resolveCapabilities("deepseek", withIt, "deepseek-v4-flash-vision-exp", noToggle)
+        .effortLevels,
+    ).toEqual(["low", "high", "max"]);
+    const toggleOnly: Registry = {
+      deepseek: {
+        models: {
+          "deepseek-v4-flash-vision-exp": { ...model, reasoning_options: [{ type: "toggle" }] },
+        },
+      },
+    };
+    expect(
+      resolveCapabilities("deepseek", withIt, "deepseek-v4-flash-vision-exp", toggleOnly)
+        .effortLevels,
+    ).toBeUndefined();
+    const overridden: ProviderConfig = {
+      ...DS,
+      models: [{ name: "deepseek-v4-flash-vision-exp", effortLevels: ["high"] }],
+    };
+    expect(
+      resolveCapabilities("deepseek", overridden, "deepseek-v4-flash-vision-exp", REG).effortLevels,
+    ).toEqual(["high"]);
     // 供应商级窗口:登记簿没有时用它,出处仍是 config
     const withProv: ProviderConfig = { ...DS, contextWindow: 65536 * 2 };
     expect(resolveCapabilities("deepseek", withProv, "deepseek-v4-flash", REG)).toMatchObject({
       contextWindow: 131072,
       source: "config",
     });
-    expect(describeCapabilities(vis)).toBe("1M ctx · $0.098/$0.196 per 1M · models.dev");
+    expect(describeCapabilities(vis)).toBe("1M ctx · models.dev");
   });
 
   it("行注:生效值与出处;配置覆盖了登记簿且不同时带上登记簿的值", () => {
     expect(capabilityNote(REG, "deepseek", DS, "deepseek-v4-pro")).toBe(
-      "128k ctx · $1/$2 per 1M · config (models.dev says 1M)",
+      "128k ctx · config (models.dev says 1M)",
     );
     expect(capabilityNote(REG, "deepseek", DS, "deepseek-v4-flash")).toBe("64k ctx · assumed");
-    expect(capabilityNote(undefined, "deepseek", DS, "deepseek-v4-pro")).toBe(
-      "128k ctx · $1/$2 per 1M · config",
-    );
+    expect(capabilityNote(undefined, "deepseek", DS, "deepseek-v4-pro")).toBe("128k ctx · config");
   });
 
   it("内置快照:模板里的三家模型都能从快照拿到窗口与价格,出处 models.dev", () => {
@@ -128,7 +172,7 @@ describe("推导", () => {
     expect(inf.source).toBe("models.dev");
     expect(inf.model).toEqual({ name: "deepseek-v4-flash-vision-exp" });
     expect(inf.caps.contextWindow).toBe(1_000_000);
-    expect(describeInferred(inf)).toBe("1M ctx · $0.098/$0.196 per 1M · models.dev");
+    expect(describeInferred(inf)).toBe("1M ctx · models.dev");
   });
 
   it("登记簿没有:抄最长公共前缀的已配置模型(不带名字)写进配置;没有相似的只写名字按假设", () => {
@@ -139,7 +183,7 @@ describe("推导", () => {
       contextWindow: 131072,
       price: { input: 1, output: 2 },
     });
-    expect(describeInferred(copied)).toBe("128k ctx · $1/$2 per 1M · copied from deepseek-v4-pro");
+    expect(describeInferred(copied)).toBe("128k ctx · copied from deepseek-v4-pro");
     const assumed = inferModelConfig("deepseek", DS, "totally-new", undefined);
     expect(assumed.source).toBe("assumed 64k context");
     expect(assumed.model).toEqual({ name: "totally-new" });
@@ -156,7 +200,7 @@ describe("推导", () => {
 
 describe("缓存", () => {
   it("新鲜缓存直接用;过期后联网并重写;联网失败退回旧缓存;没有缓存且失败返回 undefined", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "clari-reg-"));
+    const dir = testDirectory("clari-reg-");
     const path = join(dir, "models.dev.json");
     let calls = 0;
     const fetchImpl = (async () => {
@@ -186,25 +230,21 @@ describe("缓存", () => {
 
 describe("写进配置", () => {
   it("addModel 追加或替换同名模型并落盘;登录对话框里服务器多出来的模型可选,选中先写配置再切换", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "clari-cfg-"));
+    const dir = testDirectory("clari-cfg-");
     const path = join(dir, "config.json");
     const config: KernelConfig = {
       default: "deepseek/deepseek-v4-pro",
       providers: { deepseek: DS },
     };
-    const next = addModel(config, "deepseek", { name: "deepseek-v4-flash-vision-exp" }, path);
+    writeFileSync(path, JSON.stringify(config));
+    const next = addModel("deepseek", { name: "deepseek-v4-flash-vision-exp" }, path);
     expect(
       next.providers.deepseek?.models.map((m) => (typeof m === "string" ? m : m.name)),
     ).toEqual(["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp"]);
-    const again = addModel(
-      next,
-      "deepseek",
-      { name: "deepseek-v4-pro", contextWindow: 1_000_000 },
-      path,
-    );
+    const again = addModel("deepseek", { name: "deepseek-v4-pro", contextWindow: 1_000_000 }, path);
     expect(again.providers.deepseek?.models).toHaveLength(3);
     expect(JSON.parse(readFileSync(path, "utf8")).providers.deepseek.models).toHaveLength(3);
-    expect(() => addModel(config, "nope", { name: "x" }, path)).toThrow('unknown provider "nope"');
+    expect(() => addModel("nope", { name: "x" }, path)).toThrow('unknown provider "nope"');
 
     const calls: string[] = [];
     const deps: LoginDeps = {
@@ -223,9 +263,7 @@ describe("写进配置", () => {
     for (let i = 0; i < 20 && !stripAnsi(dlg.render().join("\n")).includes("key saved"); i++)
       await new Promise((r) => setTimeout(r, 5));
     const out = stripAnsi(dlg.render().join("\n"));
-    expect(out).toContain(
-      "deepseek-v4-flash-vision-exp  not in config · 1M ctx · $0.098/$0.196 per 1M · models.dev",
-    );
+    expect(out).toContain("deepseek-v4-flash-vision-exp  not in config · 1M ctx · models.dev");
     dlg.handleInput("\x1b[B");
     dlg.handleInput("\r");
     expect(calls).toEqual([

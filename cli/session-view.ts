@@ -20,7 +20,7 @@ import { SETUP_SECTIONS } from "../src/setup.js";
 import { type SessionSetup, WORK_SETTINGS } from "./session-setup.js";
 import { c, editorTheme } from "./theme.js";
 import type { TuiContext } from "./tui-context.js";
-import { printableInput } from "./tui-format.js";
+import { cleanPasteText, printableInput } from "./tui-format.js";
 
 export type ExitState = {
   phase: "stopping" | "cleanup";
@@ -116,12 +116,23 @@ export class PendingInputsView implements Component {
   private selected: string | undefined;
   private editing: { id: string; editor: Editor } | undefined;
   private message = "";
+  private hasFocus = false;
   constructor(
     private readonly ctx: TuiContext,
     private readonly resume: () => void,
   ) {}
   invalidate(): void {
     this.editing?.editor.invalidate();
+  }
+  get editingText(): boolean {
+    return this.editing !== undefined;
+  }
+  get focused(): boolean {
+    return this.hasFocus;
+  }
+  set focused(value: boolean) {
+    this.hasFocus = value;
+    if (this.editing) this.editing.editor.focused = value;
   }
   render(width: number): string[] {
     const items = this.ctx.agent.pending;
@@ -197,7 +208,9 @@ export class PendingInputsView implements Component {
         if (matchesKey(data, Key.escape)) {
           this.editing = undefined;
           this.message = "";
-        } else this.editing.editor.handleInput(data);
+        } else if (data.startsWith("\x1b[200~") && data.endsWith("\x1b[201~"))
+          this.editing.editor.handleInput(`\x1b[200~${cleanPasteText(data.slice(6, -6))}\x1b[201~`);
+        else this.editing.editor.handleInput(data);
       } else if (matchesKey(data, Key.escape)) this.ctx.dialog.close();
       else if (data === "s") {
         this.ctx.deps.inputs?.flush();
@@ -218,9 +231,11 @@ export class PendingInputsView implements Component {
           const item = items.find((p) => p.id === this.selected);
           if (item) {
             const editor = new Editor(this.ctx.tui, editorTheme, { paddingX: 1 });
-            editor.focused = true;
+            editor.focused = this.hasFocus;
             editor.setText(item.text);
             editor.onSubmit = (text) => {
+              // 组件先清空再回调;消息已投递等失败时保留尚未应用的编辑。
+              editor.setText(text);
               this.ctx.agent.editPending(item.id, text);
               this.editing = undefined;
               this.message = "Message updated.";

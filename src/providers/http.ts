@@ -1,4 +1,4 @@
-import { ProviderError } from "./errors.js";
+import { errorMessage, ProviderError } from "./errors.js";
 
 // 记录发生在协议解析之前。三个适配器共用,正文错误与流中断也留下实际收到的部分。
 export type HttpRecord = {
@@ -58,7 +58,7 @@ export async function recordedFetch(
           } catch (error) {
             await reader.cancel(error).catch(() => {});
             reader.releaseLock();
-            end("interrupted", (error as Error).message);
+            end("interrupted", errorMessage(error));
             controller.error(error);
           }
         },
@@ -82,7 +82,7 @@ export async function recordedFetch(
       saved,
     };
   } catch (error) {
-    end("interrupted", (error as Error).message);
+    end("interrupted", errorMessage(error));
     await saved;
     throw error;
   }
@@ -92,15 +92,21 @@ export async function recordedFetch(
 export async function fetchModelIds(
   url: string,
   headers: Record<string, string>,
+  signal?: AbortSignal,
 ): Promise<string[]> {
-  const res = await fetch(url, { headers });
+  const res = await fetch(url, { headers, signal: signal ?? null });
   if (!res.ok) {
     throw new ProviderError(`provider ${res.status}: ${await res.text()}`, { status: res.status });
   }
-  const body = (await res.json()) as { data?: { id?: string }[] };
-  return (body.data ?? [])
-    .map((m) => m.id)
-    .filter((id): id is string => typeof id === "string")
+  const body = (await res.json()) as { data?: unknown } | null;
+  if (!body || !Array.isArray(body.data))
+    throw new ProviderError("Invalid model list: expected a data array", {
+      status: res.status,
+      retryable: false,
+    });
+  return body.data
+    .map((m: { id?: unknown } | null) => m?.id)
+    .filter((id): id is string => typeof id === "string" && id.trim().length > 0)
     .sort();
 }
 
@@ -108,11 +114,11 @@ export async function fetchModelIds(
  * 请求级中止控制:用户的 signal 之外,停滞超时也要能撤销底层 fetch。
  * 返回的 signal 给 fetch;abort() 只由停滞调用,不会被误判成用户打断(调用方看的仍是用户的 signal)。
  */
-export function linkedAbort(signal?: AbortSignal): AbortController {
+export function linkedAbort(signal?: AbortSignal): Pick<AbortController, "signal" | "abort"> {
   const ac = new AbortController();
-  if (signal) {
-    if (signal.aborted) ac.abort();
-    else signal.addEventListener("abort", () => ac.abort(), { once: true });
-  }
-  return ac;
+  // 原生组合不在整轮 signal 上保留每次请求的手写监听器。
+  return {
+    signal: signal ? AbortSignal.any([signal, ac.signal]) : ac.signal,
+    abort: (reason?: unknown) => ac.abort(reason),
+  };
 }

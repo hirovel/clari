@@ -1,4 +1,13 @@
-import { mkdirSync, mkdtempSync, renameSync, rmSync, truncateSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import {
+  mkdirSync,
+  mkdtempSync,
+  renameSync,
+  rmSync,
+  truncateSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
@@ -34,6 +43,75 @@ const SESSION: AgentEvent[] = [
 ];
 
 describe("EventLog", () => {
+  it("独立进程不能同时续写;释放后可恢复编辑,锁被接管后旧写入者不能污染文件", () => {
+    const dir = mkdtempSync(join(tmpdir(), "clari-owner-"));
+    const file = join(dir, "session.jsonl");
+    const first = new EventLog(file);
+    const run = () =>
+      spawnSync(
+        process.execPath,
+        [
+          "--import",
+          "tsx",
+          "--input-type=module",
+          "-e",
+          `
+      import { EventLog } from './src/log.ts';
+      const log = EventLog.load(process.argv[1], {attach:true});
+      try {
+        const target=log.events.length;
+        log.append({type:'user/message',at:'t',text:'B'});
+        log.append({type:'context/edit',at:'t',target,field:'content',value:'B edited'});
+        log.recording.flush();
+      } finally { log.recording.dispose(); }
+    `,
+          file,
+        ],
+        { encoding: "utf8", timeout: 10000 },
+      );
+    try {
+      first.append(START);
+      first.append({ ...ASK, text: "A" });
+      first.recording?.flush();
+      const blocked = run();
+      expect(blocked.status).not.toBe(0);
+      expect(blocked.stderr).toContain("File is in use");
+      expect(EventLog.load(file).events).toEqual(first.events);
+      first.recording?.dispose();
+      const resumed = run();
+      expect(resumed.status, resumed.stderr).toBe(0);
+      expect(deriveMessages(EventLog.load(file).events).map((m) => m.content)).toEqual([
+        START.system,
+        "A",
+        "B edited",
+      ]);
+      const stale = EventLog.load(file, { attach: true });
+      try {
+        // 模拟崩溃后遗留或进程长期暂停的租约,不让回归真实等待一分钟。
+        const expired = new Date(Date.now() - 120000);
+        utimesSync(`${file}.lock`, expired, expired);
+        const replacement = EventLog.load(file, { attach: true });
+        try {
+          const before = EventLog.load(file).events;
+          stale.append(ASK);
+          expect(stale.events.at(-1)).toEqual(ASK);
+          expect(stale.recording?.error).toMatch(/ownership changed/);
+          expect(EventLog.load(file).events).toEqual(before);
+          stale.recording?.dispose();
+          replacement.append({ ...ASK, text: "new owner" });
+          replacement.recording?.flush();
+          expect(EventLog.load(file).events.at(-1)).toMatchObject({ text: "new owner" });
+        } finally {
+          replacement.recording?.dispose();
+        }
+      } finally {
+        stale.recording?.dispose();
+      }
+    } finally {
+      first.recording?.dispose();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
   it("保存失败仍完成任务;修复后自动补写且不重跑工具;分叉独立保留原始输出", async () => {
     const dir = mkdtempSync(join(tmpdir(), "clari-record-gate-"));
     const file = join(dir, "s.jsonl");
@@ -86,20 +164,17 @@ describe("EventLog", () => {
       expect(requests).toBe(2);
       expect(executions).toBe(1);
       expect(agent.running).toBe(false);
-      const bufferedCopy = new Recording(join(dir, "buffered-copy.jsonl"));
-      try {
-        bufferedCopy.copyAttachments(log.events, store);
-        const request = log.events.findIndex((event) => event.type === "request");
-        expect(
-          readRequestRecording(bufferedCopy.journal, log.events, request)?.outputs?.[0],
-        ).toMatchObject({
-          original: "original text that the model does not receive",
-          model: "short result",
-        });
-        expect(store.error).toBeTruthy();
-      } finally {
-        bufferedCopy.dispose();
-      }
+      const bufferedFork = forkSession(log.events, log.events.length, dir, store);
+      const forkEvents = EventLog.load(bufferedFork.file).events;
+      expect(forkEvents).toEqual(log.events);
+      const request = forkEvents.findIndex((event) => event.type === "request");
+      expect(
+        readRequestRecording(bufferedFork.file, forkEvents, request)?.outputs?.[0],
+      ).toMatchObject({
+        original: "original text that the model does not receive",
+        model: "short result",
+      });
+      expect(store.error).toBeTruthy();
       rmSync(store.directory);
       rmSync(file, { recursive: true });
       renameSync(backup, file);
@@ -113,8 +188,12 @@ describe("EventLog", () => {
         original: "original text that the model does not receive",
         model: "short result",
       });
-      const fork = forkSession(loaded.events, loaded.events.length, dir, file);
+      const fork = forkSession(loaded.events, loaded.events.length, dir, new Recording(file));
       rmSync(store.directory, { recursive: true });
+      expect(
+        readRequestRecording(bufferedFork.file, EventLog.load(bufferedFork.file).events, index)
+          ?.outputs,
+      ).toEqual(saved?.outputs);
       expect(
         readRequestRecording(fork.file, EventLog.load(fork.file).events, index)?.outputs,
       ).toEqual(saved?.outputs);
@@ -138,6 +217,83 @@ describe("EventLog", () => {
         store.flush();
       }
       await run.catch(() => {});
+      store.dispose();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  it("写入积压达到上限时停止当前工具,保存恢复前拒绝新任务且不重跑未知结果", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "clari-record-full-"));
+    const file = join(dir, "s.jsonl");
+    const backup = join(dir, "backup");
+    const log = new EventLog(file, 8192);
+    const store = log.recording;
+    if (!store) throw new Error("missing store");
+    let requests = 0;
+    let executions = 0;
+    log.append(START);
+    store.flush();
+    renameSync(file, backup);
+    mkdirSync(file);
+    const agent = new Agent({
+      log,
+      provider: {
+        model: "m",
+        async complete() {
+          requests++;
+          return requests === 1
+            ? {
+                text: "",
+                toolCalls: [
+                  { id: "one", name: "act", args: {} },
+                  { id: "two", name: "act", args: {} },
+                ],
+                stopReason: "tool",
+              }
+            : { text: "saved again", toolCalls: [], stopReason: "end" };
+        },
+      },
+      tools: [
+        {
+          name: "act",
+          description: "act",
+          parameters: Type.Object({}),
+          async execute(_args, ctx) {
+            executions++;
+            ctx.output?.write(Buffer.alloc(4096, 97));
+            ctx.output?.write(Buffer.alloc(4096, 98));
+            if (ctx.signal.aborted) throw new Error("cancelled; external outcome not confirmed");
+            return "unexpected";
+          },
+        },
+      ],
+    });
+    try {
+      expect(await agent.prompt("go")).toBe("aborted");
+      expect(store.full).toBe(true);
+      expect(requests).toBe(1);
+      expect(executions).toBe(1);
+      expect(log.events.filter((e) => e.type === "tool/result")).toMatchObject([
+        { callId: "one", outcome: "unknown" },
+        { callId: "two", isError: true },
+      ]);
+      expect(log.events).toContainEqual(
+        expect.objectContaining({ type: "ext/event", source: "recording", kind: "buffer/full" }),
+      );
+      const count = log.events.length;
+      await expect(agent.prompt("blocked")).rejects.toThrow(/Recording buffer full/);
+      expect(log.events).toHaveLength(count);
+      expect(store.gaps).toBe(1);
+      expect(store.pendingBytes).toBeLessThan(8192);
+      rmSync(file, { recursive: true });
+      renameSync(backup, file);
+      store.flush();
+      expect(store.full).toBe(false);
+      expect(await agent.prompt("continue explicitly")).toBe("idle");
+      expect(requests).toBe(2);
+      expect(executions).toBe(1);
+      store.flush();
+      expect(EventLog.load(file).events).toEqual(log.events);
+    } finally {
       store.dispose();
       rmSync(dir, { recursive: true, force: true });
     }

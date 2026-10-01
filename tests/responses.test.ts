@@ -1,9 +1,8 @@
 // OpenAI Responses 适配器:推理项(摘要给人看、密文回传)、input 项翻译、流式累积、假服务器全链路;
 // 推理来源标记(full / summary)与字段清单表。
 
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import http from "node:http";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
@@ -32,6 +31,7 @@ import {
   toResponsesInput,
 } from "../src/providers/openai-responses.js";
 import { defineTool } from "../src/tools.js";
+import { testDirectory } from "./helpers/setup.js";
 
 describe("Responses 流式累积", () => {
   it("推理项摘要 + 密文、文本、函数调用按 output_index 归位;done 项全量覆盖增量", () => {
@@ -254,8 +254,10 @@ describe("字段清单表", () => {
 });
 
 describe("Responses 假服务器全链路", () => {
-  it("配置 protocol: openai-responses → POST /responses;推理项回传到第二次请求;用量与摘要入日志", async () => {
+  it("Responses 全链路:推理回传与用量;失败终止不执行工具", async () => {
     const calls: { url: string; body: Record<string, unknown> }[] = [];
+    let failed: "failed" | "incomplete" | undefined;
+    let failedRequest = 0;
     const sse = (res: http.ServerResponse, events: unknown[]) => {
       res.writeHead(200, { "content-type": "text/event-stream" });
       for (const e of events)
@@ -269,6 +271,31 @@ describe("Responses 假服务器全链路", () => {
       });
       req.on("end", () => {
         calls.push({ url: req.url ?? "", body: JSON.parse(raw) });
+        if (failed && calls.length === failedRequest) {
+          sse(res, [
+            {
+              type: "response.output_item.done",
+              output_index: 0,
+              item: {
+                type: "function_call",
+                id: "unsafe",
+                call_id: "unsafe",
+                name: "echo",
+                arguments: '{"s":"must not execute"}',
+              },
+            },
+            {
+              type: `response.${failed}`,
+              response: {
+                status: failed,
+                ...(failed === "incomplete" && {
+                  incomplete_details: { reason: "max_time_limit" },
+                }),
+              },
+            },
+          ]);
+          return;
+        }
         if (calls.length === 1) {
           sse(res, [
             {
@@ -334,7 +361,7 @@ describe("Responses 假服务器全链路", () => {
     });
     await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
     const { port } = server.address() as { port: number };
-    const dir = mkdtempSync(join(tmpdir(), "ak-resp-"));
+    const dir = testDirectory("ak-resp-");
     const cfgPath = join(dir, "config.json");
     writeFileSync(
       cfgPath,
@@ -360,11 +387,13 @@ describe("Responses 假服务器全链路", () => {
       },
       "k",
     );
+    let executions = 0;
     const echo = defineTool({
       name: "echo",
       description: "",
       parameters: Type.Object({ s: Type.String() }),
       async execute(a) {
+        executions++;
         return a.s;
       },
     });
@@ -373,6 +402,31 @@ describe("Responses 假服务器全链路", () => {
     log.append({ type: "user/message", at: "", text: "go" });
     try {
       expect(await runTurn({ log, provider, tools: [echo] })).toBe("idle");
+      expect(executions).toBe(1);
+      for (const outcome of ["failed", "incomplete"] as const) {
+        failed = outcome;
+        const previous = calls.length;
+        failedRequest = previous + 1;
+        const failure = new EventLog();
+        failure.append({ type: "session/start", at: "", model: "gpt-5.5", system: "sys" });
+        failure.append({ type: "user/message", at: "", text: "go" });
+        await expect(runTurn({ log: failure, provider, tools: [echo] })).rejects.toThrow(
+          outcome === "failed" ? "response failed" : "max_time_limit",
+        );
+        expect(calls.length).toBe(previous + 1);
+        expect(executions).toBe(1);
+        expect(failure.events.find((event) => event.type === "request/error")).toMatchObject({
+          kind: "stream",
+        });
+        expect(failure.events.find((event) => event.type === "request/error")).not.toHaveProperty(
+          "body",
+        );
+        expect(
+          failure.events.some(
+            (event) => event.type === "tool/result" || event.type === "assistant/message",
+          ),
+        ).toBe(false);
+      }
     } finally {
       await new Promise<void>((r) => server.close(() => r()));
     }

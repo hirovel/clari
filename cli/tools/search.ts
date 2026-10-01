@@ -1,48 +1,75 @@
-// 只读两工具:grep / glob。内核不知道它们,从 CLI 层注入;目录列举并入 read。
-// 立场取自 pi:模型在这些工具名上被训练过,给工具即给"先搜后读"的引导,不必写提示词规则。
-import { spawnSync } from "node:child_process";
-import { readdirSync, readFileSync, statSync } from "node:fs";
-import { basename, dirname, join, relative, resolve, sep } from "node:path";
+// 两个工具入口共用一个可取消的 rg 进程;只在此处决定遍历范围与忽略目录。
+import { spawn } from "node:child_process";
+import { existsSync, statSync } from "node:fs";
+import { basename, dirname, resolve, sep } from "node:path";
+import { createInterface } from "node:readline";
 import { Type } from "@sinclair/typebox";
+import { rgPath } from "@vscode/ripgrep";
 import { defineTool, described } from "../../src/tools.js";
 import { capLineLength } from "./truncate.js";
 
-/** 遍历时跳过的目录:与各家一致,不进版本库或不属于源码的东西。 */
-export const SKIP_DIRS = new Set([".git", "node_modules", "dist", "build", ".preview", "sessions"]);
+const SKIP_DIRS = [".git", "node_modules", "dist", "build", ".preview", "sessions"];
+const SEARCH_ARGS = [
+  "--hidden",
+  "--no-ignore",
+  ...SKIP_DIRS.flatMap((dir) => ["--glob", `!${dir}`]),
+];
 
-/** 递归列出 root 下的文件(相对路径,正斜杠)。 */
-export function walkFiles(root: string, opts: { maxFiles?: number } = {}): string[] {
-  const out: string[] = [];
-  const max = opts.maxFiles ?? 20000;
-  const visit = (dir: string) => {
-    let entries: string[];
-    try {
-      entries = readdirSync(dir);
-    } catch {
-      return;
-    }
-    for (const name of entries.sort()) {
-      if (out.length >= max) return;
-      const full = join(dir, name);
-      let st: ReturnType<typeof statSync>;
-      try {
-        st = statSync(full);
-      } catch {
-        continue;
-      }
-      if (st.isDirectory()) {
-        if (!SKIP_DIRS.has(name)) visit(full);
-      } else if (st.isFile()) {
-        out.push(relative(root, full).split(sep).join("/"));
-      }
-    }
+/** 读取 rg 的逐行输出;达到搜索边界或收到 Esc 时停止同一个子进程。 */
+async function searchLines(
+  args: string[],
+  cwd: string,
+  signal: AbortSignal,
+  onLine: (line: string) => boolean,
+): Promise<void> {
+  if (signal.aborted) throw new Error("search interrupted before starting");
+  const child = spawn(rgPath, [...SEARCH_ARGS, ...args], {
+    cwd,
+    windowsHide: true,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stderr = "";
+  let stoppedAtLimit = false;
+  let interrupted = false;
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => {
+    stderr = (stderr + chunk).slice(-4000);
+  });
+  const closed = new Promise<number>((done, fail) => {
+    child.once("error", fail);
+    child.once("close", (code) => done(code ?? 2));
+  });
+  const onAbort = () => {
+    interrupted = true;
+    child.kill();
   };
-  visit(root);
-  return out;
+  signal.addEventListener("abort", onAbort, { once: true });
+  if (signal.aborted) onAbort();
+  const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
+  try {
+    for await (const line of lines) {
+      if (!onLine(line)) {
+        stoppedAtLimit = true;
+        child.kill();
+        break;
+      }
+    }
+    const code = await closed;
+    if (interrupted) throw new Error("search interrupted");
+    if (!stoppedAtLimit && code > 1)
+      throw new Error(`search failed: ${stderr.trim() || `rg exited with code ${code}`}`);
+  } catch (error) {
+    child.kill();
+    await closed.catch(() => undefined);
+    throw error;
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+    lines.close();
+  }
 }
 
-/** glob → 正则:** 匹配任意层级,* 匹配单段内任意字符,? 匹配单字符。 */
-export function globToRegExp(pattern: string): RegExp {
+/** 只匹配整个相对路径:** 跨层级,* 留在单层,? 匹配一个字符。 */
+function globToRegExp(pattern: string): RegExp {
   let re = "";
   for (let i = 0; i < pattern.length; i++) {
     const ch = pattern[i] as string;
@@ -59,47 +86,9 @@ export function globToRegExp(pattern: string): RegExp {
   return new RegExp(`^${re}$`);
 }
 
-export type GrepMatch = { file: string; line: number; text: string };
-
-/** JS 实现的逐文件正则搜索;rg 不在时的回退。 */
-export function grepFiles(
-  root: string,
-  pattern: RegExp,
-  opts: { glob?: string; maxResults?: number } = {},
-): { matches: GrepMatch[]; truncated: boolean; scanned: number } {
-  const max = opts.maxResults ?? 200;
-  const filter = opts.glob ? globToRegExp(opts.glob) : undefined;
-  const matches: GrepMatch[] = [];
-  let scanned = 0;
-  const rootStat = statSync(root);
-  const files = rootStat.isFile() ? [""] : walkFiles(root);
-  for (const rel of files) {
-    const full = rel ? join(root, rel) : root;
-    if (filter && rel && !filter.test(rel) && !filter.test(rel.split("/").at(-1) ?? "")) continue;
-    let content: string;
-    try {
-      content = readFileSync(full, "utf8");
-    } catch {
-      continue;
-    }
-    if (content.includes("\0")) continue; // 含 NUL 视为二进制,不搜
-    scanned++;
-    const lines = content.split("\n");
-    for (let i = 0; i < lines.length; i++) {
-      const l = lines[i] as string;
-      pattern.lastIndex = 0;
-      if (pattern.test(l)) {
-        matches.push({ file: rel || root, line: i + 1, text: l });
-        if (matches.length >= max) return { matches, truncated: true, scanned };
-      }
-    }
-  }
-  return { matches, truncated: false, scanned };
-}
-
 const capLine = capLineLength(500);
 
-export function createGrepTool(opts: { useRipgrep?: boolean; maxResults?: number } = {}) {
+export function createGrepTool(opts: { maxResults?: number } = {}) {
   const maxResults = opts.maxResults ?? 200;
   return defineTool({
     name: "grep",
@@ -108,12 +97,10 @@ export function createGrepTool(opts: { useRipgrep?: boolean; maxResults?: number
         "Search file contents by regular expression; returns path:line:content, at most 200 results, lines cut to 500 characters. " +
         "Skips .git, node_modules and build output.",
       guidance:
-        "Use it to locate, then read for context. Prefer it over grep in bash; for match counts or context lines, run rg in bash. " +
-        "Run independent searches in the same turn.",
-      rules: "ALWAYS use this instead of grep or rg in bash to find matches.",
+        "Use it to locate text, then read for context. For match counts, context lines or advanced searches, use rg in bash.",
     }),
     parameters: Type.Object({
-      pattern: Type.String({ description: "regular expression (JS syntax)" }),
+      pattern: Type.String({ description: "regular expression (ripgrep syntax)" }),
       path: Type.Optional(
         Type.String({ description: "directory or file to search, default current directory" }),
       ),
@@ -126,74 +113,46 @@ export function createGrepTool(opts: { useRipgrep?: boolean; maxResults?: number
     async execute(args, ctx) {
       const root = resolve(args.path ?? ".");
       const rootIsFile = statSync(root).isFile();
-      // 给模型的路径 = 用户给的 path + 相对于它的文件路径,原样可再喂给 read;path 缺省或为 . 时不加前缀。
+      // 用户提供的路径保留在结果中,可直接交给 read。
       const given = (args.path ?? ".").split(sep).join("/").replace(/\/+$/, "");
-      const base = rootIsFile ? "" : given === "." || given === "" ? "" : given;
-      const withBase = (file: string) => (base ? `${base}/${file}` : file);
-      const useRg = opts.useRipgrep ?? true;
-      if (useRg) {
-        // 以搜索根为 cwd,rg 输出的路径天然相对于它。
-        const rg = spawnSync(
-          "rg",
-          [
-            "--line-number",
-            "--with-filename",
-            "--no-heading",
-            "--color",
-            "never",
-            "--max-count",
-            String(maxResults),
-            ...(args.ignoreCase ? ["-i"] : []),
-            ...(args.glob ? ["-g", args.glob] : []),
-            "-e",
-            args.pattern,
-            // 路径必须显式给:stdin 不是终端时 rg 会改读 stdin,子进程里正是这种情况。
-            rootIsFile ? basename(root) : ".",
-          ],
-          {
-            cwd: rootIsFile ? dirname(root) : root,
-            encoding: "utf8",
-            maxBuffer: 8 * 1024 * 1024,
-            stdio: ["ignore", "pipe", "pipe"],
-          },
-        );
-        if (!rg.error) {
-          if (rg.status === 1) return "(no matches)";
-          if (rg.status === 0) {
-            const lines = rg.stdout
-              .trimEnd()
-              .split(/\r?\n/)
-              .map((l) => {
-                const file = l.split(":")[0] ?? "";
-                const rel = rootIsFile ? given : file.split(sep).join("/").replace(/^\.\//, "");
-                return withBase(rel) + l.slice(file.length);
-              });
-            ctx.output?.write(rg.stdout);
-            const shown = lines.slice(0, maxResults);
-            const tail =
-              lines.length > maxResults
-                ? `\n[showing first ${maxResults} of ${lines.length}+ results; narrow the search]`
-                : "";
-            return capLine(shown.join("\n")) + tail;
+      const base = rootIsFile || given === "." || given === "" ? "" : given;
+      const shown: string[] = [];
+      let more = false;
+      await searchLines(
+        [
+          "--line-number",
+          "--with-filename",
+          "--null",
+          "--no-heading",
+          "--color",
+          "never",
+          ...(args.ignoreCase ? ["--ignore-case"] : []),
+          ...(args.glob ? ["--glob", args.glob] : []),
+          "--regexp",
+          args.pattern,
+          rootIsFile ? basename(root) : ".",
+        ],
+        rootIsFile ? dirname(root) : root,
+        ctx.signal,
+        (line) => {
+          const boundary = line.indexOf("\0");
+          if (boundary < 0) throw new Error("search returned a result without a file path");
+          const file = line.slice(0, boundary).split(sep).join("/").replace(/^\.\//, "");
+          const path = rootIsFile ? given : base ? `${base}/${file}` : file;
+          const result = `${path}:${line.slice(boundary + 1)}`;
+          ctx.output?.write(`${result}\n`);
+          if (shown.length < maxResults) shown.push(capLine(result));
+          else {
+            more = true;
+            return false;
           }
-          // 其它状态码(正则错误等)落到 JS 实现,拿到一致的报错文案。
-        }
-      }
-      const re = new RegExp(args.pattern, args.ignoreCase ? "i" : "");
-      const r = grepFiles(root, re, {
-        ...(args.glob && { glob: args.glob }),
-        maxResults,
-      });
-      if (r.matches.length === 0) return `(no matches; scanned ${r.scanned} files)`;
-      const body = r.matches
-        .map((m) => `${rootIsFile ? given : withBase(m.file)}:${m.line}:${m.text}`)
-        .join("\n");
-      ctx.output?.write(body);
+          return true;
+        },
+      );
+      if (shown.length === 0) return "(no matches)";
       return (
-        capLine(body) +
-        (r.truncated
-          ? `\n[showing first ${maxResults} results, more exist; narrow the search]`
-          : "")
+        shown.join("\n") +
+        (more ? `\n[showing first ${maxResults} results; more exist; narrow the search]` : "")
       );
     },
   });
@@ -204,9 +163,9 @@ export const grepTool = createGrepTool();
 export const globTool = defineTool({
   name: "glob",
   ...described({
-    core: "List files matching a glob pattern, e.g. src/**/*.ts; returns relative paths, at most 500, skipping .git, node_modules and build output.",
-    guidance: "Use it to find files by name; use grep to find files by content.",
-    rules: "ALWAYS use this instead of find or ls in bash to locate files by name.",
+    core: "List files matching a glob pattern, e.g. src/**/*.ts; returns relative paths, at most 500 in the preview, with a saved scanned-match list when more match. Skips .git, node_modules and build output.",
+    guidance:
+      "Use it to find files by name; use grep for contents. For advanced file queries, use rg in bash.",
   }),
   parameters: Type.Object({
     pattern: Type.String({
@@ -217,14 +176,45 @@ export const globTool = defineTool({
     ),
   }),
   concurrency: "parallel",
-  async execute(args) {
+  async execute(args, ctx) {
     const root = resolve(args.path ?? ".");
+    if (!existsSync(root)) return "(no matches)";
+    const rootIsFile = statSync(root).isFile();
     const re = globToRegExp(args.pattern);
-    const all = walkFiles(root).filter((f) => re.test(f));
-    if (all.length === 0) return "(no matches)";
-    const shown = all.slice(0, 500);
+    const files: string[] = [];
+    let scanned = 0;
+    let scanLimited = false;
+    await searchLines(
+      ["--files", rootIsFile ? basename(root) : "."],
+      rootIsFile ? dirname(root) : root,
+      ctx.signal,
+      (line) => {
+        if (scanned >= 20000) {
+          scanLimited = true;
+          return false;
+        }
+        scanned++;
+        const path = line.split(sep).join("/").replace(/^\.\//, "");
+        if (re.test(path)) files.push(path);
+        return true;
+      },
+    );
+    files.sort();
+    if (files.length === 0)
+      return scanLimited ? "(no matches in first 20000 files; scan incomplete)" : "(no matches)";
+    const shown = files.slice(0, 500);
+    if (files.length > 500) ctx.output?.write(files.join("\n"));
+    const saved = ctx.output?.path
+      ? ctx.output.ref.missingFrom === undefined
+        ? `; recorded ${files.length} scanned matches: ${ctx.output.path}`
+        : `; recording incomplete from byte ${ctx.output.ref.missingFrom}: ${ctx.output.path}`
+      : "; narrow the pattern to see more";
     return (
-      shown.join("\n") + (all.length > 500 ? `\n[showing first 500 of ${all.length} results]` : "")
+      shown.join("\n") +
+      (files.length > 500
+        ? `\n[showing first 500 of ${files.length} scanned matches${saved}]`
+        : "") +
+      (scanLimited ? "\n[scan stopped at 20000 files; results may be incomplete]" : "")
     );
   },
 });

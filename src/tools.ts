@@ -86,7 +86,7 @@ export function validateArgs(schema: TSchema, raw: unknown): ValidationResult {
   if (typeof raw === "object" && raw !== null && "__unparsed" in raw) {
     return {
       ok: false,
-      error: `参数不是合法 JSON,无法解析。收到的原文:\n${String((raw as { __unparsed: unknown }).__unparsed)}`,
+      error: `Tool arguments are not valid JSON. Received text:\n${String((raw as { __unparsed: unknown }).__unparsed)}`,
     };
   }
   // 外来的 JSON Schema(MCP 服务器给的,没有 TypeBox 的 Kind 标记)不在这里校验:服务器自己校验,协议错误会回来。
@@ -100,6 +100,6 @@ export function validateArgs(schema: TSchema, raw: unknown): ValidationResult {
   );
   return {
     ok: false,
-    error: `参数校验失败:\n${lines.join("\n")}\n收到的参数:\n${JSON.stringify(raw, null, 2)}`,
+    error: `Tool argument validation failed:\n${lines.join("\n")}\nReceived arguments:\n${JSON.stringify(raw, null, 2)}`,
   };
 }

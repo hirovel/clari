@@ -4,6 +4,7 @@ import { EventLog } from "../src/log.js";
 import { maxSteps, queueToTurnEnd, runTurn, steer } from "../src/loop.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
 import { defineTool } from "../src/tools.js";
+import { testImage } from "./helpers/image.js";
 
 // 脚本化 provider:按序吐出预设的 turn,离线验证循环语义。
 function scripted(turns: AssistantTurn[]): Provider {
@@ -54,6 +55,94 @@ function firstResult(log: EventLog) {
 }
 
 describe("runTurn", () => {
+  it("压缩无结果或没有缩小文字时记录原因,保留图片并继续请求", async () => {
+    for (const [strategy, reason] of [
+      [async () => null, "no-result"],
+      [async () => ({ cleared: [] }), "no-gain"],
+    ] as const) {
+      const log = newLog();
+      log.append({ type: "user/message", at: "t", text: "x".repeat(200), images: [testImage] });
+      let sentImages = 0;
+      const outcome = await runTurn({
+        log,
+        provider: {
+          model: "fake",
+          async complete(messages) {
+            sentImages = messages.filter((m) => m.role === "user" && m.images?.length).length;
+            return { text: "ok", toolCalls: [], stopReason: "end" };
+          },
+        },
+        tools: [],
+        compaction: { strategy, window: 50, reserveTokens: 10 },
+      });
+      expect(outcome).toBe("idle");
+      expect(sentImages).toBe(1);
+      expect(log.events).toContainEqual(
+        expect.objectContaining({ type: "decision", slot: "compaction", reason, images: true }),
+      );
+      expect(log.events.some((e) => e.type === "compaction")).toBe(false);
+    }
+  });
+
+  it("压缩等待中打断:不记无进展、不应用摘要、不再派发请求", async () => {
+    for (const result of ["null", "payload", "error"] as const) {
+      const log = newLog();
+      log.append({ type: "user/message", at: "t", text: "x".repeat(200) });
+      const cancel = new AbortController();
+      const outcome = await runTurn({
+        log,
+        provider: {
+          model: "fake",
+          async complete() {
+            throw new Error("request must not start");
+          },
+        },
+        tools: [],
+        signal: cancel.signal,
+        compaction: {
+          window: 50,
+          reserveTokens: 10,
+          strategy: async () => {
+            cancel.abort();
+            if (result === "error") throw new Error("cancelled during summary");
+            return result === "payload" ? { summary: "short", coversUpTo: 2 } : null;
+          },
+        },
+      });
+      expect(outcome).toBe("aborted");
+      expect(
+        log.events.some(
+          (e) => e.type === "request" || e.type === "compaction" || e.type === "decision",
+        ),
+      ).toBe(false);
+    }
+
+    const log = newLog();
+    const cancel = new AbortController();
+    const outcome = await runTurn({
+      log,
+      provider: {
+        model: "fake",
+        async complete() {
+          throw new Error("maximum context length exceeded");
+        },
+      },
+      tools: [],
+      signal: cancel.signal,
+      compaction: {
+        window: 100_000,
+        trigger: "manual",
+        strategy: async () => {
+          cancel.abort();
+          return null;
+        },
+      },
+    });
+    expect(outcome).toBe("aborted");
+    expect(log.events.some((e) => e.type === "request/error")).toBe(true);
+    expect(log.events.some((e) => e.type === "decision" && e.slot === "compaction")).toBe(false);
+  });
+
   it("工具调用→执行→回喂→模型收尾:事件序列完整", async () => {
     const log = newLog();
     const tools = [echoTool];
@@ -120,7 +209,7 @@ describe("runTurn", () => {
     });
     const result = firstResult(log) as { content: string; isError: boolean };
     expect(result.isError).toBe(true);
-    expect(result.content).toContain("参数校验失败");
+    expect(result.content).toContain("Tool argument validation failed");
     expect(result.content).toContain('"wrong": 1');
   });
 
@@ -331,6 +420,26 @@ describe("runTurn", () => {
         expect(result.durationMs).toBeUndefined();
       }
     }
+
+    const lateLog = newLog();
+    const lateCancel = new AbortController();
+    const lateOutcome = await runTurn({
+      log: lateLog,
+      tools: [],
+      signal: lateCancel.signal,
+      provider: {
+        model: "fake",
+        async complete() {
+          lateCancel.abort();
+          return { text: "reply arrived after cancel", toolCalls: [], stopReason: "end" };
+        },
+      },
+    });
+    expect(lateOutcome).toBe("aborted");
+    expect(lateLog.events.at(-1)).toMatchObject({
+      type: "assistant/message",
+      text: "reply arrived after cancel",
+    });
   });
 
   it("未知工具→错误回喂,不抛出", async () => {

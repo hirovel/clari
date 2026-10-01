@@ -114,7 +114,7 @@ describe("config 解析", () => {
       model: "gpt-x",
       contextWindow: 128000,
     });
-    expect(resolveModel(CONFIG_TEMPLATE).model).toBe("deepseek-v4-pro");
+    expect(resolveModel(CONFIG_TEMPLATE).model).toBe("deepseek-flash");
   });
 
   it("匹配失败时列出全部已配置模型", () => {
@@ -138,7 +138,7 @@ describe("按模型的能力数据与强度映射", () => {
     expect(r.maxTokens).toBeUndefined();
     expect(r.thinkingMode).toBe("budget");
     expect(r.effortLevels).toEqual(["off", "low", "medium", "high"]);
-    const d = resolveModel(CONFIG_TEMPLATE, "deepseek-v4-flash");
+    const d = resolveModel(CONFIG_TEMPLATE, "deepseek-flash");
     expect(d.contextWindow).toBe(128000);
     expect(d.provider.dialect).toBe("deepseek");
     expect(modelNames(CONFIG_TEMPLATE.providers.openai as ProviderConfig)).toEqual([

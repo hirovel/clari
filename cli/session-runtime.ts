@@ -19,6 +19,12 @@ import {
 import { connectMcpServers, type McpBridge } from "./mcp/bridge.js";
 import { loadMcpServers, mcpConfigOf } from "./mcp/config.js";
 import { McpConnections } from "./mcp/connections.js";
+import {
+  type ProjectMcpReview,
+  projectMcpReview,
+  projectMcpTrusted,
+  trustProjectMcp,
+} from "./mcp/trust.js";
 import { automaticSkills, discoverSkills } from "./prompt.js";
 import { applyToolPrompts } from "./tool-prompts.js";
 import { createSkillTool, skillCatalog } from "./tools/skill.js";
@@ -34,6 +40,7 @@ export async function prepareSessionRuntime(options: {
   current?: () => { provider: Provider; tools: readonly Tool[] } | undefined;
   allowUnavailable?: boolean;
   descriptions?: Record<string, string>;
+  confirmProjectMcp?: (review: ProjectMcpReview) => Promise<boolean>;
 }) {
   const { boot, args, log } = options;
   const choice = options.allowUnavailable ? boot.chooseOrNone(args.model) : boot.choose(args.model);
@@ -46,6 +53,7 @@ export async function prepareSessionRuntime(options: {
   if (args.preservation) compaction.preservation = parsePreservation(args.preservation).policy;
   const memory = args.memory ? memoryFiles() : undefined;
   const skills = discoverSkills(process.cwd(), {
+    ...(args.skillsSources && { sources: args.skillsSources }),
     onError: (error) =>
       log.append({
         type: "ext/event",
@@ -59,7 +67,53 @@ export async function prepareSessionRuntime(options: {
   if (options.descriptions) toolPrompts.descriptions = options.descriptions;
   const connections = options.connections ?? new McpConnections();
   const config = mcpConfigOf(boot.config.mcp);
-  const servers = loadMcpServers(config, process.cwd());
+  const projectReview = projectMcpReview(process.cwd());
+  const allServers = loadMcpServers(
+    config,
+    process.cwd(),
+    process.env,
+    projectReview?.snapshot ?? null,
+  );
+  const projectNames = new Set(
+    allServers
+      .filter((server) => server.source === projectReview?.file)
+      .map((server) => server.name),
+  );
+  const review = projectReview && {
+    ...projectReview,
+    servers: projectReview.servers.filter((server) => projectNames.has(server.name)),
+  };
+  let useProjectMcp = true;
+  if (review?.servers.length && !projectMcpTrusted(review)) {
+    if (!options.confirmProjectMcp)
+      throw new Error(
+        `Project MCP is not trusted: ${review.file}. Open Clari TUI to review and approve it; no project MCP command was started.`,
+      );
+    useProjectMcp = await options.confirmProjectMcp(review);
+    if (useProjectMcp) {
+      trustProjectMcp(review);
+      log.append({
+        type: "ext/event",
+        at: now(),
+        source: "mcp",
+        kind: "project-trusted",
+        payload: { file: review.file },
+      });
+    }
+  }
+  const servers = allServers.filter((server) => useProjectMcp || server.source !== review?.file);
+  if (review && projectMcpReview(process.cwd())?.digest !== review.digest)
+    throw new Error(
+      `${review.file} changed during preparation; inspect it again before connecting`,
+    );
+  if (review?.servers.length && !useProjectMcp)
+    log.append({
+      type: "ext/event",
+      at: now(),
+      source: "mcp",
+      kind: "project-skipped",
+      payload: { file: review.file },
+    });
 
   async function assemble(target: EventLog, reconnect = false) {
     const ext = await loadExtensions(args.extensions, { cwd: process.cwd(), log: target });
@@ -113,7 +167,38 @@ export async function prepareSessionRuntime(options: {
       throw error;
     }
   }
-  const root = await assemble(log, true);
+  const disposeOwned = async (dispose: () => Promise<void>): Promise<void> => {
+    const errors: unknown[] = [];
+    try {
+      await dispose();
+    } catch (error) {
+      errors.push(error);
+    }
+    if (!options.connections) {
+      try {
+        await connections.close();
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    if (errors.length) throw new AggregateError(errors, "Session resource cleanup failed");
+  };
+  let root: Awaited<ReturnType<typeof assemble>>;
+  try {
+    root = await assemble(log, true);
+  } catch (error) {
+    if (!options.connections) {
+      try {
+        await connections.close();
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          "Session initialization and cleanup failed",
+        );
+      }
+    }
+    throw error;
+  }
   try {
     const current = () =>
       options.current?.() ?? {
@@ -173,11 +258,11 @@ export async function prepareSessionRuntime(options: {
       skills,
       toolPrompts,
       activate: () => root.mcp.activate(),
-      dispose: root.dispose,
+      dispose: () => disposeOwned(root.dispose),
     };
   } catch (error) {
     try {
-      await root.dispose();
+      await disposeOwned(root.dispose);
     } catch (cleanupError) {
       throw new AggregateError(
         [error, cleanupError],

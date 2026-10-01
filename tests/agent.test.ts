@@ -24,6 +24,63 @@ function newLog(): EventLog {
 const tick = () => new Promise((r) => setImmediate(r));
 
 describe("Agent", () => {
+  it("手动压缩共享运行周期:排队输入随后发送,Esc 取消并暂停新输入", async () => {
+    const log = newLog();
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let summaries = 0;
+    let requests = 0;
+    const agent = new Agent({
+      log,
+      provider: {
+        model: "fake",
+        async complete() {
+          requests++;
+          return { text: "done", toolCalls: [], stopReason: "end" };
+        },
+      },
+      tools: [],
+      compaction: {
+        strategy: async ({ signal, instructions }) => {
+          summaries++;
+          expect(instructions).toBe("keep details");
+          if (summaries === 1) await gate;
+          else
+            await new Promise<void>((resolve) =>
+              signal?.addEventListener("abort", () => resolve(), { once: true }),
+            );
+          return null;
+        },
+        trigger: "manual",
+        window: 100000,
+        reserveTokens: 1000,
+      },
+    });
+
+    const first = agent.compact("keep details");
+    await tick();
+    expect(agent.running).toBe(true);
+    expect(requests).toBe(0);
+    void agent.prompt("continue after compact");
+    release();
+    expect(await first).toBe("idle");
+    expect(requests).toBe(1);
+    expect(
+      log.events.some((e) => e.type === "user/message" && e.text === "continue after compact"),
+    ).toBe(true);
+
+    const second = agent.compact("keep details");
+    await tick();
+    void agent.prompt("wait for me");
+    agent.interrupt();
+    expect(await second).toBe("aborted");
+    expect(agent.pending).toMatchObject([{ text: "wait for me", paused: true }]);
+    expect(requests).toBe(1);
+    expect(log.events.some((e) => e.type === "compaction")).toBe(false);
+  });
+
   it("运行中 prompt 进入队列,steer 默认策略在步边界注入", async () => {
     const log = newLog();
     let release = () => {};
@@ -117,7 +174,7 @@ describe("Agent", () => {
     expect(agent.running).toBe(false);
   });
 
-  it("中断暂停待发送消息,新问题不夹带旧消息,可编辑移除并手动继续", async () => {
+  it("中断或失败暂停待发送消息,新问题不夹带旧消息,可编辑移除并手动继续", async () => {
     const log = newLog();
     let firstRun = true;
     const provider: Provider = {
@@ -140,6 +197,9 @@ describe("Agent", () => {
     void agent.prompt("打断期间的留言"); // 排队
     void agent.prompt("移除这条");
     agent.interrupt(); // aborted 返回,队列保留
+    await expect(agent.continuePending()).rejects.toThrow("cannot continue pending while stopping");
+    void agent.prompt("取消后新到的留言");
+    expect(agent.pending.every((p) => p.paused)).toBe(true);
     await running;
 
     await agent.prompt("任务B");
@@ -148,10 +208,11 @@ describe("Agent", () => {
       "任务B",
     ]);
     expect(agent.pending.every((p) => p.paused)).toBe(true);
-    const [kept, removed] = agent.pending;
+    const [kept, removed, afterStop] = agent.pending;
     if (!kept || !removed) throw new Error("missing queued inputs");
     agent.editPending(kept.id, "修改后的留言");
     agent.removePending(removed.id);
+    if (afterStop) agent.removePending(afterStop.id);
     await agent.continuePending();
     await agent.continuePending();
     expect(log.events.filter((e) => e.type === "user/message").map((e) => e.text)).toEqual([
@@ -159,6 +220,32 @@ describe("Agent", () => {
       "任务B",
       "修改后的留言",
     ]);
+    expect(agent.queued).toBe(0);
+
+    let fail = true;
+    agent.setProvider({
+      model: "fake",
+      async complete() {
+        await tick();
+        if (fail) throw new Error("provider unavailable");
+        return { text: "ok", toolCalls: [], stopReason: "end" };
+      },
+    });
+    const failed = agent.prompt("失败的任务");
+    const queued = agent.prompt("失败前排队的留言");
+    await expect(failed).rejects.toThrow("provider unavailable");
+    await expect(queued).rejects.toThrow("provider unavailable");
+    expect(agent.pending).toMatchObject([{ text: "失败前排队的留言", paused: true }]);
+    fail = false;
+    await agent.prompt("失败后的新问题");
+    expect(log.events.filter((e) => e.type === "user/message").map((e) => e.text)).not.toContain(
+      "失败前排队的留言",
+    );
+    await agent.continuePending();
+    await agent.continuePending();
+    expect(
+      log.events.filter((e) => e.type === "user/message" && e.text === "失败前排队的留言"),
+    ).toHaveLength(1);
     expect(agent.queued).toBe(0);
   });
 });

@@ -14,7 +14,7 @@ import {
 import { ProviderError, parseRetryAfter } from "./errors.js";
 import { fetchModelIds, linkedAbort, recordedFetch } from "./http.js";
 import { mergeRetry, type RetryOptions, withRetry } from "./retry.js";
-import { sseEvents, stallToError } from "./sse.js";
+import { sseEvents, streamError } from "./sse.js";
 
 // ---------- OpenAI-compatible 适配器(先接一家,DeepSeek 走此协议) ----------
 
@@ -279,7 +279,7 @@ export function openaiCompat(opts: OpenAICompatOptions): Provider {
     wire,
     // chat completions 一条投影消息就是一条 wire 消息,顺序不变。
     wireMap: (messages) => messages.map((_, i) => i),
-    listModels: () => fetchModelIds(`${baseUrl}/models`, headers),
+    listModels: (signal) => fetchModelIds(`${baseUrl}/models`, headers, signal),
     async complete(
       messages,
       tools,
@@ -339,7 +339,7 @@ export function openaiCompat(opts: OpenAICompatOptions): Provider {
           } catch (err) {
             // 打断:已流出的部分作为 aborted turn 返回,由循环记入日志,不丢真相。
             if (signal?.aborted) return finishAcc(acc, true);
-            throw stallToError(err, Boolean(acc.text || acc.reasoning));
+            throw streamError(err, Boolean(acc.text || acc.reasoning));
           } finally {
             await saved;
           }

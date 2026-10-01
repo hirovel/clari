@@ -25,6 +25,7 @@ import { startTuiSession } from "../cli/tui-session.js";
 import { DEFAULT_CONFIG_PATH, type KernelConfig } from "../src/config.js";
 import { EventLog } from "../src/log.js";
 import type { CompleteOptions, Provider } from "../src/provider.js";
+import { Recording } from "../src/recording.js";
 import { defaultPreset, getSetting, SETTINGS, setSetting } from "../src/settings.js";
 import { mergeSetup, SETUP_GUIDE, SETUP_SECTIONS, setupSnapshot } from "../src/setup.js";
 import { testImage } from "./helpers/image.js";
@@ -56,6 +57,86 @@ function fixture() {
 }
 
 describe("setup data and persistence", () => {
+  it("项目 MCP 审核显示命令,跳过不启动,确认后连接工具", async () => {
+    const boot = fixture();
+    delete boot.config.defaults?.systemPromptFile;
+    const helper = resolve("tests/helpers/mcp-server.mjs");
+    const dir = mkdtempSync(join(tmpdir(), "clari-project-review-"));
+    boot.config.sessionsDir = join(dir, "sessions");
+    const templateSource = join(dirname(DEFAULT_CONFIG_PATH), "prompts");
+    writeFileSync(templateSource, "This template source is a file instead of a directory.");
+    const command = join(dir, "never-start.mjs");
+    const marker = join(dir, "started");
+    writeFileSync(
+      command,
+      `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(marker)}, "yes");`,
+    );
+    writeFileSync(
+      join(dir, ".mcp.json"),
+      JSON.stringify({
+        mcpServers: { local: { command: process.execPath, args: [command] } },
+      }),
+    );
+    vi.spyOn(process, "cwd").mockReturnValue(dir);
+    const terminal = new VirtualTerminal(80, 24);
+    let host: Awaited<ReturnType<typeof startTuiSession>> | undefined;
+    try {
+      const starting = startTuiSession({
+        boot,
+        args: boot.resolve(parseCommonArgs([])),
+        terminal: () => terminal,
+        onExit() {},
+      });
+      await vi.waitFor(async () =>
+        expect((await terminal.screen()).join("\n")).toContain("Project MCP configuration"),
+      );
+      expect((await terminal.screen()).join("\n")).toContain("args:");
+      terminal.feed("\x1b");
+      await vi.waitFor(async () =>
+        expect((await terminal.screen()).join("\n")).toContain("Connect project MCP servers?"),
+      );
+      terminal.feed("\x1b[B");
+      terminal.feed("\r");
+      host = await starting;
+      expect(dirname(resolve(host.file()))).toBe(join(dir, "sessions"));
+      expect(existsSync(resolve(host.file()))).toBe(true);
+      expect(existsSync(marker)).toBe(false);
+      expect(host.app().lines(80).join("\n")).toContain("project MCP skipped");
+      expect(host.app().lines(80).join("\n")).toContain("Skipped template directory");
+      expect(host.app().lines(80).join("\n")).toContain("Expected a directory.");
+      await host.close();
+      host = undefined;
+
+      writeFileSync(
+        join(dir, ".mcp.json"),
+        JSON.stringify({ mcpServers: { local: { command: process.execPath, args: [helper] } } }),
+      );
+      const approvedTerminal = new VirtualTerminal(80, 24);
+      const approving = startTuiSession({
+        boot,
+        args: boot.resolve(parseCommonArgs([])),
+        terminal: () => approvedTerminal,
+        onExit() {},
+      });
+      await vi.waitFor(async () =>
+        expect((await approvedTerminal.screen()).join("\n")).toContain("Project MCP configuration"),
+      );
+      approvedTerminal.feed("\x1b");
+      await vi.waitFor(async () =>
+        expect((await approvedTerminal.screen()).join("\n")).toContain(
+          "Connect project MCP servers?",
+        ),
+      );
+      approvedTerminal.feed("\r");
+      host = await approving;
+      expect(host.app().agent.tools.some((tool) => tool.name === "mcp__local__echo")).toBe(true);
+    } finally {
+      if (host) await host.close();
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(templateSource, { force: true });
+    }
+  });
+
   it("子任务使用派发时的模型和工具,扩展与 MCP 归属子日志,续聊重建资源且不串 cwd", async () => {
     const dir = mkdtempSync(join(tmpdir(), "clari-child-tools-"));
     vi.stubEnv("CLARI_HOME", join(dir, "home"));
@@ -414,7 +495,14 @@ describe("setup data and persistence", () => {
             expect(host.file()).toBe(file);
             rmdirSync(snapshot);
             term.feed("r");
-          } else term.feed("\x03");
+          } else {
+            term.feed("\x03");
+            expect(host.app().dialogLines().join("\n")).toContain("Quit Clari");
+            expect(host.app().agent.running).toBe(true);
+            expect(exits).toBe(0);
+            term.feed("\x1b[B");
+            term.feed("\r");
+          }
           await vi.waitFor(() =>
             expect(host.app().dialogLines().join("\n")).toContain(
               mode === "fatal-save" ? "Fatal error" : "Exiting",
@@ -573,7 +661,12 @@ describe("setup data and persistence", () => {
       expect(host.file()).not.toBe(original);
       expect(host.app().setup().values.execution).toBe("parallel");
       expect(host.app().setup().values.fold).toBe(false);
-      const fork = forkSession(EventLog.load(original).events, prefix, dir, original);
+      const fork = forkSession(
+        EventLog.load(original).events,
+        prefix,
+        dir,
+        new Recording(original),
+      );
       await host.switchSession({ kind: "resume", file: fork.file });
       expect(host.app().setup().values.execution).toBe("sequential");
       expect(host.app().setup().values.fold).toBe(false);
@@ -609,10 +702,11 @@ describe("setup data and persistence", () => {
       block = false;
       await host.switchSession({ kind: "new" });
       const beforeRestore = requests;
+      const restoredTerminal = new VirtualTerminal(60, 24);
       const restarted = await startTuiSession({
         boot,
         args: boot.resolve(parseCommonArgs(["--resume", original])),
-        terminal: () => new VirtualTerminal(60, 24),
+        terminal: () => restoredTerminal,
         onExit() {},
       });
       try {
@@ -623,7 +717,11 @@ describe("setup data and persistence", () => {
         restarted.app().dialogLines();
         restarted.app().dialogInput("\r");
         restarted.app().dialogInput("\x15");
-        restarted.app().dialogInput("\x1b[200~edited pending\n第二行\x1b[201~");
+        restoredTerminal.feed("remove");
+        restoredTerminal.feed("\x01");
+        restoredTerminal.feed("\x0b"); // 编辑时属于删除到行尾,不能关闭编辑器。
+        expect(restarted.app().dialogLines().join("\n")).toContain("Edit message");
+        restoredTerminal.feed("\x1b[200~\x1b[31medited pending\n第二行\x1b[0m\x1b[201~");
         restarted.app().dialogInput("\r");
         expect(restarted.app().agent.pending[0]?.text).toBe("edited pending\n第二行");
         restarted.app().dialogInput("\x1b[B");
@@ -679,6 +777,8 @@ describe("setup data and persistence", () => {
       const legacyFile = join(dir, "legacy.jsonl");
       const legacy = new EventLog(legacyFile);
       legacy.append({ type: "session/start", at: "", model: "m", system: "old instructions" });
+      legacy.recording?.flush();
+      legacy.recording?.dispose();
       const restoring = host.switchSession({ kind: "resume", file: legacyFile });
       await vi.waitFor(() =>
         expect(view.dialogLines().join("\n")).toContain("Review session setup"),
@@ -706,13 +806,14 @@ describe("setup data and persistence", () => {
       expect(sectionStates(changed)?.map((s) => s.name)).toEqual(["Environment"]);
       expect(changed[0]).toMatchObject({ system: "old instructions" });
       const reviewFile = join(dir, "review-only.jsonl");
-      new EventLog(reviewFile).append({
+      const reviewLog = new EventLog(reviewFile);
+      reviewLog.append({
         type: "session/start",
         at: "",
         model: "m",
         system: "keep",
       });
-      new EventLog(reviewFile).append({
+      reviewLog.append({
         type: "assistant/message",
         at: "",
         text: "",
@@ -725,6 +826,8 @@ describe("setup data and persistence", () => {
         ],
         stopReason: "tool",
       });
+      reviewLog.recording?.flush();
+      reviewLog.recording?.dispose();
       const requestsBeforeUnknown = requests;
       const reader = await startTuiSession({
         boot,
@@ -864,6 +967,21 @@ describe("setup data and persistence", () => {
     expect(boot.resolve(parseCommonArgs([])).foldLines).toBe(11);
     expect(boot.resolve(parseCommonArgs(["--preset", "small"])).planReminder).toBe(4);
     expect(() => boot.settings.savePreset?.("../bad", {})).toThrow("letters");
+    const other = bootstrap();
+    boot.settings.saveSetting?.("steering", "turn");
+    other.settings.saveSetting?.("execution", "parallel");
+    boot.settings.saveSetting?.("facts.slow", false);
+    other.settings.saveSetting?.("facts.date", false);
+    const merged = bootstrap().config;
+    expect(merged.defaults).toMatchObject({
+      steering: "turn",
+      execution: "parallel",
+      facts: { slow: false, date: false },
+    });
+    boot.settings.savePreset?.("concurrent", { foldLines: 7 });
+    expect(() => other.settings.savePreset?.("concurrent", { foldLines: 99 })).toThrow(
+      "already exists",
+    );
   });
 
   it("保存的无上限和自动选项在 --preset 与界面载入中一致,显式命令行仍优先", () => {

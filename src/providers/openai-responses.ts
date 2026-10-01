@@ -16,7 +16,7 @@ import {
 import { ProviderError, parseRetryAfter } from "./errors.js";
 import { fetchModelIds, linkedAbort, recordedFetch } from "./http.js";
 import { mergeRetry, type RetryOptions, withRetry } from "./retry.js";
-import { sseEvents, stallToError } from "./sse.js";
+import { sseEvents, streamError } from "./sse.js";
 
 /** 回传的推理项。id 与 encrypted_content 都原样带回;summary 只是给人看的。 */
 export type ReasoningItem = {
@@ -165,6 +165,15 @@ export function feedResponsesEvent(acc: ResponsesAcc, ev: ResponsesEvent): strin
       if (r?.incomplete_details) acc.extras.incomplete_details = r.incomplete_details;
       if (r?.incomplete_details?.reason) acc.incompleteReason = r.incomplete_details.reason;
       if (r?.error?.message) acc.error = `${r.error.code ?? "error"}: ${r.error.message}`;
+      // 终止事件不等于成功。缺少错误说明的 failed,以及非输出长度导致的 incomplete,
+      // 都不能把此前的工具调用交给循环执行。
+      else if (ev.type === "response.failed" || acc.status === "failed")
+        acc.error = `${r?.error?.code ?? "response failed"}: no error details provided`;
+      else if (
+        (ev.type === "response.incomplete" || acc.status === "incomplete") &&
+        acc.incompleteReason !== "max_output_tokens"
+      )
+        acc.error = `response incomplete: ${acc.incompleteReason ?? "no reason provided"}`;
       const u = r?.usage;
       if (u) {
         const cached = u.input_tokens_details?.cached_tokens;
@@ -407,7 +416,7 @@ export function openaiResponses(opts: OpenAIResponsesOptions): Provider {
     fields: OPENAI_RESPONSES_FIELDS,
     wire,
     wireMap: (messages) => toResponsesInput(messages, { model: opts.model }).map,
-    listModels: () => fetchModelIds(`${baseUrl}/models`, headers),
+    listModels: (signal) => fetchModelIds(`${baseUrl}/models`, headers, signal),
     async complete(
       messages,
       tools,
@@ -460,7 +469,6 @@ export function openaiResponses(opts: OpenAIResponsesOptions): Provider {
               throw new ProviderError(`provider stream error: ${acc.error}`, {
                 retryable:
                   acc.items.size === 0 && /rate_limit|server_error|overloaded/i.test(acc.error),
-                body: acc.error,
               });
             }
             if (!acc.status) {
@@ -471,7 +479,7 @@ export function openaiResponses(opts: OpenAIResponsesOptions): Provider {
             return finishResponsesAcc(acc, false, opts.model);
           } catch (err) {
             if (signal?.aborted) return finishResponsesAcc(acc, true, opts.model);
-            throw stallToError(err, acc.items.size > 0);
+            throw streamError(err, acc.items.size > 0);
           } finally {
             await saved;
           }

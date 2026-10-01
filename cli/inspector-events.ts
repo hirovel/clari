@@ -1,6 +1,7 @@
 // 事件视图:同一条流,每种事件一句人读的话。类型词退到淡色一列,右侧一列写这件事现在在模型眼里的状态
 // (sent · kernel · covered · cleared · dropped · edited);request 是章节,前面空一行。
 // 筛选是数字页签;详情先给按字段排版的一页,JSON 在第二页,第三页写它在投影里后来怎么了。全部纯函数。
+import { join } from "node:path";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import { estimateTokens, eventTokens } from "../src/context.js";
 import type { AgentEvent } from "../src/events.js";
@@ -12,6 +13,7 @@ import {
   isProjected,
 } from "../src/messages.js";
 import type { Provider } from "../src/provider.js";
+import { compactionDecisionText } from "./cards.js";
 import { renderExtEvent } from "./ext-events.js";
 import { clock, firstLine, fmtMs, fmtTok, indent, pctOf } from "./inspector-format.js";
 import { c, G } from "./theme.js";
@@ -246,6 +248,9 @@ export function eventSummary(
         case "execution":
           text = `${e.parallel} tool calls ran in parallel · ${e.tools.join(" ")}`;
           break;
+        case "compaction":
+          text = compactionDecisionText(e);
+          break;
       }
       return { sign: G.ask, text, tok: undefined };
     }
@@ -309,7 +314,11 @@ export function eventLine(
 }
 
 /** 详情第一页:按字段排版。 */
-export function eventViewLines(events: readonly AgentEvent[], i: number): string[] {
+export function eventViewLines(
+  events: readonly AgentEvent[],
+  i: number,
+  recordingDirectory?: string,
+): string[] {
   const e = events[i] as AgentEvent;
   const row = (k: string, v: string) => `${c.soft(k.padEnd(12))} ${c.ink(v)}`;
   const block = (title: string, text: string, tone: (s: string) => string = c.soft) => [
@@ -484,6 +493,16 @@ export function eventViewLines(events: readonly AgentEvent[], i: number): string
     case "ext/event":
       out.push(row("source", e.source));
       out.push(row("kind", e.kind));
+      if (e.source === "mcp" && e.kind === "rpc") {
+        const ref = e.payload.bodyRef as
+          | { file?: string; bytes?: number; missingFrom?: number }
+          | undefined;
+        if (ref?.file && /^[a-f0-9-]+\.body$/.test(ref.file) && recordingDirectory) {
+          out.push(row("full body", join(recordingDirectory, ref.file)));
+          if (ref.missingFrom !== undefined)
+            out.push(row("recording", `incomplete after ${ref.missingFrom} bytes`));
+        }
+      }
       out.push(...block("payload", JSON.stringify(e.payload, null, 2), c.faint));
       break;
   }

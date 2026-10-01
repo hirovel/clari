@@ -92,6 +92,25 @@ describe("会话对照", () => {
     expect(k.C?.detail).toContain("3 comparable");
     expect(k.C?.detail).toContain("1 excluded");
     expect(k.D?.detail).toContain("3 of 4 requests report cache hits");
+    const withImage = clean();
+    withImage.splice(11, 0, {
+      type: "user/message",
+      at,
+      text: "What is in this image?",
+      images: [{ mimeType: "image/png", data: "AAAA" }],
+    });
+    (withImage[12] as { messages: number }).messages = 9;
+    (withImage[13] as { usage: Usage }).usage = { inputTokens: 15000, outputTokens: 20 };
+    withImage.push(
+      { type: "user/message", at, text: "Continue" },
+      request(11, 15030),
+      reply("continued", { inputTokens: 15050, outputTokens: 20 }),
+    );
+    const imageCheck = analyze(withImage);
+    expect(imageCheck.rows[3]?.comparable).toBe(false);
+    expect(imageCheck.rows[4]?.comparable).toBe(true);
+    expect(imageCheck.checks.find((x) => x.id === "C")?.status).toBe("pass");
+    expect(imageCheck.checks.find((x) => x.id === "C")?.detail).toContain("new image");
     // 同一模型与工具也不足以比较:压缩重置估算,策略请求可自带正文。
     const reset = clean();
     reset.splice(5, 0, { type: "compaction", at, cleared: [4], strategy: "clear" });
@@ -102,7 +121,7 @@ describe("会话对照", () => {
     const text = reportLines("s.jsonl", events.length, c, usageTotals(events)).join("\n");
     expect(text).toContain("4 requests");
     expect(text).toContain("PASS  A");
-    expect(text).toContain("no price configured");
+    expect(text).not.toContain("$");
   });
 
   it("前缀:末尾追加不算打断;编辑之后的重算有解释,不报错", () => {
@@ -136,7 +155,28 @@ describe("会话对照", () => {
     expect(b?.detail).toContain("#3 (sent 99, rebuilds to 6)");
   });
 
-  it("有毛病的会话:估算差额跳变、压缩没让请求变小、失败没恢复、工具错误率高", () => {
+  it("压缩比较事件两侧投影,不把压缩前新增的工具结果误报为增长", () => {
+    const events: AgentEvent[] = [
+      { type: "session/start", at, model: "m", system: "s".repeat(400) },
+      { type: "user/message", at, text: "compare files" },
+      request(2, 100),
+      reply("reading", { inputTokens: 200, outputTokens: 10 }, [{ id: "c1", name: "read" }]),
+      result("c1", "read", "R".repeat(8000)),
+      request(4, 2100, "compaction"),
+      {
+        type: "compaction",
+        at,
+        summary: "key facts",
+        coversFrom: 2,
+        coversUpTo: 5,
+        strategy: "llm",
+      },
+      request(3, 400),
+    ];
+    expect(byId(events).E).toMatchObject({ status: "pass" });
+  });
+
+  it("有毛病的会话:估算差额跳变、压缩无进展、失败没恢复、工具错误率高", () => {
     const events = clean();
     // 第四次请求的实测跳到三倍:估算口径跑偏了
     (events[12] as { usage: Usage }).usage = { inputTokens: 12000, outputTokens: 30 };
@@ -144,12 +184,14 @@ describe("会话对照", () => {
     (events[4] as { isError: boolean }).isError = true;
     (events[7] as { isError: boolean }).isError = true;
     (events[10] as { isError: boolean }).isError = true;
-    // 压缩之后请求反而更大,最后一次请求失败且没有恢复
-    events.push(
-      { type: "compaction", at, summary: "SUM", coversFrom: 1, coversUpTo: 4, strategy: "llm" },
-      request(3, 9000),
-      { type: "request/error", at, error: "upstream exploded", status: 500, kind: "server" },
-    );
+    // 无效的压缩事件没有改变上下文;最后一次请求失败且没有恢复
+    events.push({ type: "compaction", at, cleared: [], strategy: "clear" }, request(3, 9000), {
+      type: "request/error",
+      at,
+      error: "upstream exploded",
+      status: 500,
+      kind: "server",
+    });
     const k = byId(events);
     expect(k.C?.status).toBe("fail");
     expect(k.C?.detail).toContain("off: #4");

@@ -9,6 +9,7 @@ import {
   formatSetting,
   getSetting,
   parseSetting,
+  parseSkillSources,
   SETTINGS,
   type SettingDef,
   type SettingLayers,
@@ -18,7 +19,7 @@ import {
 import { configuredValue, type SetupScope, sameSetting, setupSnapshot } from "../src/setup.js";
 import { parsePreservation } from "./args.js";
 import { DEFAULT_RESULT_VIEWS } from "./cards.js";
-import { automaticSkills, skillsSection } from "./prompt.js";
+import { automaticSkills, discoverSkills, skillsSection } from "./prompt.js";
 import { replaceSystemSection } from "./prompt-sections.js";
 import { applyToolPrompts } from "./tool-prompts.js";
 import { createSkillTool, skillCatalog } from "./tools/skill.js";
@@ -55,6 +56,12 @@ export function effectiveSetting(ctx: TuiContext, def: SettingDef): unknown {
       return ctx.view.foldLines;
     case "foldSteps":
       return ctx.view.foldSteps;
+    case "statusStyle":
+      return ctx.deps.statusStyle ?? "rail";
+    case "statusWidgets":
+      return ctx.deps.statusWidgets ?? def.builtin;
+    case "showCostEstimate":
+      return ctx.deps.showCostEstimate ?? false;
     case "results":
       return ctx.view.results;
     case "notify":
@@ -137,13 +144,24 @@ const SLOT_SETTINGS = new Set([
   "steering",
   "toolPrompts",
 ]);
-const DISPLAY_SETTINGS = new Set(["fold", "foldLines", "foldSteps", "results", "notify"]);
+const DISPLAY_SETTINGS = new Set([
+  "fold",
+  "foldLines",
+  "foldSteps",
+  "statusStyle",
+  "statusWidgets",
+  "results",
+  "showCostEstimate",
+  "notify",
+]);
 
 export function settingTiming(ctx: TuiContext, def: SettingDef, scope: SetupScope): string {
   if (scope === "defaults") return "Saved for future starts; this session stays unchanged.";
   if (def.key === "saveInputs")
     return "Changes local input saving now. Turning off removes the saved snapshot, keeping inputs in memory.";
   if (def.key === "mcpReconnect") return "Applies when the next session connection is prepared.";
+  if (def.key === "prompt.skills.sources")
+    return "Rescans while idle. Wait for the current turn before changing sources. Loaded instructions stay in history.";
   if (def.scope === "next start")
     return "Requires a restart. Switch to Saved defaults to change it.";
   if (def.key === "plan" && !ctx.tools.some((t) => t.name === "plan"))
@@ -170,15 +188,25 @@ export async function applySettingNow(
   switch (def.key) {
     case "prompt.skills.mode":
     case "prompt.skills.include":
-    case "prompt.skills.load": {
+    case "prompt.skills.load":
+    case "prompt.skills.sources": {
       const read = (key: string) =>
         key === def.key ? value : effectiveSetting(ctx, settingDef(key) as SettingDef);
       const config: SkillsConfig = {
         mode: read("prompt.skills.mode") as "manual" | "auto",
         include: read("prompt.skills.include") as "all" | string[],
         load: read("prompt.skills.load") as "read" | "tool",
+        sources: read("prompt.skills.sources") as Record<string, "on" | "off">,
       };
-      const catalog = automaticSkills(ctx.skills, config);
+      const warnings: string[] = [];
+      const skills =
+        def.key === "prompt.skills.sources"
+          ? discoverSkills(process.cwd(), {
+              ...(config.sources && { sources: config.sources }),
+              onError: (error) => warnings.push(error.message),
+            })
+          : ctx.skills;
+      const catalog = automaticSkills(skills, config);
       const existing = ctx.tools.find((t) => t.name === "skill");
       if (config.load === "tool" && catalog.length && existing && !skillCatalog(existing))
         throw new Error(
@@ -190,14 +218,19 @@ export async function applySettingNow(
         applyToolPrompts([tool], ctx.slots.toolPrompts);
         tools.push(tool);
       }
-      const edit = replaceSystemSection(
-        ctx.log.events,
-        "Skills",
-        skillsSection(ctx.skills, config),
-      );
+      const edit = replaceSystemSection(ctx.log.events, "Skills", skillsSection(skills, config));
       if (edit) ctx.log.append(edit);
+      if (skills !== ctx.skills) ctx.skills.splice(0, ctx.skills.length, ...skills);
       ctx.tools.splice(0, ctx.tools.length, ...tools);
       ctx.applyTools?.();
+      for (const message of warnings)
+        ctx.log.append({
+          type: "ext/event",
+          at: now(),
+          source: "skills",
+          kind: "load-error",
+          payload: { message },
+        });
       return;
     }
     case "saveInputs":
@@ -223,6 +256,18 @@ export async function applySettingNow(
       return;
     case "foldSteps":
       view.foldSteps = value as number;
+      return;
+    case "statusStyle":
+      ctx.deps.statusStyle = value as "rail" | "capsules" | "tiles" | "classic";
+      ctx.updateStatus();
+      return;
+    case "statusWidgets":
+      ctx.deps.statusWidgets = [...(value as string[])];
+      ctx.updateStatus();
+      return;
+    case "showCostEstimate":
+      ctx.deps.showCostEstimate = value as boolean;
+      ctx.updateStatus();
       return;
     case "results":
       view.results = { ...DEFAULT_RESULT_VIEWS, ...((value as Record<string, ResultView>) ?? {}) };
@@ -290,6 +335,7 @@ export async function applySettingNow(
 export type SettingChange = { ok: boolean; message: string };
 
 function validate(def: SettingDef, value: unknown): void {
+  if (def.key === "prompt.skills.sources") parseSkillSources(value);
   if (
     def.key === "prompt.skills.include" &&
     value !== "all" &&
@@ -306,6 +352,11 @@ function validate(def: SettingDef, value: unknown): void {
   if (def.type === "number") parseSetting(def, String(value));
   if (def.type === "enum") parseSetting(def, String(value));
   if (def.key === "preservation") parsePreservation(String(value));
+  if (
+    def.key === "statusWidgets" &&
+    (!Array.isArray(value) || value.some((id) => !def.items?.includes(id)))
+  )
+    throw new Error("statusWidgets takes a list of registered status readings.");
 }
 
 /** session 只改运行态;defaults 先可靠落盘;both 保留已有打字命令的应用并保存语义。 */
@@ -346,7 +397,7 @@ export async function changeSetting(
       await save(def.key, value);
       return { ok: true, message: describeChange(def, value, undefined, true) };
     }
-    if (ctx.agent.running && SLOT_SETTINGS.has(def.key))
+    if (ctx.agent.running && (SLOT_SETTINGS.has(def.key) || def.key === "prompt.skills.sources"))
       throw new Error(settingTiming(ctx, def, "session"));
     const applied = await applySettingNow(ctx, def, value ?? def.builtin, slot);
     // 老槽函数把错误返回成文案;设置入口必须识别失败,不能继续保存或显示成功。
@@ -381,12 +432,12 @@ export async function changeSetting(
 }
 
 export function parseTyped(arg: string): { def: SettingDef; value: unknown } | string {
-  const [key = "", ...rest] = arg.trim().split(/\s+/);
+  const [, key = "", rest] = /^\s*(\S+)(?:\s+([\s\S]*))?$/.exec(arg) ?? [];
   const def = settingDef(key);
   if (!def) return `unknown setting ${key} · /settings lists them`;
-  if (rest.length === 0) return `usage: /settings ${def.key} <value> · ${def.note}`;
+  if (rest === undefined) return `usage: /settings ${def.key} <value> · ${def.note}`;
   try {
-    return { def, value: parseSetting(def, rest.join(" ")) };
+    return { def, value: parseSetting(def, rest) };
   } catch (err) {
     return (err as Error).message;
   }

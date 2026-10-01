@@ -10,6 +10,9 @@ export const DISPLAY_KEYS = new Set([
   "fold",
   "foldLines",
   "foldSteps",
+  "statusStyle",
+  "statusWidgets",
+  "showCostEstimate",
   "results",
   "notify",
 ]);

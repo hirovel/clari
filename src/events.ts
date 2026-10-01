@@ -26,7 +26,7 @@ export type Usage = {
 export type StopReason =
   | "end" // 模型自然结束,不再调工具 —— 循环的终点(untilIdle)
   | "tool" // 模型请求了工具调用,循环继续
-  | "aborted" // 用户打断:已流出的半截文本仍然入日志,不丢真相
+  | "aborted" // 用户或存储边界打断:已流出的半截文本仍然入日志,不丢真相
   | "length"; // 输出被 token 上限截断:工具调用一律不执行,回喂重发指令
 
 export type AgentEvent =
@@ -189,6 +189,14 @@ export type AgentEvent =
   | { type: "decision"; at: string; slot: "facts"; note: "date" }
   /** 执行槽把一批工具调用并行跑了(只在并行策略下、且批内多于一个调用时记)。 */
   | { type: "decision"; at: string; slot: "execution"; parallel: number; tools: string[] }
+  /** 压缩尝试没有改变投影;图片仍保留,原因只给人看。 */
+  | {
+      type: "decision";
+      at: string;
+      slot: "compaction";
+      reason: "no-result" | "no-gain";
+      images: boolean;
+    }
   /**
    * 编辑上下文:追加事件,不改写历史。投影把目标事件的某个字段换成新值;原文永远留在数组里。
    * 被编辑的消息不再带私有回传物(签名或密文与改后的内容不再对应);Anthropic 还会丢弃之后所有消息的思考块。

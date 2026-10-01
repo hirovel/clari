@@ -158,7 +158,7 @@ describe("/slots 与切换命令", () => {
       const path = join(dir, "keep · trigger recent.mjs");
       writeFileSync(
         path,
-        'export default async () => ({ cleared: [], strategy: "custom-loaded" });',
+        'export default async ({ events }) => ({ cleared: events.flatMap((event, i) => event.type === "tool/result" ? [i] : []), strategy: "custom-loaded" });',
       );
       await app.command(`/set compaction ${path}`);
       expect(app.setup().values.compaction).toBe(path);

@@ -15,7 +15,7 @@ import {
 import { ProviderError, parseRetryAfter } from "./errors.js";
 import { fetchModelIds, linkedAbort, recordedFetch } from "./http.js";
 import { mergeRetry, type RetryOptions, withRetry } from "./retry.js";
-import { sseEvents, stallToError } from "./sse.js";
+import { sseEvents, streamError } from "./sse.js";
 
 /** 流式事件的最小类型,只声明用到的字段。 */
 export type AnthropicEvent =
@@ -464,7 +464,7 @@ export function anthropic(opts: AnthropicOptions): Provider {
     fields: ANTHROPIC_FIELDS,
     wire,
     wireMap: (messages) => toAnthropicWire(messages, { model: opts.model }).map,
-    listModels: () => fetchModelIds(`${baseUrl}/v1/models`, headers),
+    listModels: (signal) => fetchModelIds(`${baseUrl}/v1/models`, headers, signal),
     async complete(
       messages: Message[],
       tools: ToolDef[],
@@ -529,7 +529,7 @@ export function anthropic(opts: AnthropicOptions): Provider {
             return finishAnthropicAcc(acc, false, opts.model, { mode });
           } catch (err) {
             if (signal?.aborted) return finishAnthropicAcc(acc, true, opts.model, { mode });
-            throw stallToError(err, Boolean(acc.text || thinkingText(acc)));
+            throw streamError(err, Boolean(acc.text || thinkingText(acc)));
           } finally {
             await saved;
           }

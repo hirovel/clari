@@ -12,6 +12,7 @@ import { EventLog } from "../src/log.js";
 import type { Message } from "../src/messages.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
 import { defineTool } from "../src/tools.js";
+import { testImage } from "./helpers/image.js";
 import { stripAnsi, VirtualTerminal } from "./helpers/virtual-terminal.js";
 
 function scripted(turns: AssistantTurn[]): Provider {
@@ -87,7 +88,6 @@ let tmp: string | undefined;
 afterEach(() => {
   if (tmp) rmSync(tmp, { recursive: true, force: true });
   tmp = undefined;
-  delete process.env.CLARI_EDITOR;
 });
 
 function bootB(provider: Provider, over: Partial<TuiAppDeps> = {}, log = new EventLog()) {
@@ -112,6 +112,28 @@ const user = (content: string): Message => ({ role: "user", content });
 const assistant = (content: string): Message => ({ role: "assistant", content, toolCalls: [] });
 
 describe("屏幕:完整 turn、卡片、折叠、diff、错误、打断", () => {
+  it("金额默认隐藏;主动开启后缺少任一轮用量也不显示不完整金额", async () => {
+    const { app } = bootB(
+      scriptedB([
+        {
+          text: "one",
+          toolCalls: [],
+          stopReason: "end",
+          usage: { inputTokens: 1000, outputTokens: 10 },
+        },
+        { text: "two", toolCalls: [], stopReason: "end" },
+      ]),
+      { price: { input: 1, output: 1 } },
+    );
+    await app.submit("first");
+    expect(doc(app)).not.toContain("cost est.");
+    await app.command("/settings showCostEstimate on");
+    expect(doc(app)).toContain("cost est. ≈$");
+    await app.submit("second");
+    expect(doc(app)).toContain("cost est. unavailable (missing usage)");
+    app.stop();
+  });
+
   it("一个完整 turn:用户消息、工具调用与结果、流式回复、状态栏全部呈现且不重复", async () => {
     const { app, term } = boot(
       scripted([
@@ -150,7 +172,7 @@ describe("屏幕:完整 turn、卡片、折叠、diff、错误、打断", () => 
     app.stop();
   });
 
-  it("直印:没有请求卡与响应卡;结果按可见度折叠,Ctrl+O 展开;思考一行,Ctrl+T 展开", async () => {
+  it("直印:请求用轻量编号分隔,没有响应卡;结果按可见度折叠,Ctrl+O 展开;思考一行,Ctrl+T 展开", async () => {
     const long = defineTool({
       name: "long",
       description: "",
@@ -175,7 +197,7 @@ describe("屏幕:完整 turn、卡片、折叠、diff、错误、打断", () => 
           text: "好了",
           toolCalls: [],
           stopReason: "end",
-          usage: { inputTokens: 1500, outputTokens: 5 },
+          usage: { inputTokens: 1500, outputTokens: 5, cacheReadTokens: 1200 },
         },
       ]),
       tools: [long],
@@ -187,9 +209,10 @@ describe("屏幕:完整 turn、卡片、折叠、diff、错误、打断", () => 
     });
     await app.submit("跑");
     let doc = text(app);
-    // 直印:正文里没有请求卡、响应卡、用量与费用;正常追加不印变化说明。
+    // 直印:正文里只有请求编号,没有响应卡、用量与费用;正常追加不印变化说明。
     expect(doc).toContain("› 跑");
-    expect(doc).not.toContain("Request #");
+    expect(doc).toContain("Request #1");
+    expect(doc).toContain("Request #2");
     expect(doc).not.toContain("Response #");
     expect(doc).not.toContain("estimated");
     expect(doc).not.toContain("recomputed");
@@ -225,6 +248,28 @@ describe("屏幕:完整 turn、卡片、折叠、diff、错误、打断", () => 
     expect(doc).toContain("先拿到输出");
     expect(doc).not.toContain("再看结果");
     expect(doc).toContain("· thinking collapsed to one line (Ctrl+T)");
+    expect(
+      app
+        .lines(60)
+        .map(stripAnsi)
+        .find((line) => line.includes("last cache")),
+    ).toContain("last cache 80%");
+    app.agent.setProvider(
+      scripted([
+        { text: "usage unavailable", toolCalls: [], stopReason: "end" },
+        {
+          text: "no cache hit",
+          toolCalls: [],
+          stopReason: "end",
+          usage: { inputTokens: 10, outputTokens: 2, cacheReadTokens: 0 },
+        },
+      ]),
+    );
+    await app.submit("one");
+    expect(text(app)).toContain("last cache n/a");
+    await app.submit("two");
+    expect(text(app)).toContain("last cache 0%");
+
     app.stop();
   });
 
@@ -276,7 +321,7 @@ describe("屏幕:完整 turn、卡片、折叠、diff、错误、打断", () => 
     expect(doc).toContain("✗ request #1 failed");
     expect(doc).toContain("网络断了");
     expect(doc).toContain("Request failed");
-    expect(doc).toContain("/edit retry");
+    expect(doc).toContain("/inspect raw");
     expect(app.agent.running).toBe(false);
     app.stop();
   });
@@ -340,6 +385,21 @@ describe("少见事件与流式思考的渲染", () => {
     });
     log.append({ type: "ext/event", at: "", source: "other", kind: "thing", payload: {} });
     log.append({ type: "session/slot", at: "", slot: "execution", value: "parallel" });
+    log.append({
+      type: "decision",
+      at: "",
+      slot: "termination",
+      steps: 4,
+      reason: "step limit 4 reached",
+    });
+    log.append({ type: "user/message", at: "", text: "inspect", images: [testImage] });
+    log.append({
+      type: "decision",
+      at: "",
+      slot: "compaction",
+      reason: "no-gain",
+      images: true,
+    });
     const fresh = new EventLog();
     for (const e of log.events.filter((e) => e.type === "session/start" || e.type === "ext/event"))
       fresh.append(e);
@@ -358,13 +418,37 @@ describe("少见事件与流式思考的渲染", () => {
     expect(d).toContain("mcp s1: ready · stdio · modern 2026-07-28 · 2 tools of 3 listed · 7ms");
     expect(d).toContain("· other/thing");
     expect(d).not.toContain("rpc");
-    expect(d).toContain("resumed: 6 events");
+    expect(d).toContain("stopped · step limit 4 reached · send to continue");
+    expect(d).toContain("compact unchanged: candidate did not reduce text");
+    expect(d).toContain("images kept, visual tokens unknown");
+    expect(d).toContain("resumed: 9 events");
     log.append({ type: "user/message", at: "", text: "live before stop" });
     expect(doc(app)).toContain("live before stop");
     app.stop();
     const stopped = doc(app);
     log.append({ type: "user/message", at: "", text: "late after stop" });
     expect(doc(app)).toBe(stopped);
+  });
+
+  it("网络请求的重试按发生顺序显示在最终错误之前", () => {
+    const log = new EventLog();
+    log.append({ type: "session/start", at: "", model: "m", system: "s" });
+    log.append({ type: "user/message", at: "", text: "hi" });
+    log.append({
+      type: "request",
+      at: "",
+      model: "m",
+      messages: 2,
+      tools: [],
+      estimatedTokens: 10,
+      reason: "turn",
+    });
+    log.append({ type: "retry", at: "", attempt: 1, delayMs: 500, error: "fetch failed" });
+    log.append({ type: "request/error", at: "", error: "fetch failed", kind: "network" });
+    const { app } = bootB(scriptedB([]), {}, log);
+    const failed = doc(app);
+    expect(failed.indexOf("retry 1:")).toBeLessThan(failed.indexOf("request #1 failed"));
+    app.stop();
   });
 
   it("流式思考:定稿带思考时保留节点并可 Ctrl+T 展开;定稿无思考时撤掉节点;task 调用留槽", async () => {

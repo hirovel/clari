@@ -100,6 +100,30 @@ describe("legalizeCut / keepRecentTokens", () => {
   it("切点不落在工具结果上(不拆调用对)", () => {
     expect(legalizeCut(BASE, 3)).toBe(2); // idx3 是 tool/result → 退到 assistant
     expect(legalizeCut(BASE, 7)).toBe(7); // idx7 是 assistant,合法
+    const notice: AgentEvent = {
+      type: "request",
+      at: "t",
+      model: "m",
+      messages: 0,
+      tools: [],
+      estimatedTokens: 0,
+      threshold: 100,
+      reason: "turn",
+    };
+    const parallel: AgentEvent[] = [
+      BASE[0] as AgentEvent,
+      BASE[2] as AgentEvent,
+      ...Array.from({ length: 20000 }, () => BASE[3] as AgentEvent),
+      notice,
+    ];
+    expect(legalizeCut(parallel, parallel.length - 2)).toBe(1);
+    expect(legalizeCut(parallel, parallel.length - 1)).toBe(parallel.length - 1);
+    expect(legalizeCut(parallel, parallel.length)).toBe(parallel.length);
+    // 不可见事件可留在切点,但其后的工具结果仍须回退到调用。
+    expect(
+      legalizeCut([BASE[0] as AgentEvent, BASE[2] as AgentEvent, notice, BASE[3] as AgentEvent], 2),
+    ).toBe(1);
+    expect(legalizeCut([BASE[0] as AgentEvent, notice, BASE[2] as AgentEvent], 1)).toBe(1);
   });
 
   it("keepRecentTokens 从尾部累计预算并合法化", () => {
@@ -183,6 +207,76 @@ describe("llmSummarize", () => {
     expect(capture.messages?.at(-1)?.content).toContain("重点保留报错");
   });
 
+  it("摘要读取当前修订,排除的调用与文件不复活,保留尾部不发送", async () => {
+    const events = ev([
+      ...BASE,
+      { type: "context/edit", target: 0, field: "system", value: "Current system" },
+      { type: "context/edit", target: 5, field: "content", value: "CORRECTED ".repeat(100) },
+      { type: "context/drop", target: 2 },
+    ]);
+    for (const callStyle of ["replay", "standalone"] as const) {
+      const capture: { messages?: Message[] } = {};
+      const p = await llmSummarize({ callStyle })({
+        events,
+        window: 100000,
+        targetTokens: 50000,
+        provider: fakeProvider("Updated summary", capture),
+        preservation: () => 7,
+      });
+      expect(p).toMatchObject({ summary: "Updated summary", coversFrom: 2, coversUpTo: 7 });
+      const input = JSON.stringify(capture.messages);
+      expect(input).toContain("Current system");
+      expect(input).toContain("CORRECTED");
+      expect(input).not.toContain("x".repeat(400));
+      expect(input).not.toContain("y".repeat(400));
+      expect(input).not.toContain("a.ts");
+      expect(input).not.toContain("继续下一个");
+      if (callStyle === "replay")
+        expect(capture.messages?.slice(0, -1)).toEqual(deriveMessages(events).slice(0, -1));
+      expect(
+        deriveMessages([...events, { type: "compaction", at: "t", ...p }]).at(-1),
+      ).toMatchObject({ role: "user", content: "继续下一个" });
+    }
+    expect(BASE[5]).toMatchObject({ content: "y".repeat(400) });
+  });
+
+  it("再次摘要携带旧摘要,晚到的未知结果跟随对应调用,恢复投影一致", async () => {
+    const events = ev([
+      ...BASE.slice(0, 5),
+      ...BASE.slice(6, 8),
+      { type: "compaction", summary: "PREVIOUS ".repeat(80), coversFrom: 2, coversUpTo: 4 },
+      { type: "tool/unresolved", callEvent: 4, callId: "c2", name: "bash", content: "UNKNOWN" },
+      { type: "context/edit", target: 8, field: "content", value: "UNKNOWN_REVISED" },
+    ]);
+    const capture: { messages?: Message[] } = {};
+    const p = await llmSummarize()({
+      events,
+      window: 100000,
+      targetTokens: 50000,
+      provider: fakeProvider("Merged summary", capture),
+      preservation: () => 6,
+    });
+    expect(p).toMatchObject({ coversFrom: 2, coversUpTo: 6 });
+    expect(capture.messages?.slice(0, -1)).toEqual(deriveMessages(events).slice(0, -1));
+    expect(capture.messages?.[2]?.content).toContain("PREVIOUS");
+    expect(capture.messages?.[4]).toMatchObject({
+      role: "tool",
+      callId: "c2",
+      content: "UNKNOWN_REVISED",
+    });
+    expect(JSON.stringify(capture.messages)).not.toContain("x".repeat(400));
+    const completed = [...events, { type: "compaction", at: "t", ...p }] as AgentEvent[];
+    expect(deriveMessages(JSON.parse(JSON.stringify(completed)))).toEqual(
+      deriveMessages(completed),
+    );
+    expect(deriveMessages(completed).map((m) => m.content)).toEqual([
+      "系统提示",
+      "任务:修复测试",
+      "[Earlier conversation was compacted; summary follows]\nMerged summary",
+      "继续下一个",
+    ]);
+  });
+
   it("安全阀:未完整结束拒绝应用;摘要不比被覆盖内容小,返回 null", async () => {
     for (const stopReason of ["length", "tool", "aborted"] as const) {
       await expect(
@@ -208,6 +302,21 @@ describe("llmSummarize", () => {
       preservation: () => 7,
     });
     expect(p).toBeNull();
+    // 原始正文很大,但当前有效内容很小;不能用旧大小放行一个反而变长的摘要。
+    const revised = ev([
+      ...BASE,
+      { type: "context/drop", target: 2 },
+      { type: "context/edit", target: 5, field: "content", value: "short" },
+    ]);
+    expect(
+      await llmSummarize()({
+        events: revised,
+        window: 100000,
+        targetTokens: 50000,
+        provider: fakeProvider("s".repeat(200)),
+        preservation: () => 7,
+      }),
+    ).toBeNull();
   });
 });
 

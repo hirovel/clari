@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { listSessions, parseAge, pruneSessions, sessionRows } from "../cli/sessions.js";
+import { EventLog } from "../src/log.js";
 
 let tmp: string | undefined;
 afterEach(() => {
@@ -80,6 +81,17 @@ describe("listSessions / pruneSessions", () => {
     expect(plan.bytes).toBeGreaterThan(8192);
     const byCount = pruneSessions(tmp, { keep: 1, apply: false, now });
     expect(byCount.removed.map((s) => s.file).sort()).toEqual([old, mid].sort());
+    const active = EventLog.load(old, { attach: true });
+    try {
+      expect(() => pruneSessions(tmp as string, { olderThanDays: 30, apply: true, now })).toThrow(
+        "File is in use",
+      );
+      expect(existsSync(old)).toBe(true);
+      expect(existsSync(join(tmp, "a-old.records", "fixture.body"))).toBe(true);
+    } finally {
+      active.recording?.flush();
+      active.recording?.dispose();
+    }
     const done = pruneSessions(tmp, { olderThanDays: 30, apply: true, now });
     expect(done.removed).toHaveLength(1);
     expect(existsSync(old)).toBe(false);

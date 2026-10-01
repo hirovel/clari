@@ -4,10 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
-import type { AgentEvent, ToolCall } from "../src/events.js";
+import type { ToolCall } from "../src/events.js";
 import type { EventLog } from "../src/log.js";
 import { EventLog as Log } from "../src/log.js";
 import type { ApproveOrigin, TurnDeps } from "../src/loop.js";
+import { deriveMessages } from "../src/messages.js";
 import type { Provider, ToolDef } from "../src/provider.js";
 import { createTaskTool, type TaskToolOptions } from "../src/subagent.js";
 import { defineTool } from "../src/tools.js";
@@ -220,6 +221,12 @@ describe("步数上限与续聊", () => {
       await initial.tool.execute({ task: "original child" }, ctx());
       const childPath = join(dir, "parent-sub-1.jsonl");
       const original = readFileSync(childPath, "utf8");
+      parent.recording?.flush();
+      parent.recording?.dispose();
+      for (const child of initial.logs) {
+        child.recording?.flush();
+        child.recording?.dispose();
+      }
       let missingResultSeen = 0;
       let toolCalls = 0;
       const restored = mk({
@@ -256,6 +263,8 @@ describe("步数上限与续聊", () => {
         toolCalls: [{ id: "unfinished", name: "echo", args: { text: "side effect unknown" } }],
         stopReason: "tool",
       });
+      interrupted.recording?.flush();
+      interrupted.recording?.dispose();
       await restored.tool.execute({ task: "check actual state", resume: "sub-1" }, ctx());
       await restored.tool.execute({ task: "follow-up", resume: "sub-1" }, ctx());
       expect(missingResultSeen).toBe(2);
@@ -299,11 +308,70 @@ describe("类型注册表与嵌套", () => {
 
     await tool.execute({ task: "dig", type: "research" }, ctx());
     expect(cheap.tools[0]).toEqual(["echo"]);
-    const start = logs[0]?.events[0] as Extract<AgentEvent, { type: "session/start" }>;
-    expect(start.system).toBe("you are a researcher");
+    expect(deriveMessages(logs[0]?.events ?? [])[0]).toMatchObject({
+      role: "system",
+      content: "you are a researcher",
+    });
     // userMessagesOnly:父的 user/message 也进了子日志
     const texts = logs[0]?.events.filter((e) => e.type === "user/message").map((e) => e.text);
     expect(texts).toEqual(["hi", "dig"]);
+  });
+
+  it("新子继承当前system,类型覆盖最后生效;续聊保留子自己的修改", async () => {
+    for (const [scope, override] of [
+      ["taskOnly", undefined],
+      ["userMessagesOnly", undefined],
+      ["fork", undefined],
+      ["fork", "OVERRIDE"],
+      ["fork", ""],
+    ] as const) {
+      const parent = parentLog();
+      parent.append({
+        type: "context/edit",
+        at: "t",
+        target: 0,
+        field: "system",
+        value: "CURRENT",
+      });
+      parent.append({
+        type: "assistant/message",
+        at: "t",
+        text: "",
+        toolCalls: [{ id: "dispatch", name: "task", args: { task: "inspect" } }],
+        stopReason: "tool",
+      });
+      const before = JSON.stringify(parent.events);
+      const seen: string[] = [];
+      const { tool, logs } = mk({
+        parent,
+        tools: [],
+        types: {
+          custom: { description: "custom", ...(override !== undefined && { system: override }) },
+        },
+        provider: {
+          model: "fake",
+          async complete(messages) {
+            seen.push(messages.find((m) => m.role === "system")?.content ?? "MISSING");
+            return { text: "done", toolCalls: [], stopReason: "end" };
+          },
+        },
+      });
+      await tool.execute({ task: "inspect", scope, type: "custom" }, ctx("dispatch"));
+      expect(seen).toEqual([override ?? "CURRENT"]);
+      expect(JSON.stringify(parent.events)).toBe(before);
+      const child = logs[0];
+      expect(child).toBeDefined();
+      child?.append({ type: "context/edit", at: "t", target: 0, field: "system", value: "CHILD" });
+      parent.append({
+        type: "context/edit",
+        at: "t",
+        target: 0,
+        field: "system",
+        value: "PARENT_CHANGED",
+      });
+      await tool.execute({ task: "continue", type: "custom", resume: "sub-1" }, ctx());
+      expect(seen).toEqual([override ?? "CURRENT", "CHILD"]);
+    }
   });
 
   it("类型要的模型没有 providerFor 时报错回喂", async () => {

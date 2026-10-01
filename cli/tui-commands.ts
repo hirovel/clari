@@ -3,13 +3,14 @@
 // 命令表 COMMANDS 同时供补全、面板与 /help 使用;分发在 command 里,每条命令的实现是接 ctx 的小函数
 // (查看类在下半部分,编辑类在 tui-edit,槽类在 tui-slots,选单在 tui-menu)。
 import { existsSync, readFileSync } from "node:fs";
+import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import type { DeliverAs } from "../src/agent.js";
 import type { ModelConfig } from "../src/config.js";
-import { contextBreakdown } from "../src/context.js";
+import { contextBreakdown, estimateTokens } from "../src/context.js";
 import { fmtCost } from "../src/cost.js";
 import { now } from "../src/events.js";
-import { recordingProvider } from "../src/loop.js";
 import { EFFORT_LEVELS, parseEffort } from "../src/provider.js";
+import { errorMessage } from "../src/providers/errors.js";
 import { unresolvedCalls } from "../src/recovery.js";
 import { SETTINGS, type SettingDef, settingDef } from "../src/settings.js";
 import { setupGuide } from "../src/setup.js";
@@ -17,7 +18,7 @@ import { expandFileRefs } from "./attachments.js";
 import { SESSIONS_DIR } from "./bootstrap.js";
 import { firstLine, thesisLines } from "./cards.js";
 import { describeStatus } from "./mcp/bridge.js";
-import { expandSkill } from "./prompt.js";
+import { expandSkill, skillSources } from "./prompt.js";
 import { describeInferred } from "./registry.js";
 import { PendingInputsView, textReview } from "./session-view.js";
 import { forkSession, listSessions, sessionRows } from "./sessions.js";
@@ -87,7 +88,7 @@ export const COMMANDS: Command[] = [
   { name: "compact", description: "Compact the context now; words after it are instructions" },
   { name: "copy", description: "Copy the last reply or one of its code blocks", picks: true },
   { name: "stop", description: "Interrupt the running turn (Esc does the same)" },
-  { name: "quit", description: "Quit (Ctrl+C does the same)" },
+  { name: "quit", description: "Quit (Ctrl+C asks first)" },
 ];
 
 // ---------- 提交 ----------
@@ -99,7 +100,7 @@ export async function submit(
 ): Promise<void> {
   const { agent } = ctx;
   if (ctx.inputReading) {
-    ctx.note(c.soft("Reading clipboard; wait for the attachment before sending."));
+    ctx.note(c.soft("Preparing paste; send after it appears."));
     return;
   }
   if (ctx.deps.readOnlyReason) {
@@ -109,6 +110,11 @@ export async function submit(
   if (ctx.model.info.providerName === "none") {
     ctx.note(c.zhu("no provider yet: add an API key first"));
     openLogin(ctx, {});
+    return;
+  }
+  if (agent.storagePaused) {
+    ctx.note(c.zhu("Recording buffer full. Fix saving and retry; your draft is still here."));
+    ctx.updateStatus();
     return;
   }
   // @路径 展开成消息里的 <file> 块:附上的就是发出的,落盘上屏都完整。
@@ -122,7 +128,7 @@ export async function submit(
   }
   const text = expanded.text;
   const inputId = ctx.deps.inputs?.draftId;
-  const fromEditor = ctx.editor.getText().trim() === raw.trim();
+  const fromEditor = ctx.editor.getExpandedText().trim() === raw.trim();
   const images = fromEditor ? ctx.draftImages : [];
   const clearAcceptedDraft = () => {
     if (
@@ -143,9 +149,11 @@ export async function submit(
     clearAcceptedDraft();
     ctx.note(
       c.faint(
-        opts.deliverAs === "followUp"
-          ? "· queued as follow-up: delivered after the current turn"
-          : `· queued as steering: delivered ${ctx.slots.state.steering === "turn" ? "after the current turn" : "at the next step boundary"}`,
+        agent.stopping
+          ? "· paused while stopping: continue manually after the turn ends"
+          : opts.deliverAs === "followUp"
+            ? "· queued as follow-up: delivered after the current turn"
+            : `· queued as steering: delivered ${ctx.slots.state.steering === "turn" ? "after the current turn" : "at the next step boundary"}`,
       ),
     );
     ctx.updateStatus();
@@ -161,14 +169,14 @@ export async function submit(
 async function runInput(
   ctx: TuiContext,
   start: () => ReturnType<TuiContext["agent"]["continuePending"]>,
+  label = "thinking",
 ): Promise<void> {
-  ctx.showLoader("thinking");
+  ctx.showLoader(label);
   try {
     // prompt() 同步执行到首个 await 时已把 running 置位;此处刷新状态栏才能显示"运行中"。
     const pending = start();
     ctx.updateStatus();
-    const outcome = await pending;
-    if (typeof outcome === "object") ctx.note(c.soft(`· loop stopped: ${outcome.stopped}`));
+    await pending;
   } catch (err) {
     // 请求层的失败已由 request/error 事件画成错误行;这里只兜住循环之外的异常。
     if (ctx.log.events.at(-1)?.type !== "request/error")
@@ -195,7 +203,7 @@ function helpText(ctx: TuiContext): string {
     c.soft("Keys"),
     row("Ctrl+K", "search everything: commands, models, skills, templates"),
     row("Ctrl+R", "inspector · Ctrl+E context · Ctrl+O results · Ctrl+T thinking"),
-    row("PgUp PgDn", "step cursor · Enter fold or unfold · Esc release"),
+    row("PgUp PgDn", "page without steps · otherwise step cursor · Enter fold/unfold · Esc latest"),
     row("Alt+Enter", "queue a follow-up for after the current turn · @path attaches a file"),
     row("?", "every key"),
   ].join("\n");
@@ -233,14 +241,26 @@ function skillsList(ctx: TuiContext): string {
   const { skills } = ctx;
   const mode = effectiveSetting(ctx, settingDef("prompt.skills.mode") as SettingDef);
   const include = effectiveSetting(ctx, settingDef("prompt.skills.include") as SettingDef);
+  const sources = [
+    c.faint("Discovery order · first name wins · direct <name>/SKILL.md only"),
+    ...skillSources(process.cwd(), {
+      sources: effectiveSetting(ctx, settingDef("prompt.skills.sources") as SettingDef) as Record<
+        string,
+        "on" | "off"
+      >,
+    }).map((source, i) =>
+      c.faint(`  ${i + 1}. ${source.enabled ? "[x]" : "[ ]"} ${source.name}: ${source.path}`),
+    ),
+  ];
   if (skills.length === 0) {
-    return c.faint(
-      "No skills. Put <name>/SKILL.md under ~/.clari/skills, ~/.claude/skills, <repo>/.agents/skills or <repo>/.claude/skills.",
-    );
+    return [
+      ...sources,
+      c.faint("No skills found. Use /settings prompt.skills.sources to enable or add directories."),
+    ].join("\n");
   }
   const rows = skills.map((s) => {
-    const desc = Math.ceil(s.description.length / 4);
-    const body = Math.ceil(s.body.length / 4);
+    const desc = estimateTokens(s.description);
+    const body = estimateTokens(s.body);
     const flags = [
       s.disableModelInvocation
         ? "user-only"
@@ -251,10 +271,12 @@ function skillsList(ctx: TuiContext): string {
       ...(s.allowedTools.length ? [`allowed-tools: ${s.allowedTools.join(" ")}`] : []),
       ...(s.argumentHint ? [`args: ${s.argumentHint}`] : []),
     ].join(" · ");
-    return `  ${c.ink(`/${s.name}`.padEnd(16))} ${c.ink(s.description || "(no description)")}\n${" ".repeat(19)}${c.faint(`${s.path} · listing ${desc} tok · body ${body} tok · ${flags}`)}`;
+    return `  ${c.ink(`/${s.name}`.padEnd(16))} ${c.ink(s.description || "(no description)")}\n${" ".repeat(19)}${c.faint(`${s.path} · description ~${desc} tok · body ~${body} tok · ${flags}`)}`;
   });
   return [
     `${c.soft("Skills")} ${c.ink(`${skills.length}`)}  ${c.faint(`Mode: ${mode} · /<name> args to run one now; /settings to change the automatic range`)}`,
+    ...sources,
+    "",
     ...rows,
   ].join("\n");
 }
@@ -338,16 +360,27 @@ export function renderContext(ctx: TuiContext): string {
   const b = contextBreakdown(log.events, ctx.model.contextWindow);
   const lines = [
     `${c.soft("Context")}  ${c.ink(`estimated ${b.estimatedTokens} tok`)} ${c.faint(`/ window ${b.window} · ${pct(b.usedShare)}`)}`,
+    c.faint(
+      "Projected messages only; tool definitions and provider framing are excluded. Ctrl+E shows active tools.",
+    ),
   ];
   if (b.measuredTokens !== undefined)
     lines.push(c.faint(`last request measured ${b.measuredTokens} tok in`));
   const totals = ctx.usage.totals();
-  if (totals.requests > 0) {
+  if (ctx.req.count > 0) {
     lines.push(
       c.faint(
-        `session total: ${totals.requests} requests · in ${totals.inputTokens} · out ${totals.outputTokens} · cache read ${totals.cacheReadTokens} · cache write ${totals.cacheWriteTokens}${totals.cost !== undefined ? ` · cost ${fmtCost(totals.cost)}` : " · no price configured (models[].price)"}`,
+        `session total: ${ctx.req.count} requests (${totals.requests} with usage) · in ${totals.inputTokens} · out ${totals.outputTokens} · cache read ${totals.cacheReadTokens} · cache write ${totals.cacheWriteTokens}`,
       ),
     );
+    if (ctx.deps.showCostEstimate)
+      lines.push(
+        c.faint(
+          totals.cost !== undefined
+            ? `cost estimate ${fmtCost(totals.cost)} · reported tokens × configured/catalog rates, not a bill`
+            : `cost estimate unavailable (${totals.costStatus}) · see Ctrl+R for per-request usage`,
+        ),
+      );
   }
   for (const p of b.parts) {
     const bar = "█".repeat(Math.max(1, Math.round(p.share * 24))).padEnd(24);
@@ -598,7 +631,7 @@ function slotValues(ctx: TuiContext, slot: SlotName): { label: string; note?: st
         { label: "explain", note: "core plus guidance on when to use which" },
         { label: "rules", note: "explain plus ALWAYS / NEVER rules" },
         { label: "save", note: "write the level and your edits to the config" },
-        { label: "edit", note: "edit one tool's description in your editor" },
+        { label: "edit", note: "edit one tool's description here" },
         { label: "reset", note: "drop your edit of one tool's description" },
       ];
   }
@@ -642,8 +675,7 @@ async function applySlot(ctx: TuiContext, slot: SlotName, value: string): Promis
 
 /** /set:选槽 → 选值。审批的规则与工具描述编辑各多一层。 */
 async function setCommand(ctx: TuiContext, arg: string): Promise<void> {
-  const [slot = "", ...rest] = arg.split(/\s+/);
-  const value = rest.join(" ").trim();
+  const [slot, value] = commandParts(arg);
   if (slot) {
     if (!isSlotName(slot)) {
       ctx.note(c.zhu(`unknown slot ${slot}`) + c.faint(`  ${SLOTS.join(" ")}`));
@@ -686,7 +718,7 @@ async function setCommand(ctx: TuiContext, arg: string): Promise<void> {
     }
     const t = await choose(
       ctx,
-      title(`${v} description`, v === "edit" ? "opens your editor" : "drops your edit"),
+      title(`${v} description`, v === "edit" ? "edit here" : "drops your edit"),
       tools.map((x) => ({
         label: x.name,
         note: `${edited.has(x.name) ? "edited · " : ""}${firstLine(x.description, 50)}`,
@@ -790,8 +822,7 @@ function setEffort(ctx: TuiContext, arg: string): string {
 // ---------- 编辑(/edit) ----------
 
 async function editDispatch(ctx: TuiContext, arg: string): Promise<void> {
-  const [sub = "", ...rest] = arg.split(/\s+/);
-  const restArg = rest.join(" ").trim();
+  const [sub, restArg] = commandParts(arg);
   const { note } = ctx;
   if (!sub) {
     const picked = await choose(
@@ -849,7 +880,7 @@ async function editDispatch(ctx: TuiContext, arg: string): Promise<void> {
 
 // ---------- 模型与登录 ----------
 
-/** 切到 供应商/模型;setDefault 为真时同时写为缺省。返回是否成功。 */
+/** 返回当前模型是否切换成功;缺省值保存失败不撤回已完成的切换。 */
 function useModel(ctx: TuiContext, name: string, setDefault: boolean): boolean {
   const { deps, agent, model } = ctx;
   if (!deps.settings) {
@@ -875,14 +906,26 @@ function useModel(ctx: TuiContext, name: string, setDefault: boolean): boolean {
     ctx.compaction.window = choice.contextWindow;
     ctx.updateHeader();
     ctx.updateStatus();
-    if (setDefault) {
-      deps.settings.setDefault(`${choice.providerName}/${choice.model}`);
-      ctx.note(c.soft(`· default model set to ${choice.providerName}/${choice.model}`));
-    }
-    return true;
   } catch (err) {
     ctx.note(c.zhu(`✗ ${(err as Error).message}`));
     return false;
+  }
+  if (setDefault) saveDefaultModel(ctx);
+  return true;
+}
+
+/** 缺省写盘与当前模型运行分开,失败时可直接重试。 */
+function saveDefaultModel(ctx: TuiContext): void {
+  const name = `${ctx.model.info.providerName}/${ctx.model.info.model}`;
+  try {
+    ctx.deps.settings?.setDefault(name);
+    ctx.note(c.soft(`· default model set to ${name}`));
+  } catch (err) {
+    ctx.note(
+      c.zhu(`✗ default could not be saved: ${(err as Error).message}`) +
+        c.soft(`\nCurrent model remains ${name}.\n`) +
+        c.zhu("Default not saved · /model default"),
+    );
   }
 }
 
@@ -897,9 +940,7 @@ async function modelCommand(ctx: TuiContext, arg: string): Promise<void> {
     return;
   }
   if (arg === "default") {
-    const name = `${model.info.providerName}/${model.info.model}`;
-    deps.settings.setDefault(name);
-    ctx.note(c.soft(`· default model set to ${name}`));
+    saveDefaultModel(ctx);
     return;
   }
   if (arg) {
@@ -938,42 +979,61 @@ async function listRemoteModels(ctx: TuiContext): Promise<void> {
     ctx.note(c.zhu("this provider cannot list models"));
     return;
   }
-  ctx.showLoader("listing models");
-  let remote: string[];
-  try {
-    remote = await p.listModels();
-  } catch (err) {
-    ctx.note(c.zhu(`✗ listing failed: ${(err as Error).message}`));
-    return;
-  } finally {
-    ctx.hideLoader();
-    ctx.updateStatus();
-  }
-  const prefix = `${providerName}/`;
-  const configured = (ctx.deps.settings?.listModels() ?? [])
-    .filter((m) => m.startsWith(prefix))
-    .map((m) => m.slice(prefix.length));
+  const controller = new AbortController();
+  const active = () => !controller.signal.aborted && ctx.agent.provider === p;
+  // 请求和后续元数据查询共同归这个弹窗所有,关闭或替换时取消。
+  const waiting = {
+    invalidate() {},
+    render(width: number) {
+      return [title("Models", providerName), c.soft("Listing models · Esc cancel")].map((line) =>
+        truncateToWidth(line, width),
+      );
+    },
+    handleInput(data: string) {
+      if (matchesKey(data, Key.escape)) ctx.dialog.close();
+    },
+  };
+  ctx.dialog.open(waiting, () => controller.abort());
   const s = ctx.deps.settings;
   const rows: PickRow[] = [];
-  for (const m of configured) {
-    const note = (await s?.capabilityNote?.(providerName, m)) ?? "";
-    rows.push({
-      label: m,
-      ...(m === currentModel && { current: true }),
-      note: remote.includes(m)
-        ? [m === currentModel ? "current" : "", note].filter(Boolean).join(" · ")
-        : `${c.zhu("✗")} not on the server; possibly retired${note ? ` · ${note}` : ""}`,
-    });
-  }
-  // 服务器上有、配置里没有的:能力数据从 models.dev 补,补不到抄最像的,再不行假设;选中即写进配置。
   const inferred = new Map<string, ModelConfig>();
-  for (const m of remote) {
-    if (configured.includes(m)) continue;
-    if (s?.describeModel && s.addModel) {
-      const d = await s.describeModel(providerName, m);
-      inferred.set(m, d.model);
-      rows.push({ label: m, note: `not in config · ${describeInferred(d)}` });
-    } else rows.push({ label: m, note: "not in config", disabled: true });
+  let remote: string[];
+  let configured: string[];
+  try {
+    remote = await p.listModels(controller.signal);
+    if (!active()) return;
+    const prefix = `${providerName}/`;
+    configured = (s?.listModels() ?? [])
+      .filter((m) => m.startsWith(prefix))
+      .map((m) => m.slice(prefix.length));
+    for (const m of configured) {
+      const note = (await s?.capabilityNote?.(providerName, m)) ?? "";
+      if (!active()) return;
+      rows.push({
+        label: m,
+        ...(m === currentModel && { current: true }),
+        note: remote.includes(m)
+          ? [m === currentModel ? "current" : "", note].filter(Boolean).join(" · ")
+          : `${c.zhu("✗")} not on the server; possibly retired${note ? ` · ${note}` : ""}`,
+      });
+    }
+    // 新模型只在选中后写入配置;异步查能力期间保持取消入口。
+    for (const m of remote) {
+      if (configured.includes(m)) continue;
+      if (s?.describeModel && s.addModel) {
+        const d = await s.describeModel(providerName, m);
+        if (!active()) return;
+        inferred.set(m, d.model);
+        rows.push({ label: m, note: `not in config · ${describeInferred(d)}` });
+      } else rows.push({ label: m, note: "not in config", disabled: true });
+    }
+  } catch (err) {
+    if (active())
+      ctx.note(c.zhu(`✗ listing failed: ${errorMessage(err)}\nModels unavailable · /model list`));
+    return;
+  } finally {
+    // 迟到的结束不能关闭用户随后打开的界面。
+    if (ctx.dialog.component === waiting) ctx.dialog.close();
   }
   const picked = await choose(
     ctx,
@@ -981,7 +1041,7 @@ async function listRemoteModels(ctx: TuiContext): Promise<void> {
     rows,
     "↑↓ choose · Enter switch · d switch and make it the default · Esc back",
   );
-  if (!picked) return;
+  if (!picked || ctx.agent.provider !== p) return;
   const add = inferred.get(picked.row.label);
   if (add && s?.addModel) {
     s.addModel(providerName, add);
@@ -1004,7 +1064,7 @@ export function openLogin(ctx: TuiContext, opts: { intro?: string; provider?: st
   const dialog = new LoginDialog(
     {
       providers: () => settings.providers?.() ?? [],
-      verifyKey: (p, k) => settings.verifyKey?.(p, k) ?? Promise.resolve([]),
+      verifyKey: (p, k, signal) => settings.verifyKey?.(p, k, signal) ?? Promise.resolve([]),
       ...(settings.describeModel && { describeModel: settings.describeModel }),
       ...(settings.addModel && {
         addModel: (p: string, m: ModelConfig) => {
@@ -1012,19 +1072,34 @@ export function openLogin(ctx: TuiContext, opts: { intro?: string; provider?: st
           ctx.note(c.soft(`· ${p}/${m.name} added to the config`));
         },
       }),
-      setKey: (p, k) => {
+      setKey: (p, k, verified) => {
+        const source = settings.providers?.().find((provider) => provider.name === p);
         settings.setKey(p, k);
-        ctx.note(c.soft(`· key for ${p} saved to the credentials file`));
+        ctx.note(
+          c.soft(
+            `· key for ${p} saved to the credentials file${verified ? "" : " · not verified"}`,
+          ),
+        );
+        if (source?.keySource === "env")
+          ctx.note(
+            c.soft(
+              `· ${source.env ?? "Environment key"} still takes precedence over the saved key.`,
+            ),
+          );
       },
       useModel: (name, setDefault) => {
-        useModel(ctx, name, setDefault);
+        if (!useModel(ctx, name, setDefault))
+          throw new Error(
+            "Model switch failed. Details are in the conversation; retry or go back.",
+          );
       },
       onDone: () => ctx.dialog.close(),
       onChange: () => ctx.tui.requestRender(),
+      height: () => ctx.deps.terminal.rows,
     },
     opts,
   );
-  ctx.dialog.open(dialog);
+  ctx.dialog.open(dialog, () => dialog.cancel());
 }
 
 // ---------- 工具集(/tools) ----------
@@ -1098,8 +1173,7 @@ async function toolsCommand(ctx: TuiContext, arg: string): Promise<void> {
 
 async function sessionCommand(ctx: TuiContext, arg: string, selectSource = false): Promise<void> {
   const sw = ctx.deps.switchSession;
-  const [sub = "", ...rest] = arg.split(/\s+/);
-  const restArg = rest.join(" ").trim();
+  const [sub, restArg] = commandParts(arg);
   const source = async (history: boolean) => {
     if (!selectSource) return undefined;
     const picked = await choose(ctx, title("Session setup", "choose the configuration source"), [
@@ -1175,8 +1249,15 @@ async function sessionCommand(ctx: TuiContext, arg: string, selectSource = false
             ctx.note(c.zhu(ctx.deps.readOnlyReason ?? "Add a provider key before continuing."));
             return;
           }
+          if (ctx.agent.stopping) {
+            ctx.note(c.zhu("Wait for the current turn to stop before continuing pending input."));
+            return;
+          }
           ctx.dialog.close();
-          if (ctx.agent.running) void ctx.agent.continuePending().catch(() => {});
+          if (ctx.agent.running)
+            void ctx.agent
+              .continuePending()
+              .catch((error: unknown) => ctx.note(c.zhu(`✗ ${(error as Error).message}`)));
           else void runInput(ctx, () => ctx.agent.continuePending());
         }),
       );
@@ -1203,7 +1284,7 @@ async function sessionCommand(ctx: TuiContext, arg: string, selectSource = false
         ctx.log.events,
         n,
         ctx.deps.sessionsDir ?? SESSIONS_DIR,
-        ctx.deps.info.sessionFile,
+        ctx.log.recording,
       );
       ctx.note(c.soft(`· forked: first ${forked.events} events → ${forked.file}`));
       sw?.({ kind: "resume", file: forked.file, ...(selected && { source: selected }) });
@@ -1397,108 +1478,103 @@ async function copyCommand(ctx: TuiContext, arg: string): Promise<void> {
   );
 }
 
-async function manualCompact(ctx: TuiContext, instructions: string): Promise<void> {
-  const { log, agent, compaction } = ctx;
-  ctx.showLoader("compacting");
-  try {
-    const payload = await compaction.strategy({
-      events: log.events,
-      window: ctx.model.contextWindow,
-      targetTokens: ctx.threshold(),
-      provider: recordingProvider(log, agent.provider, {
-        threshold: ctx.threshold(),
-      }),
-      ...(compaction.preservation && { preservation: compaction.preservation }),
-      ...(instructions && { instructions }),
-    });
-    if (!payload) ctx.note(c.faint("compaction skipped: nothing to do or not enough progress"));
-    else log.append({ type: "compaction", at: now(), ...payload });
-    await log.checkpoint();
-  } catch (err) {
-    ctx.note(c.zhu(`✗ compaction failed: ${(err as Error).message}`));
-  } finally {
-    ctx.hideLoader();
-    ctx.updateStatus();
-  }
-}
-
 // ---------- 面板 ----------
 
 /** Ctrl+K:命令面板。条目来自命令表、配置里的模型、技能、模板、每个供应商的登录。 */
 export function openPalette(ctx: TuiContext): void {
-  const items: PaletteItem[] = [
-    {
-      kind: "command",
-      label: "Keyboard shortcuts",
-      note: "Read keys without changing your draft",
-      run: () => openShortcutHelp(ctx),
-    },
-  ];
-  const fill = (text: string) => {
-    ctx.editor.setText(text);
-    ctx.tui.requestRender();
-  };
-  for (const cmd of COMMANDS) {
-    items.push({
-      kind: "command",
-      label: `/${cmd.name}`,
-      note: cmd.description,
-      run: () => {
-        if (cmd.name === "compact") fill("/compact ");
-        else void command(ctx, `/${cmd.name}`);
+  try {
+    const items: PaletteItem[] = [
+      {
+        kind: "command",
+        label: "Keyboard shortcuts",
+        note: "Read keys without changing your draft",
+        run: () => openShortcutHelp(ctx),
       },
-    });
+    ];
+    const fill = async (text: string) => {
+      if (ctx.inputReading) {
+        ctx.note(c.soft("Reading clipboard… Draft unchanged; choose the command again afterward."));
+        return;
+      }
+      const draft = ctx.editor.getExpandedText();
+      try {
+        if (draft && !(await confirm(ctx, "Replace the current draft?", `Fill ${text.trim()}`)))
+          return;
+        if (ctx.inputReading || ctx.editor.getExpandedText() !== draft) {
+          ctx.note(c.soft("Draft changed while choosing. Kept it; choose the command again."));
+          return;
+        }
+        ctx.editor.setText(text);
+        ctx.tui.requestRender();
+      } catch (error) {
+        ctx.note(c.zhu(`✗ ${(error as Error).message}`));
+      }
+    };
+    for (const cmd of COMMANDS) {
+      items.push({
+        kind: "command",
+        label: `/${cmd.name}`,
+        note: cmd.description,
+        run: () => {
+          if (cmd.name === "compact") void fill("/compact ");
+          else void command(ctx, `/${cmd.name}`);
+        },
+      });
+    }
+    for (const def of SETTINGS) {
+      items.push({
+        kind: "setting",
+        label: `settings ${def.key}`,
+        note: `${setupGuide(def).title} · ${def.note}`,
+        run: () => void command(ctx, `/settings ${def.key}`),
+      });
+    }
+    const s = ctx.deps.settings;
+    for (const name of s?.listModels() ?? []) {
+      const current = name === `${ctx.model.info.providerName}/${ctx.model.info.model}`;
+      items.push({
+        kind: "model",
+        label: name,
+        ...(current && { note: "current" }),
+        run: () => {
+          useModel(ctx, name, false);
+        },
+      });
+    }
+    for (const p of s?.providers?.() ?? []) {
+      items.push({
+        kind: "login",
+        label: `login ${p.name}`,
+        note: p.keySource ? `key set (${p.keySource})` : "key missing",
+        run: () => openLogin(ctx, { provider: p.name }),
+      });
+    }
+    for (const sk of ctx.skills) {
+      items.push({
+        kind: "skill",
+        label: `/${sk.name}`,
+        note: sk.description,
+        run: () => void fill(`/${sk.name} `),
+      });
+    }
+    for (const t of ctx.templates) {
+      items.push({
+        kind: "template",
+        label: `/${t.name}`,
+        note: t.description,
+        run: () => void fill(`/${t.name} `),
+      });
+    }
+    const palette = new Palette(
+      items,
+      () => ctx.dialog.close(),
+      () => ctx.tui.requestRender(),
+      () => ctx.deps.terminal.rows,
+    );
+    ctx.dialog.open(palette);
+  } catch (error) {
+    ctx.note(c.zhu(`✗ ${(error as Error).message}`));
   }
-  for (const def of SETTINGS) {
-    items.push({
-      kind: "setting",
-      label: `settings ${def.key}`,
-      note: `${setupGuide(def).title} · ${def.note}`,
-      run: () => void command(ctx, `/settings ${def.key}`),
-    });
-  }
-  const s = ctx.deps.settings;
-  for (const name of s?.listModels() ?? []) {
-    const current = name === `${ctx.model.info.providerName}/${ctx.model.info.model}`;
-    items.push({
-      kind: "model",
-      label: name,
-      ...(current && { note: "current" }),
-      run: () => {
-        useModel(ctx, name, false);
-      },
-    });
-  }
-  for (const p of s?.providers?.() ?? []) {
-    items.push({
-      kind: "login",
-      label: `login ${p.name}`,
-      note: p.keySource ? `key set (${p.keySource})` : "key missing",
-      run: () => openLogin(ctx, { provider: p.name }),
-    });
-  }
-  for (const sk of ctx.skills) {
-    items.push({
-      kind: "skill",
-      label: `/${sk.name}`,
-      note: sk.description,
-      run: () => fill(`/${sk.name} `),
-    });
-  }
-  for (const t of ctx.templates) {
-    items.push({
-      kind: "template",
-      label: `/${t.name}`,
-      note: t.description,
-      run: () => fill(`/${t.name} `),
-    });
-  }
-  const palette = new Palette(
-    items,
-    () => ctx.dialog.close(),
-    () => ctx.tui.requestRender(),
-  );
-  ctx.dialog.open(palette);
 }
 
 // ---------- 设置(/settings) ----------
@@ -1560,8 +1636,9 @@ export async function command(ctx: TuiContext, text: string): Promise<void> {
   const opened = new Promise<void>((resolve) => {
     ctx.dialog.onOpen = resolve;
   });
-  const flow = dispatch(ctx, text).finally(() => ctx.persistSetup());
-  flow.catch((err: unknown) => ctx.note(c.zhu(`✗ ${(err as Error).message}`)));
+  const flow = dispatch(ctx, text)
+    .finally(() => ctx.persistSetup())
+    .catch((err: unknown) => ctx.note(c.zhu(`✗ ${(err as Error).message}`)));
   try {
     await Promise.race([flow, opened]);
   } finally {
@@ -1569,9 +1646,14 @@ export async function command(ctx: TuiContext, text: string): Promise<void> {
   }
 }
 
+/** 只拆首个名称;正文里的换行、缩进与连续空格属于用户内容。 */
+function commandParts(input: string): [string, string] {
+  const boundary = input.search(/\s/);
+  return boundary < 0 ? [input, ""] : [input.slice(0, boundary), input.slice(boundary).trim()];
+}
+
 async function dispatch(ctx: TuiContext, text: string): Promise<void> {
-  const [cmd = "", ...rest] = text.replace(/^\//, "").split(/\s+/);
-  const arg = rest.join(" ").trim();
+  const [cmd, arg] = commandParts(text.replace(/^\//, ""));
   if (
     ctx.deps.readOnlyReason &&
     !["help", "quit", "stop", "inspect", "session", "copy", "login"].includes(cmd)
@@ -1617,7 +1699,11 @@ async function dispatch(ctx: TuiContext, text: string): Promise<void> {
       await memoryCommand(ctx, arg);
       break;
     case "compact":
-      await manualCompact(ctx, arg);
+      if (ctx.agent.running) {
+        ctx.note(c.zhu("cannot compact while running; press Esc first"));
+        break;
+      }
+      await runInput(ctx, () => ctx.agent.compact(arg), "compacting");
       break;
     case "copy":
       await copyCommand(ctx, arg);
