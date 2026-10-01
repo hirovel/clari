@@ -9,7 +9,7 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ### Changed
 
-- Publish Clari to the npm registry. Use `npm install -g clari@latest` for installation and updates, and `npx clari@latest` for temporary use. Check the npm `latest` version at startup so the update notice matches the installation source. Keep the prebuilt GitHub Release package as an alternative.
+- Publish Clari as `@hirovel/clari` on the npm registry. Use `npm install -g @hirovel/clari@latest` for installation and updates, and `npx @hirovel/clari@latest` for temporary use. Keep the `clari` startup command. Check the npm `latest` version at startup so the update notice matches the installation source. Keep the prebuilt GitHub Release package as an alternative; uninstall the old unscoped package once before upgrading from 0.1.0 or 0.1.1.
 
 ## [0.1.1] - 2026-09-30
 

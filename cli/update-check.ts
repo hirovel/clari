@@ -2,15 +2,15 @@
 import { readFileSync } from "node:fs";
 import { gt, prerelease, valid } from "semver";
 
-const VERSION_URL = "https://registry.npmjs.org/clari/latest";
-export const UPDATE_COMMAND = "npm install -g clari@latest";
+const VERSION_URL = "https://registry.npmjs.org/@hirovel%2Fclari/latest";
+export const UPDATE_COMMAND = "npm install -g @hirovel/clari@latest";
 
 export function installedVersion(): string | undefined {
   // 源码运行与 dist/cli 安装运行分别读取同一份包元数据。
   for (const path of ["../package.json", "../../package.json"]) {
     try {
       const pkg = JSON.parse(readFileSync(new URL(path, import.meta.url), "utf8"));
-      if (pkg.name === "clari" && typeof pkg.version === "string")
+      if (pkg.name === "@hirovel/clari" && typeof pkg.version === "string")
         return valid(pkg.version) ?? undefined;
     } catch {
       // 更新提示不可阻止缺少元数据的开发环境启动。

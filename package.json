@@ -1,5 +1,5 @@
 {
-  "name": "clari",
+  "name": "@hirovel/clari",
   "version": "0.1.2",
   "description": "A terminal coding agent with inspectable requests and configurable tools and context.",
   "license": "MIT",

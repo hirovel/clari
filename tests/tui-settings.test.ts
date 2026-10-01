@@ -504,7 +504,7 @@ describe("Agent setup", () => {
     expect(saved.at(-1)).toEqual(["checkUpdates", false]);
     app.setDraft("Keep this unsent draft.");
     await app.command("/help update");
-    expect(doc()).toContain("npm install -g clari@latest");
+    expect(doc()).toContain("npm install -g @hirovel/clari@latest");
     expect(app.draft()).toBe("Keep this unsent draft.");
     await app.command("/settings nope 1");
     expect(doc()).toContain("unknown setting nope");
