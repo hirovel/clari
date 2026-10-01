@@ -500,6 +500,12 @@ describe("Agent setup", () => {
     expect(saved.at(-1)).toEqual(["foldLines", 9]);
     await app.command("/settings screen main");
     expect(doc()).toContain("screen → main · takes effect at the next start");
+    await app.command("/settings checkUpdates off");
+    expect(saved.at(-1)).toEqual(["checkUpdates", false]);
+    app.setDraft("Keep this unsent draft.");
+    await app.command("/help update");
+    expect(doc()).toContain("releases/latest/download/clari.tgz");
+    expect(app.draft()).toBe("Keep this unsent draft.");
     await app.command("/settings nope 1");
     expect(doc()).toContain("unknown setting nope");
     expect(log.events.some((e) => e.type === "ext/event" && e.source === "setup")).toBe(true);

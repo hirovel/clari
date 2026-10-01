@@ -6,7 +6,7 @@ import * as http from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { restoreSessionSetup } from "../cli/session-setup.js";
+import { restoreSessionSetup, withCurrentDisplay } from "../cli/session-setup.js";
 import type { AgentEvent } from "../src/events.js";
 
 const TSX = resolve("node_modules/tsx/dist/cli.mjs");
@@ -129,7 +129,7 @@ describe("真实入口(子进程)", () => {
             fake: { protocol: "openai", baseUrl: "http://unused", apiKey: "k", models: ["m"] },
           },
           sessionsDir,
-          defaults: { extensions: [extension], prompt: { sections: [] } },
+          defaults: { checkUpdates: false, extensions: [extension], prompt: { sections: [] } },
         }),
       );
       let typed = false;
@@ -234,6 +234,10 @@ describe("真实入口(子进程)", () => {
     const restored = restoreSessionSetup(events, {});
     expect(restored.missing).toEqual([]);
     expect(restored.setup.values).toMatchObject({ model: "fake/m", effort: "low" });
+    expect(restored.setup.values.checkUpdates).toBeUndefined();
+    expect(withCurrentDisplay(restored.setup.values, { checkUpdates: false }).checkUpdates).toBe(
+      false,
+    );
     expect(restored.setup.tools).toContain("read");
 
     const bad = await run(RUN, ["你好", "--effort", "ultra"], {

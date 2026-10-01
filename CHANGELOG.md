@@ -5,6 +5,12 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-30
+
+### Added
+
+- Check for a newer stable GitHub release asynchronously after TUI startup. Show a manual update command without changing input or model context. Add `checkUpdates` to saved settings and presets, startup flags, and `/help update`. Limit the check to three seconds; failed checks leave normal operation unchanged.
+
 ## [0.1.0] - 2026-09-30
 
 ### Changed

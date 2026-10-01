@@ -2,13 +2,16 @@
 import { ProcessTerminal } from "@earendil-works/pi-tui";
 import { bootstrap, DEFAULT_CONFIG_PATH, parseCommonArgs, USAGE } from "./bootstrap.js";
 import { startTuiSession } from "./tui-session.js";
+import { checkForUpdate, UPDATE_COMMAND } from "./update-check.js";
 
 let controller: Awaited<ReturnType<typeof startTuiSession>> | undefined;
 let terminal: ProcessTerminal | undefined;
 let exitCode = 0;
 let fatalDetail: string | undefined;
+const updateCheck = new AbortController();
 const detailOf = (error: unknown) => (error as Error)?.stack ?? String(error);
 const exit = () => {
+  updateCheck.abort();
   if (fatalDetail) {
     console.error(`\n${fatalDetail}`);
     if (controller) console.error(`session log: ${controller.file()}`);
@@ -16,6 +19,7 @@ const exit = () => {
   process.exit(exitCode);
 };
 const emergency = (error: unknown) => {
+  updateCheck.abort();
   const errors = [`Shutdown failed: ${detailOf(error)}`];
   const attempt = (label: string, action: () => void) => {
     try {
@@ -40,6 +44,7 @@ const emergency = (error: unknown) => {
   exit();
 };
 const crash = (kind: string) => (error: unknown) => {
+  updateCheck.abort();
   exitCode = 70;
   const detail = `${kind}: ${detailOf(error)}`;
   if (fatalDetail) {
@@ -77,6 +82,16 @@ try {
     },
     onExit: exit,
   });
+  if (args.checkUpdates ?? true) {
+    void checkForUpdate({ signal: updateCheck.signal }).then((release) => {
+      if (release && !updateCheck.signal.aborted)
+        controller
+          ?.app()
+          .note(
+            `Update available · ${release.current} → ${release.latest}\nExit Clari, then run:\n${UPDATE_COMMAND}\n/settings checkUpdates to configure · /help update for instructions`,
+          );
+    });
+  }
 } catch (error) {
   console.error((error as Error).message);
   process.exit(2);

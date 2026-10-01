@@ -67,6 +67,7 @@ describe("开关登记表", () => {
       execution: "parallel",
       steering: "turn",
       notify: "off",
+      checkUpdates: false,
       effort: "high",
       model: "p/m",
     };
@@ -110,6 +111,7 @@ describe("开关登记表", () => {
       execution: args.execution,
       steering: args.steering,
       notify: args.notify,
+      checkUpdates: args.checkUpdates,
       effort: args.effort,
       model: args.model,
     };
@@ -118,6 +120,11 @@ describe("开关登记表", () => {
       applyPreset(parseCommonArgs(["--hide-cost-estimate"]), config({ showCostEstimate: true }))
         .showCostEstimate,
     ).toBe(false);
+    expect(
+      applyPreset(parseCommonArgs(["--no-check-updates"]), config({ checkUpdates: true }))
+        .checkUpdates,
+    ).toBe(false);
+    expect(parseCommonArgs(["--check-updates"]).checkUpdates).toBe(true);
   });
 
   it("按路径读写:写 undefined 删项,空对象一并删;不改原对象", () => {

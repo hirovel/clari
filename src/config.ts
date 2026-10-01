@@ -160,6 +160,8 @@ export type Preset = {
   screen?: "alt" | "main";
   /** 桌面通知:unfocused(缺省,只在终端失焦时)| always | off。回合结束与等审批时发。 */
   notify?: "unfocused" | "always" | "off";
+  /** TUI 启动后异步检查新版,仅提示,不自动安装。 */
+  checkUpdates?: boolean;
   /** 扩展模块路径列表。 */
   extensions?: string[];
   /** 切换会话时重新连接的 MCP 服务器名;其它正常连接默认复用。 */

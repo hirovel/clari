@@ -51,6 +51,7 @@ export type CommonArgs = {
   screen?: "alt" | "main";
   /** 桌面通知(--notify / 配置 notify)。 */
   notify?: "unfocused" | "always" | "off";
+  checkUpdates?: boolean;
   /** 恢复指定会话文件。 */
   resume?: string;
   /** 恢复最近一次会话。 */
@@ -231,6 +232,12 @@ export function parseCommonArgs(argv: string[]): CommonArgs {
       case "--hide-cost-estimate":
         out.showCostEstimate = false;
         break;
+      case "--check-updates":
+        out.checkUpdates = true;
+        break;
+      case "--no-check-updates":
+        out.checkUpdates = false;
+        break;
       case "--screen": {
         const v = argv[++i];
         if (v !== "alt" && v !== "main") throw new Error("--screen takes alt or main");
@@ -392,6 +399,7 @@ Options
   --show-cost-estimate           show a token-based estimate, not the provider bill (default: off)
   --screen alt|main              alt (default): fixed header and status, own scrolling, mouse, search; main keeps the terminal scrollback
   --notify unfocused|always|off  desktop notification when a turn ends or approval is needed (default: only while the terminal is unfocused)
+  --check-updates | --no-check-updates  check for a newer release at TUI startup (default: on); never installs automatically
   --json                         one-shot mode: print a structured result
   --events                       one-shot mode: write every event to stdout as a JSON line
   -h, --help
@@ -470,6 +478,8 @@ export function applyPreset(args: CommonArgs, config: KernelConfig): CommonArgs 
       out.showCostEstimate = layer.showCostEstimate;
     if (out.screen === undefined && layer.screen !== undefined) out.screen = layer.screen;
     if (out.notify === undefined && layer.notify !== undefined) out.notify = layer.notify;
+    if (out.checkUpdates === undefined && layer.checkUpdates !== undefined)
+      out.checkUpdates = layer.checkUpdates;
     if (out.toolPrompts === undefined && layer.toolPrompts) out.toolPrompts = layer.toolPrompts;
     if (out.approval === undefined && layer.approval) out.approval = layer.approval;
     if (out.systemPromptFile === undefined && layer.systemPromptFile)

@@ -44,6 +44,7 @@ import { Palette, type PaletteItem } from "./tui-palette.js";
 import { changeSetting, effectiveSetting, parseTyped } from "./tui-settings.js";
 import { slotCommand, slotsList } from "./tui-slots.js";
 import { openShortcutHelp } from "./tui-status.js";
+import { installedVersion, UPDATE_COMMAND } from "./update-check.js";
 
 export type Command = {
   name: string;
@@ -196,6 +197,7 @@ function helpText(ctx: TuiContext): string {
     "",
     c.soft("Commands") + c.faint("  a command with choices opens a list; ↑↓ Enter Esc"),
     ...COMMANDS.map((x) => row(`/${x.name}`, x.description)),
+    row("/help update", "installed version and manual update instructions"),
     ...(ctx.templates.length > 0 ? [c.soft("Templates")] : []),
     ...ctx.templates.map((t) => row(`/${t.name}`, t.description)),
     ...(ctx.skills.length > 0 ? [c.soft("Skills")] : []),
@@ -1663,7 +1665,11 @@ async function dispatch(ctx: TuiContext, text: string): Promise<void> {
   }
   switch (cmd) {
     case "help":
-      ctx.note(helpText(ctx));
+      ctx.note(
+        arg === "update"
+          ? `Clari ${installedVersion() ?? "(version unavailable)"}\nExit Clari, then update:\n${UPDATE_COMMAND}\nCheck at startup: /settings checkUpdates (saved defaults, next start).\nUpdates are never installed automatically. Your config and sessions stay outside the installation. For source checkouts, update the checkout instead.`
+          : helpText(ctx),
+      );
       break;
     case "quit":
       ctx.exit();

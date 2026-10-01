@@ -15,6 +15,7 @@ export const DISPLAY_KEYS = new Set([
   "showCostEstimate",
   "results",
   "notify",
+  "checkUpdates",
 ]);
 export const WORK_SETTINGS = SETTINGS.filter((def) => !DISPLAY_KEYS.has(def.key));
 export type SessionSetup = {

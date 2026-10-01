@@ -17,7 +17,7 @@ Configure each component in `/settings`.
 Install Clari:
 
 ```sh
-npm install -g https://github.com/hirovel/clari/releases/download/v0.1.0/clari.tgz
+npm install -g https://github.com/hirovel/clari/releases/download/v0.1.1/clari.tgz
 ```
 
 Requires Node.js 22.19+.
@@ -43,6 +43,8 @@ npm install -g https://github.com/hirovel/clari/releases/latest/download/clari.t
 ```
 
 To run from GitHub without a global installation, use `npx --yes github:hirovel/clari` (requires Git).
+
+Clari checks for updates after startup and shows a manual update command. Disable the check in saved defaults with `/settings checkUpdates`, or start with `--no-check-updates`. `/help update` shows update instructions.
 
 ## Using Clari
 

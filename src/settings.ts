@@ -428,6 +428,15 @@ export const SETTINGS: readonly SettingDef[] = [
   },
   // ---------- notifications ----------
   {
+    key: "checkUpdates",
+    group: "notifications",
+    type: "bool",
+    values: onOff,
+    note: "check for a newer release at startup; network request only, no automatic installation",
+    builtin: true,
+    scope: "next start",
+  },
+  {
     key: "notify",
     group: "notifications",
     type: "enum",

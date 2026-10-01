@@ -20,6 +20,7 @@ import {
   SNAPSHOT,
 } from "../cli/registry.js";
 import { type LoginDeps, LoginDialog } from "../cli/tui-login.js";
+import { checkForUpdate, installedVersion } from "../cli/update-check.js";
 import {
   addModel,
   CONFIG_TEMPLATE,
@@ -59,6 +60,65 @@ const DS: ProviderConfig = {
     { name: "deepseek-v4-flash", effortLevels: ["low", "high"] },
   ],
 };
+
+describe("启动版本检查", () => {
+  it("读取本机包版本,按语义版本比较;只返回可确认的新稳定版本", async () => {
+    expect(installedVersion()).toMatch(/^\d+\.\d+\.\d+$/);
+    const check = (data: unknown, currentVersion = "0.1.2") =>
+      checkForUpdate({
+        currentVersion,
+        fetchImpl: async () => Response.json(data),
+      });
+    expect(await check({ tag_name: "v0.1.10" })).toEqual({ current: "0.1.2", latest: "0.1.10" });
+    for (const data of [
+      { tag_name: "v0.1.2" },
+      { tag_name: "v0.1.1" },
+      { tag_name: "v0.2.0-beta.1" },
+      { tag_name: "v0.2.0", draft: true },
+      { tag_name: "v0.2.0", prerelease: true },
+      { tag_name: "not a version" },
+      null,
+    ])
+      expect(await check(data)).toBeUndefined();
+  });
+
+  it("网络失败、非成功响应、超时和主动取消均结束检查;不重试", async () => {
+    let calls = 0;
+    expect(
+      await checkForUpdate({
+        currentVersion: "0.1.0",
+        fetchImpl: async () => {
+          calls++;
+          throw new Error("offline");
+        },
+      }),
+    ).toBeUndefined();
+    expect(calls).toBe(1);
+    expect(
+      await checkForUpdate({
+        currentVersion: "0.1.0",
+        fetchImpl: async () => new Response("rate limited", { status: 429 }),
+      }),
+    ).toBeUndefined();
+    const waiting: typeof fetch = async (_url, init) =>
+      new Promise((_resolve, reject) => {
+        const signal = init?.signal;
+        if (signal?.aborted) reject(signal.reason);
+        else signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    expect(
+      await checkForUpdate({ currentVersion: "0.1.0", timeoutMs: 5, fetchImpl: waiting }),
+    ).toBeUndefined();
+    const abort = new AbortController();
+    const pending = checkForUpdate({
+      currentVersion: "0.1.0",
+      signal: abort.signal,
+      fetchImpl: waiting,
+    });
+    abort.abort();
+    expect(await pending).toBeUndefined();
+  });
+});
 
 describe("能力数据的顺序", () => {
   it("模型配置明写的压过登记簿;没写的项从登记簿取;登记簿也没有的回落到供应商级,再没有就假设", () => {

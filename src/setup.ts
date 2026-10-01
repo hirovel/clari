@@ -77,6 +77,7 @@ export const SETUP_SECTIONS: readonly SetupSection[] = [
       "results",
       "showCostEstimate",
       "notify",
+      "checkUpdates",
     ],
   },
   {
@@ -341,6 +342,13 @@ export const SETUP_GUIDE: Readonly<Record<string, Guide>> = {
       "Controls notifications when a turn ends or approval is needed. Delivery depends on your terminal.",
     reason:
       "Notify only while unfocused so Clari can call you back without interrupting active work.",
+  },
+  checkUpdates: {
+    title: "Update notifications",
+    effect:
+      "Checks the public release version once after startup. Shows a manual update command when newer; never installs automatically.",
+    reason:
+      "Keep updates visible without interrupting work. Turn off to avoid this network request. Applies at the next start.",
   },
 };
 
