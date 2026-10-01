@@ -14,15 +14,15 @@ Configure each component in `/settings`.
 
 ## Getting started
 
-Run Clari in your project directory without a global installation:
+Install Clari:
 
 ```sh
-npx --yes github:hirovel/clari
+npm install -g https://github.com/hirovel/clari/releases/download/v0.1.0/clari.tgz
 ```
 
-Requires Node.js 22.19+ and Git.
+Requires Node.js 22.19+.
 
-If Clari is already installed, start it with:
+Start it in your project directory:
 
 ```sh
 clari
@@ -34,7 +34,15 @@ Type a task and press Enter to send it. Esc interrupts the turn; `/quit` exits.
 
 Inside Clari, use `/help` for commands and keyboard shortcuts, and `/settings` for configuration.
 
-For startup options, run `clari --help`, or `npx --yes github:hirovel/clari --help` if using npx.
+Run `clari --help` for startup options.
+
+To update to the latest release, close Clari and run:
+
+```sh
+npm install -g https://github.com/hirovel/clari/releases/latest/download/clari.tgz
+```
+
+To run from GitHub without a global installation, use `npx --yes github:hirovel/clari` (requires Git).
 
 ## Using Clari
 

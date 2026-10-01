@@ -5,7 +5,11 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-30
+
 ### Changed
+
+- Distribute a prebuilt installation package through GitHub Releases. Document permanent installation, startup and manual updates in both READMEs. Add repository metadata and remove the npm publication block; keep updates outside the running agent.
 
 - Document `clari` as the startup command for installed copies. Distinguish terminal `--help` from in-app `/help` in both READMEs, and include the npx help command.
 

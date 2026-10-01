@@ -3,7 +3,11 @@
   "version": "0.1.0",
   "description": "A terminal coding agent with inspectable requests and configurable tools and context.",
   "license": "MIT",
-  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hirovel/clari.git"
+  },
+  "homepage": "https://github.com/hirovel/clari#readme",
   "type": "module",
   "bin": {
     "clari": "bin/clari.js"

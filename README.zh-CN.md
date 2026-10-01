@@ -14,15 +14,15 @@ Clari 是一个简洁、可配置的终端 AI agent。
 
 ## 开始使用
 
-在项目目录直接运行 Clari，无需全局安装：
+安装 Clari：
 
 ```sh
-npx --yes github:hirovel/clari
+npm install -g https://github.com/hirovel/clari/releases/download/v0.1.0/clari.tgz
 ```
 
-需要 Node.js 22.19+ 和 Git。
+需要 Node.js 22.19+。
 
-如果已安装 Clari，使用下面的命令启动：
+在项目目录启动：
 
 ```sh
 clari
@@ -34,7 +34,15 @@ clari
 
 进入 Clari 后，输入 `/help` 查看命令与快捷键，`/settings` 修改配置。
 
-启动参数使用 `clari --help` 查看；使用 npx 时运行 `npx --yes github:hirovel/clari --help`。
+运行 `clari --help` 查看启动参数。
+
+更新到最新发布版本，先退出 Clari，再运行：
+
+```sh
+npm install -g https://github.com/hirovel/clari/releases/latest/download/clari.tgz
+```
+
+无需全局安装时，可用 `npx --yes github:hirovel/clari` 从 GitHub 直接运行，需要 Git。
 
 ## 使用 Clari
 
