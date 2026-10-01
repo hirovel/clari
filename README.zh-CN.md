@@ -8,13 +8,13 @@ Clari 是一个简洁、可配置的终端 AI agent。
 
 ![Clari 组合设置：独立配置各个组件](assets/clari-setup.png)
 
-在 `/settings` 独立调整各个组件。预览由终端渲染器导出。
+在 `/settings` 独立调整各个组件。
 
 [English](README.md) · [更新记录](CHANGELOG.md)
 
 ## 开始使用
 
-在项目目录运行 Clari：
+在项目目录直接运行 Clari，无需全局安装：
 
 ```sh
 npx --yes github:hirovel/clari
@@ -22,9 +22,19 @@ npx --yes github:hirovel/clari
 
 需要 Node.js 22.19+ 和 Git。
 
-选择供应商，输入 API key，选择模型，然后给 Clari 一个任务。
+如果已安装 Clari，使用下面的命令启动：
 
-使用 `/help` 查看命令，`/settings` 修改配置。
+```sh
+clari
+```
+
+首次启动时，选择供应商，输入 API key，再选择模型。
+
+输入任务，按 Enter 发送。Esc 中断当前轮，`/quit` 退出。
+
+进入 Clari 后，输入 `/help` 查看命令与快捷键，`/settings` 修改配置。
+
+启动参数使用 `clari --help` 查看；使用 npx 时运行 `npx --yes github:hirovel/clari --help`。
 
 ## 使用 Clari
 

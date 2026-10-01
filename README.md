@@ -8,13 +8,13 @@ Clari is a minimal, configurable AI agent for the terminal.
 
 ![Clari setup: independently configurable components](assets/clari-setup.png)
 
-Configure each component in `/settings`. Preview exported from the terminal renderer.
+Configure each component in `/settings`.
 
 [中文](README.zh-CN.md) · [Changelog](CHANGELOG.md)
 
 ## Getting started
 
-Run Clari in your project directory:
+Run Clari in your project directory without a global installation:
 
 ```sh
 npx --yes github:hirovel/clari
@@ -22,9 +22,19 @@ npx --yes github:hirovel/clari
 
 Requires Node.js 22.19+ and Git.
 
-Choose a provider, enter your API key and select a model. Then give Clari a task.
+If Clari is already installed, start it with:
 
-Use `/help` for commands and `/settings` for configuration.
+```sh
+clari
+```
+
+On first launch, choose a provider, enter your API key and select a model.
+
+Type a task and press Enter to send it. Esc interrupts the turn; `/quit` exits.
+
+Inside Clari, use `/help` for commands and keyboard shortcuts, and `/settings` for configuration.
+
+For startup options, run `clari --help`, or `npx --yes github:hirovel/clari --help` if using npx.
 
 ## Using Clari
 

@@ -7,6 +7,10 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ### Changed
 
+- Document `clari` as the startup command for installed copies. Distinguish terminal `--help` from in-app `/help` in both READMEs, and include the npx help command.
+
+- Remove the renderer-export caption from both READMEs. State the first-launch login steps, Enter to send, Esc to interrupt and `/quit` to exit.
+
 - Adopt the MIT license. Introduce API inspection, context editing and configurable presets with three highlights in both READMEs. Add concise usage sections for expanding recorded content, editing context, configuring components and resuming tasks. Replace acceptance stories and old screenshots with one setup preview exported from the terminal renderer.
 
 - Show each setup component with its name and key values, separated by thin rules. Keep summaries scoped to the current session or saved defaults. Fit navigation to rendered row heights, page by visible items and wrap scope hints on narrow terminals. Preserve existing setting actions and draft input.
