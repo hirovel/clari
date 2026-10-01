@@ -69,14 +69,13 @@ describe("启动版本检查", () => {
         currentVersion,
         fetchImpl: async () => Response.json(data),
       });
-    expect(await check({ tag_name: "v0.1.10" })).toEqual({ current: "0.1.2", latest: "0.1.10" });
+    expect(await check({ version: "0.1.10" })).toEqual({ current: "0.1.2", latest: "0.1.10" });
     for (const data of [
-      { tag_name: "v0.1.2" },
-      { tag_name: "v0.1.1" },
-      { tag_name: "v0.2.0-beta.1" },
-      { tag_name: "v0.2.0", draft: true },
-      { tag_name: "v0.2.0", prerelease: true },
-      { tag_name: "not a version" },
+      { version: "0.1.2" },
+      { version: "0.1.1" },
+      { version: "0.2.0-beta.1" },
+      { version: "not a version" },
+      {},
       null,
     ])
       expect(await check(data)).toBeUndefined();

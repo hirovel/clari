@@ -17,7 +17,7 @@ Clari 是一个简洁、可配置的终端 AI agent。
 安装 Clari：
 
 ```sh
-npm install -g https://github.com/hirovel/clari/releases/download/v0.1.1/clari.tgz
+npm install -g clari@latest
 ```
 
 需要 Node.js 22.19+。
@@ -39,10 +39,12 @@ clari
 更新到最新发布版本，先退出 Clari，再运行：
 
 ```sh
-npm install -g https://github.com/hirovel/clari/releases/latest/download/clari.tgz
+npm install -g clari@latest
 ```
 
-无需全局安装时，可用 `npx --yes github:hirovel/clari` 从 GitHub 直接运行，需要 Git。
+无需全局安装时，可用 `npx clari@latest`。
+
+[GitHub Releases](https://github.com/hirovel/clari/releases) 也提供预构建包：`npm install -g https://github.com/hirovel/clari/releases/latest/download/clari.tgz`。
 
 Clari 启动后检查新版，显示手动更新命令。可在 `/settings checkUpdates` 的已保存默认值中关闭检查，或启动时加 `--no-check-updates`。`/help update` 查看更新说明。
 

@@ -2,9 +2,8 @@
 import { readFileSync } from "node:fs";
 import { gt, prerelease, valid } from "semver";
 
-const RELEASE_URL = "https://api.github.com/repos/hirovel/clari/releases/latest";
-export const UPDATE_COMMAND =
-  "npm install -g https://github.com/hirovel/clari/releases/latest/download/clari.tgz";
+const VERSION_URL = "https://registry.npmjs.org/clari/latest";
+export const UPDATE_COMMAND = "npm install -g clari@latest";
 
 export function installedVersion(): string | undefined {
   // 源码运行与 dist/cli 安装运行分别读取同一份包元数据。
@@ -32,17 +31,16 @@ export async function checkForUpdate(
   if (!current || options.signal?.aborted) return undefined;
   try {
     const timeout = AbortSignal.timeout(options.timeoutMs ?? 3000);
-    const response = await (options.fetchImpl ?? fetch)(RELEASE_URL, {
-      headers: { Accept: "application/vnd.github+json", "User-Agent": `clari/${current}` },
+    const response = await (options.fetchImpl ?? fetch)(VERSION_URL, {
+      headers: { Accept: "application/json", "User-Agent": `clari/${current}` },
       signal: options.signal ? AbortSignal.any([timeout, options.signal]) : timeout,
     });
     if (!response.ok) return undefined;
     const data: unknown = await response.json();
     if (!data || typeof data !== "object") return undefined;
-    const release = data as { tag_name?: unknown; draft?: unknown; prerelease?: unknown };
-    if (release.draft || release.prerelease || typeof release.tag_name !== "string")
-      return undefined;
-    const latest = valid(release.tag_name);
+    const release = data as { version?: unknown };
+    if (typeof release.version !== "string") return undefined;
+    const latest = valid(release.version);
     if (latest && !prerelease(latest) && gt(latest, current) && !options.signal?.aborted)
       return { current, latest };
   } catch {

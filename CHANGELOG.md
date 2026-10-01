@@ -5,6 +5,12 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-10-01
+
+### Changed
+
+- Publish Clari to the npm registry. Use `npm install -g clari@latest` for installation and updates, and `npx clari@latest` for temporary use. Check the npm `latest` version at startup so the update notice matches the installation source. Keep the prebuilt GitHub Release package as an alternative.
+
 ## [0.1.1] - 2026-09-30
 
 ### Added
