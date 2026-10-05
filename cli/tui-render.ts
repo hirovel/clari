@@ -20,7 +20,8 @@ import {
   userLine,
 } from "./cards.js";
 import { renderExtEvent } from "./ext-events.js";
-import { fmtMs, fmtTok, messagesFor } from "./inspector.js";
+import { fmtMs, fmtTok } from "./inspector-format.js";
+import { messagesFor } from "./inspector-requests.js";
 import { PROMPT_MARK } from "./terminal-extras.js";
 import { c, G, markdownTheme } from "./theme.js";
 import { Block } from "./tui-block.js";
@@ -33,7 +34,7 @@ import {
   type TuiContext,
 } from "./tui-context.js";
 import { formatArgs, toolCallDetail } from "./tui-format.js";
-import { autoFold, beginStep } from "./tui-steps.js";
+import { autoFold, beginStep, refreshStep } from "./tui-steps.js";
 
 /** 散文的最大行宽(列):再宽的屏幕上一行也不超过它,读起来不累;代码与工具输出不受它管。 */
 export const PROSE_WIDTH = 96;
@@ -404,7 +405,7 @@ function renderRequest(
   req.lastIndex = index;
   req.providersAt.set(req.lastIndex, agent.provider);
   // 账簿:这次请求是新的一步;更早的步按 foldSteps 折起。脉搏记下这次的占用比。
-  beginStep(ctx, req.count, req.lastIndex);
+  const step = beginStep(ctx, req.count, req.lastIndex);
   autoFold(ctx);
   const threshold = e.threshold ?? ctx.threshold();
   ctx.view.pulse.push(threshold > 0 ? e.estimatedTokens / threshold : 0);
@@ -413,13 +414,7 @@ function renderRequest(
   // 步与步之间一个空行;用户消息前面已经有了。
   if (!ctx.view.afterUser) transcript.addChild(new Spacer(1));
   ctx.view.afterUser = false;
-  transcript.addChild(
-    new Block(
-      c.faint(
-        `── Request #${req.count} · ${e.model}${e.reason === "compaction" ? " · compaction" : ""}`,
-      ),
-    ),
-  );
+  transcript.addChild(step.summary);
   // 来历:正常步的正文就是之前事件的投影,每条都能对回事件号;摘要请求的正文由策略记的 body 重建,没有来历。
   let messages: Message[];
   let provenance: Composition["provenance"] | undefined;
@@ -427,9 +422,6 @@ function renderRequest(
     messages = messagesFor(log.events, {
       index: req.lastIndex,
       request: e,
-      n: req.count,
-      retries: [],
-      before: [],
     });
   } else {
     const comp = composeContext(log.events, req.lastIndex);
@@ -590,5 +582,11 @@ export function render(ctx: TuiContext, e: AgentEvent, index: number): void {
       );
       break;
   }
+  const step = ctx.steps.at(-1);
+  if (
+    step?.folded &&
+    (e.type === "assistant/message" || e.type === "request/error" || e.type === "compaction")
+  )
+    refreshStep(ctx, step);
   ctx.updateStatus();
 }

@@ -332,7 +332,8 @@ describe("界面里的技能", () => {
     expect(restoreSessionSetup(log.events, {}).setup.values.prompt?.skills?.include).toEqual([
       "review",
     ]);
-    app.dialogInput("i");
+    app.dialogInput("\x1b[C");
+    app.dialogInput("\r");
     expect(menu()).toContain("Ship a release");
     app.dialogInput("\x1b");
     app.dialogInput("\x1b[H");
@@ -387,7 +388,8 @@ describe("界面里的技能", () => {
     app.dialogInput("\r");
     await tick();
     expect(skills.map((s) => s.name)).toEqual(["review"]);
-    app.dialogInput("i");
+    app.dialogInput("\x1b[C");
+    app.dialogInput("\r");
     expect(menu()).toContain(custom.slice(0, 25));
     app.dialogInput("\x1b");
     app.dialogInput("\r"); // 禁用自定义来源。
@@ -506,7 +508,8 @@ describe("界面里的技能", () => {
     asked.push(plain(app.approvalLines().join("\n")));
     expect(asked[0]).toContain("other");
     expect(asked[0]).not.toContain("bash");
-    term.feed("n");
+    term.feed("4");
+    term.feed("\r");
     await run;
     const results = log.events.filter((e) => e.type === "tool/result");
     expect(results.find((r) => r.name === "bash")).toMatchObject({

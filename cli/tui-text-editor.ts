@@ -1,7 +1,15 @@
 // 会话文本共用现有编辑组件。编辑期间不改事实,明确应用后才交给调用方。
-import { type Component, Editor, Key, matchesKey, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import {
+  type Component,
+  CURSOR_MARKER,
+  Editor,
+  Key,
+  matchesKey,
+  truncateToWidth,
+  wrapTextWithAnsi,
+} from "@earendil-works/pi-tui";
 import { readClipboardInput } from "./clipboard-input.js";
-import { c, editorTheme } from "./theme.js";
+import { c, editorTheme, G, selectedText } from "./theme.js";
 import type { TuiContext } from "./tui-context.js";
 import { cleanPasteText } from "./tui-format.js";
 
@@ -43,27 +51,70 @@ export class TextEditor implements Component {
   render(width: number): string[] {
     const wrap = (text: string) => wrapTextWithAnsi(text, Math.max(1, width));
     const button = (label: string, index: number) =>
-      this.action === index ? c.inverse(` ${label} `) : c.soft(`[${label}]`);
-    return [
+      this.action === index ? selectedText(`${G.cursor} ${label}`) : c.soft(`[${label}]`);
+    // 原生编辑器的光标标记提供实际换行后的位置;动作焦点下只用于布局,不交给终端。
+    const focused = this.editor.focused;
+    this.editor.focused = true;
+    let editor: string[];
+    try {
+      editor = this.editor.render(width);
+    } finally {
+      this.editor.focused = focused;
+    }
+    const cursor = editor.findIndex((line) => line.includes(CURSOR_MARKER));
+    if (!focused)
+      for (let i = 0; i < editor.length; i++)
+        editor[i] = (editor[i] ?? "").replace(CURSOR_MARKER, "");
+    const buttons = (waiting = "Apply unavailable") =>
+      wrap(`${button(this.reading ? waiting : "Apply", 1)}  ${button("Cancel", 2)}`);
+    const actionHint =
+      this.action === 0
+        ? "Enter newline · Tab actions · Esc cancel"
+        : this.action === 1 && this.reading
+          ? "Tab next · Esc cancel"
+          : `Enter ${this.action === 1 ? "apply" : "cancel"} · Tab next · Esc cancel`;
+    const lines = [
       ...wrap(c.bold(this.title)),
       ...wrap(c.soft(this.note)),
       ...(this.original !== this.initial
         ? wrap(c.faint("Edited text uses LF and four spaces per tab."))
         : []),
-      ...this.editor.render(width),
-      ...wrap(`${button(this.reading ? "Apply unavailable" : "Apply", 1)}  ${button("Cancel", 2)}`),
-      ...wrap(
-        c.faint(
-          this.action === 0
-            ? "Enter newline · Tab actions · Esc cancel"
-            : this.action === 1 && this.reading
-              ? "Tab next · Esc cancel"
-              : `Enter ${this.action === 1 ? "apply" : "cancel"} · Tab next · Esc cancel`,
-        ),
-      ),
+      ...editor,
+      ...buttons(),
+      ...wrap(c.faint(actionHint)),
       ...wrap(c.faint("Ctrl+V / Alt+V paste in text")),
       ...(this.reading ? wrap(c.soft("Reading clipboard… You can keep editing or cancel.")) : []),
       ...(this.error ? wrap(c.zhu(this.error)) : []),
+    ];
+    const rows = this.ctx.tui.terminal.rows;
+    if (lines.length <= rows) return lines;
+
+    const title = truncateToWidth(c.bold(this.title), width);
+    const controls = [
+      ...buttons("Apply waiting"),
+      ...wrap(c.faint(this.action === 0 ? "Enter newline · Tab · Esc cancel" : actionHint)),
+    ];
+    const noticeRows = this.error || this.reading ? 1 : 0;
+    const room = Math.max(1, rows - 1 - controls.length - noticeRows);
+    // 保留光标所在行附近的原生渲染,不截断编辑文本或改变编辑器滚动状态。
+    const start = Math.max(0, Math.min(cursor - room + 1, editor.length - room));
+    const body = editor.slice(start, start + room);
+    const extra = Math.max(0, rows - 1 - body.length - controls.length);
+    const notice = this.error
+      ? c.zhu(this.error)
+      : this.reading
+        ? c.soft("Reading clipboard… Apply waits.")
+        : c.soft(
+            this.original !== this.initial
+              ? "Edited text uses LF and four spaces per tab."
+              : this.note,
+          );
+    return [
+      title,
+      ...(extra ? [truncateToWidth(notice, width)] : []),
+      ...body,
+      ...controls,
+      ...(extra > 1 ? [truncateToWidth(c.faint("Ctrl+V / Alt+V paste in text"), width)] : []),
     ];
   }
 

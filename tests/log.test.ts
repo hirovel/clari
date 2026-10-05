@@ -172,7 +172,6 @@ describe("EventLog", () => {
         readRequestRecording(bufferedFork.file, forkEvents, request)?.outputs?.[0],
       ).toMatchObject({
         original: "original text that the model does not receive",
-        model: "short result",
       });
       expect(store.error).toBeTruthy();
       rmSync(store.directory);
@@ -186,8 +185,10 @@ describe("EventLog", () => {
       const saved = readRequestRecording(file, loaded.events, index);
       expect(saved?.outputs?.[0]).toMatchObject({
         original: "original text that the model does not receive",
-        model: "short result",
       });
+      expect(
+        deriveMessages(loaded.events).find((message) => message.role === "tool")?.content,
+      ).toBe("short result");
       const fork = forkSession(loaded.events, loaded.events.length, dir, new Recording(file));
       rmSync(store.directory, { recursive: true });
       expect(

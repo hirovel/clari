@@ -23,7 +23,7 @@ describe("Palette 组件", () => {
     const p = new Palette(items, () => closed++);
     let out = plain(p.render());
     expect(out).toContain("Command palette");
-    expect(out).toContain("▸ /model");
+    expect(out).toContain("› /model");
     expect(out).toContain("cmd");
     p.handleInput("d");
     p.handleInput("s");
@@ -41,7 +41,7 @@ describe("Palette 组件", () => {
     p.handleInput("\x1b[127u");
     expect(plain(p.render())).not.toContain("no match");
     p.handleInput("\x1bOA"); // 应用光标模式的方向键也要从第 0 项上翻到末项。
-    expect(plain(p.render())).toContain("▸ deepseek/deepseek-v4-pro");
+    expect(plain(p.render())).toContain("› deepseek/deepseek-v4-pro");
     p.handleInput("\r");
     expect(ran).toEqual(["ds"]);
     expect(closed).toBe(1);

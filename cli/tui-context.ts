@@ -53,8 +53,7 @@ export type StepView = {
   n: number;
   requestIndex: number;
   block: Container;
-  /** 折起时保存的原节点;展开就放回去。 */
-  nodes: Component[];
+  /** 展开时是请求标题,折叠时是摘要;复用同一节点,不另存标题状态。 */
   summary: Block;
   folded: boolean;
   /** 用户手动展开过:之后不再自动折。 */
@@ -122,7 +121,7 @@ export type RequestState = {
 export type ApprovalState = {
   cfg: ApprovalConfig;
   mode: "all" | "ask" | "policy";
-  /** a 键放行的工具,本会话内不再问。 */
+  /** 明确选择本会话放行的工具,本会话内不再问。 */
   alwaysAllow: Set<string>;
   /** 用户触发的技能声明的 allowed-tools:这一 turn 内免审批。 */
   skillAllow: Set<string>;

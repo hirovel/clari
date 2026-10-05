@@ -221,6 +221,9 @@ describe("Agent setup", () => {
       expect(menu()).toContain(name);
     expect(menu()).toContain("p/m · effort Model default");
     expect(menu()).toContain("Skills Manual · memory Off");
+    const unchanged = menu();
+    for (const key of ["e", "E", "i", "I", "r", "R"]) app.dialogInput(key);
+    expect(menu()).toBe(unchanged);
     // 首页摘要和详情共用作用域,切到保存值不能继续显示运行值。
     app.dialogInput(TAB);
     expect(menu()).toContain("Configured default · effort Model default");
@@ -230,7 +233,8 @@ describe("Agent setup", () => {
     app.dialogInput("foldLines");
     expect(menu()).toContain("Output preview lines");
     app.dialogInput(ENTER);
-    app.dialogInput("e");
+    app.dialogInput("\x1b[C");
+    app.dialogInput(ENTER);
     app.dialogInput("\x15");
     app.dialogInput("9");
     app.dialogInput(ENTER);
@@ -298,7 +302,8 @@ describe("Agent setup", () => {
     const { app, menu } = boot();
     await app.command("/settings planReminder");
     app.dialogInput(ENTER);
-    app.dialogInput("e");
+    app.dialogInput("\x1b[C");
+    app.dialogInput(ENTER);
     app.dialogInput("\x15");
     app.dialogInput("many");
     app.dialogInput(ENTER);
@@ -309,11 +314,13 @@ describe("Agent setup", () => {
     app.dialogInput(ENTER);
     await tick();
     expect(app.agent.planReminder).toBe(12);
-    app.dialogInput("r");
+    app.dialogInput("\x1b[D");
+    app.dialogInput(ENTER);
     expect(menu()).toContain("Restore recommended value");
     app.dialogInput(ESC);
     expect(app.agent.planReminder).toBe(12);
-    app.dialogInput("r");
+    app.dialogInput("\x1b[D");
+    app.dialogInput(ENTER);
     app.dialogInput(ENTER);
     await tick();
     expect(app.agent.planReminder).toBe(0);
@@ -363,7 +370,7 @@ describe("Agent setup", () => {
   });
 
   it("持久化失败有恢复说明,保留编辑状态,不关闭工作台", async () => {
-    const { app, menu } = boot({
+    const { app, menu, doc } = boot({
       settings: {
         listModels: () => [],
         switchModel: () => {
@@ -385,6 +392,11 @@ describe("Agent setup", () => {
     expect(menu()).toContain("disk full");
     expect(menu()).toContain("Fold tool output");
     expect(menu()).toContain("Enter apply");
+    app.dialogInput(ESC);
+    await app.command("/settings execution parallel");
+    expect(app.agent.slots.execution).toBe("parallel");
+    expect(app.setup().values.execution).toBe("parallel");
+    expect(doc()).toContain("changed for this session, but was not saved: disk full");
     app.stop();
   });
 
@@ -423,15 +435,15 @@ describe("Agent setup", () => {
     // 分隔线不占导航项;翻页、跳到末尾及返回仍指向正确的模块或操作。
     expect(menu()).toContain("1–2 of 9");
     app.dialogInput("\x1b[6~");
-    expect(menu()).toMatch(/▸\s+Tools & delegation/);
+    expect(menu()).toMatch(/›\s+Tools & delegation/);
     app.dialogInput(ENTER);
     expect(menu()).toContain("Agent setup / Tools & delegation");
     app.dialogInput(ESC);
-    expect(menu()).toMatch(/▸\s+Tools & delegation/);
+    expect(menu()).toMatch(/›\s+Tools & delegation/);
     app.dialogInput("\x1b[5~");
-    expect(menu()).toMatch(/▸\s+Model/);
+    expect(menu()).toMatch(/›\s+Model/);
     app.dialogInput("\x1b[F");
-    expect(menu()).toMatch(/▸\s+Load preset/);
+    expect(menu()).toMatch(/›\s+Load preset/);
     expect(app.dialogLines().length).toBeLessThanOrEqual(22);
     app.dialogInput(ENTER);
     expect(menu()).toContain("Recommended");
@@ -441,7 +453,7 @@ describe("Agent setup", () => {
     await app.command("/settings tools.disable");
     app.dialogInput(ENTER);
     app.dialogInput("\x1b[F");
-    expect(menu()).toMatch(/▸\s+tool_39/);
+    expect(menu()).toMatch(/›\s+tool_39/);
     expect(menu()).toContain("of 40");
     expect(app.dialogLines().length).toBeLessThanOrEqual(22);
     expect(app.dialogLines().every((line) => stripAnsi(line).length <= 60)).toBe(true);
@@ -460,17 +472,19 @@ describe("Agent setup", () => {
     expect(menu()).toContain("No model call.");
     expect(menu()).toContain("Current: Model summary");
     expect(menu()).toContain("Saved default: Model summary");
-    app.dialogInput("i");
+    app.dialogInput("\x1b[D");
+    app.dialogInput(ENTER);
     expect(menu()).toContain("Clear tool results");
     expect(menu()).toContain("No model call.");
     app.dialogInput("\x1b[6~");
     app.dialogInput(ESC);
-    expect(menu()).toMatch(/▸\s+Clear tool results/);
+    expect(menu()).toMatch(/›\s+Clear tool results/);
     expect(menu()).toContain("Current: Model summary");
     expect(saved).toEqual([]);
     app.dialogInput(ENTER);
     await tick();
-    app.dialogInput("i");
+    app.dialogInput("\x1b[C");
+    app.dialogInput(ENTER);
     expect(menu()).toContain("Current: Clear tool results (clear)");
     expect(menu()).toContain("Saved default: Model summary (llm)");
     await app.command("/settings prompt.skills.sources");
@@ -488,7 +502,7 @@ describe("Agent setup", () => {
       .poll(async () => (await term.screen()).slice(-24).join("\n"))
       .toContain("visible-tail");
     app.dialogInput(ESC);
-    expect(menu()).toMatch(/▸\s+Add directory/);
+    expect(menu()).toMatch(/›\s+Add directory/);
     expect(app.draft()).toBe("unrelated draft");
     expect(saved).toEqual([]);
     app.stop();
@@ -509,6 +523,20 @@ describe("Agent setup", () => {
     await app.command("/settings nope 1");
     expect(doc()).toContain("unknown setting nope");
     expect(log.events.some((e) => e.type === "ext/event" && e.source === "setup")).toBe(true);
+    const savedBeforeFailure = [...saved];
+    const eventsBeforeFailure = log.events.length;
+    await app.command("/settings model p/unavailable");
+    await app.command("/settings compaction ./missing-setting-strategy.mjs");
+    expect(saved).toEqual(savedBeforeFailure);
+    expect(app.agent.provider.model).toBe("m");
+    expect(app.setup().values.compaction).toBe("llm");
+    expect(log.events.slice(eventsBeforeFailure).some((e) => e.type === "ext/event")).toBe(false);
+    await app.command("/settings execution parallel");
+    expect(app.agent.slots.execution).toBe("parallel");
+    expect(saved.at(-1)).toEqual(["execution", "parallel"]);
+    await app.command("/set execution sequential");
+    expect(app.agent.slots.execution).toBe("sequential");
+    expect(saved.at(-1)).toEqual(["execution", "parallel"]);
     await app.command('/settings prompt.skills.sources {"./custom  skills":"on"}');
     expect(saved.at(-1)).toEqual(["prompt.skills.sources", { "./custom  skills": "on" }]);
     app.stop();

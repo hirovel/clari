@@ -392,6 +392,7 @@ describe("setup data and persistence", () => {
     const dir = mkdtempSync(join(tmpdir(), "clari-exit-"));
     try {
       for (const mode of [
+        "approval",
         "wait",
         "force",
         "cleanup",
@@ -427,7 +428,7 @@ describe("setup data and persistence", () => {
           defaults: {
             prompt: { sections: [] },
 
-            approve: "all",
+            approve: mode === "approval" ? "ask" : "all",
             extensions: [extension],
           },
         };
@@ -473,6 +474,37 @@ describe("setup data and persistence", () => {
         });
         const running = host.app().submit("Do the work.");
         try {
+          if (mode === "approval") {
+            await vi.waitFor(() => expect(host.app().approvalLines().length).toBeGreaterThan(0));
+            host.app().setDraft("Keep this draft.");
+            void host.app().agent.prompt("Keep this pending message.");
+            term.feed("3");
+            term.feed("\r");
+            term.feed("Keep this reason until I decide.");
+            term.feed("\x03");
+            term.feed("\r"); // 默认继续,不把退出确认的 Enter 当成审批提交。
+            expect(host.app().approvalLines().join("\n")).toContain("Keep this reason");
+            expect(control.started).toBe(false);
+            expect(exits).toBe(0);
+            term.feed("\x03");
+            term.feed("\x1b[B");
+            term.feed("\r");
+            await vi.waitFor(() => expect(exits).toBe(1));
+            await running;
+            expect(control.started).toBe(false);
+            expect(host.app().approvalLines()).toEqual([]);
+            const events = EventLog.load(host.file()).events;
+            expect(events.filter((e) => e.type === "tool/result")).toMatchObject([
+              { content: "Interrupted by the user; not executed.", isError: true },
+            ]);
+            expect(events.some((e) => e.type === "tool/unresolved")).toBe(false);
+            const inputs = new SessionInputs(host.file(), true).read(events);
+            expect(inputs?.draft.text).toBe("Keep this draft.");
+            expect(inputs?.pending).toMatchObject([
+              { text: "Keep this pending message.", paused: true },
+            ]);
+            continue;
+          }
           await vi.waitFor(() => expect(control.started).toBe(true));
           void host.app().agent.prompt("Keep this pending message.");
           host.app().setDraft("Keep this draft.");
@@ -486,7 +518,9 @@ describe("setup data and persistence", () => {
             mkdirSync(snapshot);
             void host.close("uncaught exception: Fixture fatal error");
             await vi.waitFor(() =>
-              expect(host.app().dialogLines().join("\n")).toContain("r retry saving"),
+              expect(host.app().dialogLines().join("\n")).toContain(
+                "Retry saving and continue shutdown",
+              ),
             );
             expect(host.app().agent.pending[0]?.paused).toBe(true);
             await expect(host.app().submit("must remain stopped")).rejects.toThrow("not submitted");
@@ -494,7 +528,8 @@ describe("setup data and persistence", () => {
             await host.switchSession({ kind: "new" });
             expect(host.file()).toBe(file);
             rmdirSync(snapshot);
-            term.feed("r");
+            term.feed("\x1b[B");
+            term.feed("\r");
           } else {
             term.feed("\x03");
             expect(host.app().dialogLines().join("\n")).toContain("Quit Clari");
@@ -537,11 +572,13 @@ describe("setup data and persistence", () => {
             rmSync(snapshot);
             mkdirSync(snapshot);
             host.app().setDraft("Preserve the latest draft too.");
-            term.feed("f");
+            term.feed("\x1b[F");
+            term.feed("\r");
             expect(exits).toBe(0);
             expect(host.app().dialogLines().join("\n")).toContain("Cannot exit:");
             rmdirSync(snapshot);
-            term.feed("f");
+            term.feed("\x1b[F");
+            term.feed("\r");
             await closing;
             expect(exits).toBe(1);
             expect(saved()?.draft.text).toBe("Preserve the latest draft too.");
@@ -560,12 +597,15 @@ describe("setup data and persistence", () => {
             control.finishTool();
             if (mode === "record-save") {
               await vi.waitFor(() =>
-                expect(host.app().dialogLines().join("\n")).toContain("r retry saving"),
+                expect(host.app().dialogLines().join("\n")).toContain(
+                  "Retry saving and continue shutdown",
+                ),
               );
               expect(exits).toBe(0);
               rmdirSync(host.file());
               renameSync(`${host.file()}.hold`, host.file());
-              term.feed("r");
+              term.feed("\x1b[B");
+              term.feed("\r");
             }
             if (mode === "cleanup" || mode === "cleanup-error") {
               await vi.waitFor(() => expect(control.cleaning).toBe(true));
@@ -575,7 +615,8 @@ describe("setup data and persistence", () => {
                 await vi.waitFor(() =>
                   expect(host.app().dialogLines().join("\n")).toContain("Fixture cleanup rejected"),
                 );
-              term.feed("f");
+              term.feed("\x1b[F");
+              term.feed("\r");
             }
             await closing;
             await vi.waitFor(() => expect(exits).toBe(1));
@@ -589,6 +630,7 @@ describe("setup data and persistence", () => {
             mode === "wait" || mode === "fatal-save" || mode === "record-save" ? 0 : 1,
           );
         } finally {
+          host.app().approvalInput("\x1b");
           control.finishTool();
           control.finishCleanup();
           await running;
@@ -714,7 +756,10 @@ describe("setup data and persistence", () => {
         expect(requests).toBe(beforeRestore);
         expect(restarted.app().agent.pending.every((p) => p.paused)).toBe(true);
         await restarted.app().command("/session inputs");
-        restarted.app().dialogLines();
+        const pending = restarted.app().agent.pending;
+        for (const key of ["d", "c", "s"]) restarted.app().dialogInput(key);
+        expect(restarted.app().agent.pending).toEqual(pending);
+        restarted.app().dialogInput("\r");
         restarted.app().dialogInput("\r");
         restarted.app().dialogInput("\x15");
         restoredTerminal.feed("remove");
@@ -725,9 +770,13 @@ describe("setup data and persistence", () => {
         restarted.app().dialogInput("\r");
         expect(restarted.app().agent.pending[0]?.text).toBe("edited pending\n第二行");
         restarted.app().dialogInput("\x1b[B");
-        restarted.app().dialogInput("d");
+        restarted.app().dialogInput("\r");
+        restarted.app().dialogInput("2");
+        restarted.app().dialogInput("\r");
         expect(restarted.app().agent.queued).toBe(1);
-        restarted.app().dialogInput("c");
+        restarted.app().dialogInput("\r");
+        restarted.app().dialogInput("3");
+        restarted.app().dialogInput("\r");
         await restarted.app().agent.waitForIdle();
         expect(restarted.app().agent.queued).toBe(0);
         expect(
@@ -793,7 +842,8 @@ describe("setup data and persistence", () => {
       view.dialogInput("\x15");
       view.dialogInput("\x1b[200~cancel-this-change\x1b[201~");
       view.dialogInput("\x1b");
-      view.dialogInput("c");
+      view.dialogInput("\x1b[F");
+      view.dialogInput("\r");
       await restoring;
       expect(host.file()).toBe(legacyFile);
       expect(host.app().setup().values.planReminder).toBe(5);

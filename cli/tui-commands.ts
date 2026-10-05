@@ -4,6 +4,7 @@
 // (查看类在下半部分,编辑类在 tui-edit,槽类在 tui-slots,选单在 tui-menu)。
 import { existsSync, readFileSync } from "node:fs";
 import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
+import { Marked } from "marked";
 import type { DeliverAs } from "../src/agent.js";
 import type { ModelConfig } from "../src/config.js";
 import { contextBreakdown, estimateTokens } from "../src/context.js";
@@ -38,10 +39,16 @@ import {
   rewindCommand,
 } from "./tui-edit.js";
 import { pct } from "./tui-format.js";
-import { LoginDialog, type PickRow } from "./tui-login.js";
+import { LoginDialog, modelUseRows, type PickRow, SAVE_MODEL_DEFAULT } from "./tui-login.js";
 import { choose, confirm, title, valueRows } from "./tui-menu.js";
 import { Palette, type PaletteItem } from "./tui-palette.js";
-import { changeSetting, effectiveSetting, parseTyped } from "./tui-settings.js";
+import {
+  applySettingNow,
+  changeSetting,
+  effectiveSetting,
+  parseTyped,
+  switchModel,
+} from "./tui-settings.js";
 import { slotCommand, slotsList } from "./tui-slots.js";
 import { openShortcutHelp } from "./tui-status.js";
 import { installedVersion, UPDATE_COMMAND } from "./update-check.js";
@@ -205,7 +212,10 @@ function helpText(ctx: TuiContext): string {
     c.soft("Keys"),
     row("Ctrl+K", "search everything: commands, models, skills, templates"),
     row("Ctrl+R", "inspector · Ctrl+E context · Ctrl+O results · Ctrl+T thinking"),
-    row("PgUp PgDn", "page without steps · otherwise step cursor · Enter fold/unfold · Esc latest"),
+    row(
+      "PgUp PgDn",
+      "page in fullscreen · Shift+PgUp/PgDn select request · Enter fold/unfold · Esc live",
+    ),
     row("Alt+Enter", "queue a follow-up for after the current turn · @path attaches a file"),
     row("?", "every key"),
   ].join("\n");
@@ -801,23 +811,20 @@ async function approveMenu(ctx: TuiContext): Promise<void> {
 }
 
 /** 强度级别:缺省不传;设了就记进每条 request 事件,下一请求生效。 */
-function setEffort(ctx: TuiContext, arg: string): string {
-  const { agent } = ctx;
+async function setEffort(ctx: TuiContext, arg: string): Promise<string> {
   const levels = ctx.model.effortLevels;
   if (arg === "auto") {
-    agent.setEffort(undefined);
-    ctx.updateStatus();
+    await applySettingNow(ctx, settingDef("effort") as SettingDef, undefined);
     return c.soft("· effort omitted again");
   }
   const level = parseEffort(arg);
   if (!level)
     return c.zhu(`unknown level "${arg}"`) + c.faint(`  options: ${EFFORT_LEVELS.join(" ")} auto`);
-  agent.setEffort(level);
+  await applySettingNow(ctx, settingDef("effort") as SettingDef, level);
   const clamped =
     levels && !levels.includes(level)
       ? c.faint(` · this model declares ${levels.join("/")}; clamped down when sending`)
       : "";
-  ctx.updateStatus();
   return c.soft(`· effort ${level} from the next request`) + clamped;
 }
 
@@ -884,30 +891,8 @@ async function editDispatch(ctx: TuiContext, arg: string): Promise<void> {
 
 /** 返回当前模型是否切换成功;缺省值保存失败不撤回已完成的切换。 */
 function useModel(ctx: TuiContext, name: string, setDefault: boolean): boolean {
-  const { deps, agent, model } = ctx;
-  if (!deps.settings) {
-    ctx.note(c.zhu("settings interface not configured"));
-    return false;
-  }
-  if (agent.running) {
-    ctx.note(c.zhu("cannot switch models while running; press Esc first"));
-    return false;
-  }
   try {
-    const choice = deps.settings.switchModel(name);
-    agent.setProvider(choice.provider);
-    model.info = {
-      ...model.info,
-      model: choice.model,
-      providerName: choice.providerName,
-      contextWindow: choice.contextWindow,
-      ...(choice.capabilitySource && { capabilitySource: choice.capabilitySource }),
-    };
-    model.effortLevels = choice.effortLevels;
-    model.contextWindow = choice.contextWindow;
-    ctx.compaction.window = choice.contextWindow;
-    ctx.updateHeader();
-    ctx.updateStatus();
+    switchModel(ctx, name);
   } catch (err) {
     ctx.note(c.zhu(`✗ ${(err as Error).message}`));
     return false;
@@ -932,6 +917,16 @@ function saveDefaultModel(ctx: TuiContext): void {
 }
 
 const ASK_PROVIDER = "ask the provider";
+
+async function modelUse(ctx: TuiContext, name: string): Promise<boolean | undefined> {
+  const picked = await choose(
+    ctx,
+    title("Use model", name),
+    modelUseRows(),
+    "↑↓ choose · Enter apply · Esc cancel",
+  );
+  return picked ? picked.row.label === SAVE_MODEL_DEFAULT : undefined;
+}
 
 /** /model:无参数弹列表(末行可向供应商要清单);/model 名 直接切;/model default 把当前设为缺省;/model list 问供应商。 */
 async function modelCommand(ctx: TuiContext, arg: string): Promise<void> {
@@ -962,11 +957,12 @@ async function modelCommand(ctx: TuiContext, arg: string): Promise<void> {
     ctx,
     title("Model", "configured models"),
     rows,
-    "↑↓ choose · Enter switch · d switch and make it the default · Esc back",
+    "↑↓ choose · Enter actions · Esc back",
   );
   if (!picked) return;
   if (picked.row.label === ASK_PROVIDER) return listRemoteModels(ctx);
-  useModel(ctx, picked.row.label, picked.key === "d");
+  const save = await modelUse(ctx, picked.row.label);
+  if (save !== undefined) useModel(ctx, picked.row.label, save);
 }
 
 /** 向供应商查当前模型列表,配置里有、服务器没有的标出来;然后列表选。 */
@@ -1041,9 +1037,12 @@ async function listRemoteModels(ctx: TuiContext): Promise<void> {
     ctx,
     `${c.bold(c.ink("Models"))}  ${c.soft(providerName)}  ${c.faint(`server ${remote.length} · configured ${configured.length}`)}`,
     rows,
-    "↑↓ choose · Enter switch · d switch and make it the default · Esc back",
+    "↑↓ choose · Enter actions · Esc back",
   );
   if (!picked || ctx.agent.provider !== p) return;
+  const name = `${providerName}/${picked.row.label}`;
+  const save = await modelUse(ctx, name);
+  if (save === undefined || ctx.agent.provider !== p) return;
   const add = inferred.get(picked.row.label);
   if (add && s?.addModel) {
     s.addModel(providerName, add);
@@ -1053,7 +1052,7 @@ async function listRemoteModels(ctx: TuiContext): Promise<void> {
       ),
     );
   }
-  useModel(ctx, `${providerName}/${picked.row.label}`, picked.key === "d");
+  useModel(ctx, name, save);
 }
 
 export function openLogin(ctx: TuiContext, opts: { intro?: string; provider?: string }): void {
@@ -1216,9 +1215,9 @@ async function sessionCommand(ctx: TuiContext, arg: string, selectSource = false
           { label: "inputs", note: `${ctx.agent.queued} pending · continue, edit or remove` },
           { label: "recovery", note: "tool calls with unknown outcomes" },
         ],
-        "Enter use default setup · d choose setup · Esc back",
+        "↑↓ choose · Enter continue · Esc back",
       );
-      if (picked) await sessionCommand(ctx, picked.row.label, picked.key === "d");
+      if (picked) await sessionCommand(ctx, picked.row.label, true);
       return;
     }
     case "recovery": {
@@ -1313,10 +1312,10 @@ async function sessionCommand(ctx: TuiContext, arg: string, selectSource = false
         ctx,
         title("Resume", "recent sessions, newest first"),
         rows,
-        "Enter restore history setup · d choose setup · Esc back",
+        "↑↓ choose · Enter choose setup · Esc back",
       );
       if (picked) {
-        selectSource ||= picked.key === "d";
+        selectSource = true;
         const selected = await source(true);
         if (selectSource && !selected) return;
         sw?.({ kind: "resume", file: picked.row.label, ...(selected && { source: selected }) });
@@ -1433,11 +1432,13 @@ async function memoryCommand(
 
 // ---------- 复制与压缩 ----------
 
-/** 上一条回复里的围栏代码块正文(不含围栏行)。 */
+/** 按 Markdown 结构取代码正文,不把围栏、列表或引用的外层标记复制进去。 */
 export function codeBlocks(text: string): string[] {
+  const parser = new Marked();
   const out: string[] = [];
-  const re = /^```[^\n]*\n([\s\S]*?)^```/gm;
-  for (const m of text.matchAll(re)) out.push((m[1] ?? "").replace(/\n$/, ""));
+  parser.walkTokens(parser.lexer(text), (token) => {
+    if (token.type === "code") out.push(token.text);
+  });
   return out;
 }
 
@@ -1581,21 +1582,9 @@ export function openPalette(ctx: TuiContext): void {
 
 // ---------- 设置(/settings) ----------
 
-function applySetupSlot(ctx: TuiContext, slot: string, value: string): Promise<string> {
-  if (slot === "model")
-    return Promise.resolve(
-      useModel(ctx, value, false)
-        ? ""
-        : "✗ Model switch failed. Check the provider login and model name; details are in the conversation.",
-    );
-  return isSlotName(slot) ? applySlot(ctx, slot, value) : Promise.resolve("");
-}
-
 /** 落一个开关:当场生效(能的话),写回配置,回一句说明。 */
 async function setSetting(ctx: TuiContext, def: SettingDef, value: unknown): Promise<string> {
-  const result = await changeSetting(ctx, def, value, "both", (slot, v) =>
-    applySetupSlot(ctx, slot, v),
-  );
+  const result = await changeSetting(ctx, def, value, "both");
   return result.ok ? result.message : c.zhu(result.message);
 }
 
@@ -1613,8 +1602,7 @@ async function settingsCommand(ctx: TuiContext, arg: string): Promise<void> {
   }
   const view = new SetupView({
     ctx,
-    set: (def, value, scope) =>
-      changeSetting(ctx, def, value, scope, (slot, v) => applySetupSlot(ctx, slot, v)),
+    set: (def, value, scope) => changeSetting(ctx, def, value, scope),
     open: (text) => {
       void command(ctx, text);
     },

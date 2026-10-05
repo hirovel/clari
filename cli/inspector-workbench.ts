@@ -9,9 +9,10 @@ import { compactionState, editState, type Message } from "../src/messages.js";
 import type { Provider, ToolDef } from "../src/provider.js";
 import { firstLine, unchangedPrefix } from "./cards.js";
 import { type CompositionRow, compositionRows } from "./inspector-composition.js";
+import { eventSummary } from "./inspector-events.js";
 import { fmtTok, messageTokens } from "./inspector-format.js";
 import { SECTION_LABELS } from "./prompt.js";
-import { c, G } from "./theme.js";
+import { c, G, selectedText } from "./theme.js";
 
 export type WorkbenchRow =
   | { kind: "system"; row: CompositionRow; tok: number; sections: string[]; edited: boolean }
@@ -19,6 +20,7 @@ export type WorkbenchRow =
   | { kind: "message"; row: CompositionRow; tok: number }
   | { kind: "covered"; from: number; upTo: number; count: number; tok: number; summary: number }
   | { kind: "dropped"; event: number; tok: number; by: number | undefined; role: string }
+  | { kind: "records"; from: number; upTo: number; tok: 0 }
   | {
       kind: "prefix";
       /** 相同前缀的最后一条消息的事件号;undefined = 没有相同前缀。 */
@@ -159,12 +161,56 @@ export function workbench(input: WorkbenchInput): Workbench {
   pushDropped(Number.MAX_SAFE_INTEGER);
   if (keep === 0) rows.unshift({ kind: "prefix", through: undefined, tok: 0, broken: true });
   return {
-    rows,
+    rows: withRecords(
+      events,
+      rows,
+      covered.map((o) => o.event),
+    ),
     total,
     prefixTokens: keep === undefined ? undefined : prefixTokens,
     broken,
     lastRequest,
   };
+}
+
+/** 用原事件时间定位折叠记录,不假设压缩后的消息仍按事件下标排序。 */
+function withRecords(
+  events: readonly AgentEvent[],
+  rows: WorkbenchRow[],
+  covered: number[],
+): WorkbenchRow[] {
+  const anchors = new Map<number, WorkbenchRow>();
+  for (const r of rows) {
+    if (r.kind === "system" || r.kind === "message") anchors.set(r.row.event, r);
+    else if (r.kind === "dropped") anchors.set(r.event, r);
+  }
+  const shown = new Set([...anchors.keys(), ...covered]);
+  const groups = new Map<WorkbenchRow | undefined, WorkbenchRow[]>();
+  let anchor: WorkbenchRow | undefined;
+  for (let i = 0; i < events.length; ) {
+    if (shown.has(i)) {
+      anchor = anchors.get(i) ?? anchor;
+      i++;
+      continue;
+    }
+    const from = i;
+    while (i < events.length && !shown.has(i)) i++;
+    const group = groups.get(anchor) ?? [];
+    group.push({ kind: "records", from, upTo: i, tok: 0 });
+    groups.set(anchor, group);
+  }
+  const out = [...(groups.get(undefined) ?? [])];
+  let source: WorkbenchRow | undefined;
+  rows.forEach((r, i) => {
+    out.push(r);
+    if (r.kind === "message" || r.kind === "system" || r.kind === "dropped") source = r;
+    const next = rows[i + 1];
+    // 提示词的工具定义、摘要原文和前缀线保持挨着原消息。
+    if (next?.kind === "tools" || next?.kind === "covered" || next?.kind === "prefix") return;
+    if (source) out.push(...(groups.get(source) ?? []));
+    source = undefined;
+  });
+  return out;
 }
 
 /** 光标能停的行。 */
@@ -221,6 +267,7 @@ function describe(
         faint: true,
       };
     case "prefix":
+    case "records":
       return { sign: "", role: "", text: "", faint: true };
     case "message": {
       const m = r.row.message;
@@ -288,6 +335,13 @@ function describe(
 }
 
 const BAR = 10;
+const FIXED_WIDTH = 2 + 2 + 6 + 11 + 1 + 6 + 2 + BAR;
+
+/** 表头与内容共用列宽,窄屏仍能看见数字的含义。 */
+export function workbenchHeader(width: number): string {
+  const previewWidth = Math.max(10, width - FIXED_WIDTH);
+  return `    ${"Event".padEnd(6)}${"Content".padEnd(11 + previewWidth + 1)}${"≈tok".padStart(5)}  Relative`;
+}
 
 /** 摘要的预览:跳过开头的方括号提示行,取正文第一行。 */
 function summaryPreview(content: string): string {
@@ -305,6 +359,12 @@ export function workbenchLine(
   opts: { selected: boolean; width: number; maxTok: number },
 ): string {
   const { selected, width } = opts;
+  if (r.kind === "records") {
+    const range = r.upTo === r.from + 1 ? `#${r.from}` : `#${r.from}–#${r.upTo - 1}`;
+    const count = r.upTo - r.from;
+    const text = `⋯ ${range} · ${count} log record${count === 1 ? "" : "s"} · Enter inspect`;
+    return `${selected ? selectedText(G.cursor) : " "}   ${(selected ? selectedText : c.faint)(truncateToWidth(text, width - 4, "…"))}`;
+  }
   if (r.kind === "prefix") {
     const text = r.broken
       ? `same prefix through ${r.through === undefined ? "nothing" : `#${r.through}`} · ≈${fmtTok(r.tok)}${r.reason ? ` · ${r.reason} changes input below` : ""}`
@@ -314,7 +374,7 @@ export function workbenchLine(
     return (r.broken ? c.jin : c.faint)(truncateToWidth(line, width, "…"));
   }
   const d = describe(events, r);
-  const cursor = selected ? c.zhu(G.cursor) : " ";
+  const cursor = selected ? selectedText(G.cursor) : " ";
   const tok = r.kind === "covered" ? "" : String(r.tok);
   const bar =
     r.kind === "covered" || r.tok === 0
@@ -328,11 +388,10 @@ export function workbenchLine(
       : r.kind === "dropped"
         ? `#${r.event}`
         : "";
-  const fixed = 2 + 2 + 6 + 11 + 1 + 6 + 2 + BAR;
-  const previewWidth = Math.max(10, width - fixed);
+  const previewWidth = Math.max(10, width - FIXED_WIDTH);
   const body = `${num.padEnd(5)} ${d.role.padEnd(10)} ${truncateToWidth(d.text, previewWidth, "…", true)} ${tok.padStart(5)}  ${bar}`;
   const sign = d.gold ? c.jin(d.sign) : d.faint ? c.faint(d.sign) : c.soft(d.sign);
-  const tone = selected ? c.bold(c.ink(body)) : d.faint ? c.faint(body) : c.soft(body);
+  const tone = selected ? selectedText(body) : d.faint ? c.faint(body) : c.soft(body);
   return `${cursor} ${sign.padEnd(1)} ${tone}`;
 }
 
@@ -352,6 +411,11 @@ export function previewLines(
       .map((l) => c.soft(`  ${truncateToWidth(l, opts.width - 2, "…")}`));
   const out: string[] = [];
   switch (r.kind) {
+    case "records":
+      out.push(head(`Events #${r.from}–#${r.upTo - 1}`, "log records · not in current input"));
+      for (let i = r.from; i < Math.min(r.upTo, r.from + opts.lines); i++)
+        out.push(c.soft(`  #${i} ${eventSummary(events, i).text}`));
+      break;
     case "system": {
       const secs = r.sections.length;
       out.push(
@@ -394,15 +458,7 @@ export function previewLines(
     case "message": {
       const m = r.row.message;
       const meta: string[] = [];
-      meta.push(
-        r.row.wire === undefined
-          ? "position unknown"
-          : r.row.wire < 0
-            ? "top-level field"
-            : `next request messages[${r.row.wire}]`,
-      );
       const src = events[r.row.event];
-      if (src) meta.push(`from event ${src.type}`);
       const edits = r.row.stages.filter((s) => s.startsWith("edited"));
       if (edits.length > 0) {
         const orig =
@@ -428,6 +484,14 @@ export function previewLines(
         meta.push("placeholder · the original stays in the event");
       if (r.row.event > wb.lastRequest) meta.push("not sent yet");
       meta.push(`≈${r.tok} tok`);
+      meta.push(
+        r.row.wire === undefined
+          ? "position unknown"
+          : r.row.wire < 0
+            ? "top-level field"
+            : `next request messages[${r.row.wire}]`,
+      );
+      if (src) meta.push(`from event ${src.type}`);
       out.push(head(`#${r.row.event} ${roleOf(m)}`, meta.join(" · ")));
       if (m.role === "assistant" && !m.content && m.toolCalls.length > 0)
         out.push(

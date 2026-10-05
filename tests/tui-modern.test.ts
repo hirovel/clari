@@ -44,7 +44,10 @@ function boot(term: VirtualTerminal, extra: Record<string, unknown> = {}) {
 describe("备用屏", () => {
   it("缺省进备用屏:头部在顶、编辑器在底、正文在中间;主屏模式仍是回滚文档", async () => {
     const term = new VirtualTerminal(100, 24);
-    const { app } = boot(term);
+    const { app, log } = boot(term, {
+      info: { model: "deepseek-flash", providerName: "p", sessionFile: "s" },
+      statusWidgets: ["context", "cache", "model", "effort", "compaction", "tokens", "position"],
+    });
     await app.submit("hi");
     app.tui.renderNow(true);
     const screen = await term.screen();
@@ -59,6 +62,41 @@ describe("备用屏", () => {
     const doc = app.lines(100).map(stripAnsi).join("\n");
     expect(doc).toContain("› hi");
     expect(doc).toContain("hello there");
+    const beforeResize = JSON.stringify(log.events);
+    term.resize(36, 12);
+    app.tui.renderNow(true);
+    term.feed("\x1b[5;2~");
+    app.tui.renderNow(true);
+    const short = await term.screen();
+    expect(short.length).toBeLessThanOrEqual(12);
+    expect(short.at(-1)).toContain("Enter collapse");
+    expect(short.at(-1)).toContain("Esc return live");
+    expect(short.join("\n")).toContain("Not shown:");
+    app.setDraft("keep after resize");
+    term.resize(110, 30);
+    app.tui.renderNow(true);
+    const restored = (await term.screen()).join("\n");
+    expect(restored).toContain("model deepseek-flash");
+    expect(restored).toContain("effort Auto (omitted)");
+    expect(restored).not.toContain("Not shown:");
+    expect(app.draft()).toBe("keep after resize");
+    expect(JSON.stringify(log.events)).toBe(beforeResize);
+    term.resize(36, 12);
+    app.setDraft("Long draft\n".repeat(8));
+    log.append({
+      type: "ext/event",
+      at: "",
+      source: "recording",
+      kind: "body/gap",
+      payload: { reason: "test fixture" },
+    });
+    app.tui.renderNow(true);
+    const gap = await term.screen();
+    expect(gap.length).toBeLessThanOrEqual(12);
+    expect(gap.join("\n")).toContain("Ctrl+R details");
+    expect(gap.at(-1)).toContain("Enter send");
+    expect(gap.at(-1)).toContain("Esc return live");
+    expect(app.draft()).toBe("Long draft\n".repeat(8));
     app.stop();
 
     const main = boot(new VirtualTerminal(100, 24), { screen: "main" });
@@ -111,7 +149,7 @@ describe("通知、标题、剪贴板、链接", () => {
 
   it("/copy 写 OSC 52;/copy N 取第 N 个代码块;越界与没回复时报错", async () => {
     const term = new VirtualTerminal(100, 24);
-    const { app } = boot(term);
+    const { app, log } = boot(term);
     await app.command("/copy");
     expect(app.lines(100).map(stripAnsi).join("\n")).toContain("nothing to copy yet");
     await app.submit("go");
@@ -129,6 +167,47 @@ describe("通知、标题、剪贴板、链接", () => {
     await app.command("/copy 2");
     expect(app.lines(100).map(stripAnsi).join("\n")).toContain("has 1 code block; /copy N");
     expect(codeBlocks("a\n```\nx\ny\n```\nb\n```js\nz\n```")).toEqual(["x\ny", "z"]);
+    expect(
+      codeBlocks("~~~ts\r\n\tconst value = '中文';\r\n~~~\n\n````markdown\n```ts\nx\n```\n````"),
+    ).toEqual(["\tconst value = '中文';", "```ts\nx\n```"]);
+    expect(codeBlocks("> ```js\n>   x\n> ```\n\n- example\n\n  ~~~\n  y\n  ~~~")).toEqual([
+      "  x",
+      "y",
+    ]);
+    expect(codeBlocks("    indented\n\n```\na\n\n```\n\n~~~ts\nunfinished")).toEqual([
+      "indented",
+      "a\n",
+      "unfinished",
+    ]);
+    const reply = "~~~ts\r\n\tconst value = '中文';\r\n~~~\n\n````markdown\n```ts\nx\n```\n````";
+    log.append({
+      type: "assistant/message",
+      at: "",
+      text: reply,
+      toolCalls: [],
+      stopReason: "end",
+    });
+    const saved = JSON.stringify(log.events);
+    app.setDraft("Keep my draft");
+    term.resize(60, 24);
+    await app.command("/copy");
+    expect(stripAnsi(app.dialogLines().join("\n"))).toContain("block 2");
+    app.dialogInput("2");
+    app.dialogInput("\r");
+    await tick();
+    expect(term.raw.join("")).toContain(
+      `\x1b]52;c;${Buffer.from("\tconst value = '中文';").toString("base64")}\x07`,
+    );
+    await app.command("/copy 2");
+    expect(term.raw.join("")).toContain(
+      `\x1b]52;c;${Buffer.from("```ts\nx\n```").toString("base64")}\x07`,
+    );
+    await app.command("/copy");
+    app.dialogInput("\r");
+    await tick();
+    expect(term.raw.join("")).toContain(`\x1b]52;c;${Buffer.from(reply).toString("base64")}\x07`);
+    expect(app.draft()).toBe("Keep my draft");
+    expect(JSON.stringify(log.events)).toBe(saved);
     app.stop();
   });
 

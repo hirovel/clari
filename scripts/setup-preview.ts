@@ -36,10 +36,10 @@ for (const [width, height] of [[120, 40], [80, 30], [60, 24]] as const) {
   await app.command("/settings"); shot("overview", "Agent setup overview");
   await app.command("/settings compaction"); shot("context", "Context choices and consequences");
   app.dialogInput("\r"); shot("choices", "Select compaction method");
-  app.dialogInput("\x1b"); app.dialogInput("i"); shot("details", "Full explanation and recommendation");
+  app.dialogInput("\x1b"); app.dialogInput("\x1b[C"); app.dialogInput("\r"); shot("details", "Full explanation and recommendation");
   app.dialogInput("\x1b"); app.dialogInput("\t"); shot("defaults", "Saved defaults have a separate scope");
   await app.command("/settings tools.disable"); app.dialogInput("\r"); app.dialogInput("\x1b[B"); app.dialogInput("\r"); await tick(); shot("tools", "Tool availability after an edit");
-  await app.command("/settings planReminder"); app.dialogInput("\r"); app.dialogInput("e"); app.dialogInput("\x15"); app.dialogInput("many"); app.dialogInput("\r"); await tick(); shot("error", "Inline validation preserves the value");
+  await app.command("/settings planReminder"); app.dialogInput("\r"); app.dialogInput("\x1b[C"); app.dialogInput("\r"); app.dialogInput("\x15"); app.dialogInput("many"); app.dialogInput("\r"); await tick(); shot("error", "Inline validation preserves the value");
   await app.command("/settings"); app.dialogInput("9"); app.dialogInput("\r"); app.dialogInput("\x1b[B"); app.dialogInput("\r"); shot("preset", "Review a preset before saving defaults");
   app.stop();
 }

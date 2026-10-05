@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ToolCall } from "../src/events.js";
 import type { EventLog } from "../src/log.js";
 import { EventLog as Log } from "../src/log.js";
@@ -152,6 +152,44 @@ describe("子的审批", () => {
       content: "The user denied this call: sub-agent policy: deny rule echo",
     });
     expect(parentAsked).toBe(0);
+    const cancel = new AbortController();
+    let waiting = false;
+    let release = () => {};
+    const forwarded = mk({
+      provider: childProvider(),
+      tools: [echo],
+      slots: {
+        approve: (_call, _origin, signal) =>
+          new Promise<boolean>((resolve) => {
+            waiting = true;
+            release = () => resolve(false);
+            signal?.addEventListener("abort", release, { once: true });
+          }),
+      },
+      approval: { deny: [] },
+    });
+    const pending = forwarded.tool
+      .execute({ task: "forward" }, { callId: "cancelled-child", signal: cancel.signal })
+      .catch((error: unknown) => error as Error);
+    let finished = false;
+    void pending.then(() => {
+      finished = true;
+    });
+    try {
+      await vi.waitFor(() => expect(waiting).toBe(true));
+      cancel.abort();
+      await vi.waitFor(() => expect(finished).toBe(true));
+      const outcome = await pending;
+      expect(outcome).toBeInstanceOf(Error);
+      expect((outcome as Error).message).toContain("interrupted");
+      expect(forwarded.firstResult()).toMatchObject({
+        content: "Interrupted by the user; not executed.",
+        isError: true,
+      });
+    } finally {
+      release();
+      await pending;
+    }
   });
 
   it("槽给函数:会话中切换审批对之后派出的子生效", async () => {

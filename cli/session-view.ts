@@ -18,9 +18,10 @@ import {
 } from "../src/settings.js";
 import { SETUP_SECTIONS } from "../src/setup.js";
 import { type SessionSetup, WORK_SETTINGS } from "./session-setup.js";
-import { c, editorTheme } from "./theme.js";
+import { c, editorTheme, G, selectedText } from "./theme.js";
 import type { TuiContext } from "./tui-context.js";
 import { cleanPasteText, printableInput } from "./tui-format.js";
+import { ListPicker } from "./tui-login.js";
 
 export type ExitState = {
   phase: "stopping" | "cleanup";
@@ -35,6 +36,12 @@ export function exitReview(ctx: TuiContext, state: ExitState): Component {
   let offset = 0;
   let page = 1;
   let total = 0;
+  let selected = "Keep waiting";
+  const actions = () => [
+    { label: "Keep waiting", run: () => {} },
+    ...(state.retry ? [{ label: "Retry saving and continue shutdown", run: state.retry }] : []),
+    { label: state.error ? "Retry force exit" : "Force exit", run: state.force },
+  ];
   return {
     invalidate() {},
     render(width) {
@@ -85,8 +92,23 @@ export function exitReview(ctx: TuiContext, state: ExitState): Component {
           : []),
       ].flatMap((line) => wrapTextWithAnsi(line, inner));
       total = body.length;
-      page = Math.max(1, ctx.deps.terminal.rows - (state.retry ? 6 : 5));
+      const choices = actions();
+      if (!choices.some((a) => a.label === selected)) selected = "Keep waiting";
+      const actionLines = choices.flatMap((a) =>
+        wrapTextWithAnsi(
+          a.label === selected ? selectedText(`${G.cursor} ${a.label}`) : c.soft(`  ${a.label}`),
+          inner,
+        ),
+      );
+      // 用最大位置宽度预留提示,再填实际页数,避免首帧显示旧布局的页尾。
+      const hint = "↑↓ choose · Enter select · PgUp/PgDn details";
+      const hintRows = wrapTextWithAnsi(`${hint} · ${total}/${total}`, inner).length;
+      page = Math.max(1, ctx.deps.terminal.rows - actionLines.length - hintRows - 3);
       offset = Math.min(offset, Math.max(0, total - page));
+      const footer = [
+        ...actionLines,
+        ...wrapTextWithAnsi(c.faint(`${hint} · ${Math.min(offset + page, total)}/${total}`), inner),
+      ];
       const visible = body.slice(offset, offset + page);
       const title = `${state.failure ? "Fatal error" : "Exiting"} · ${state.phase === "stopping" ? "stopping work" : "releasing resources"}`;
       return [
@@ -96,13 +118,22 @@ export function exitReview(ctx: TuiContext, state: ExitState): Component {
         // 占满退出工作区,避免露出已无法使用的历史操作提示;动作固定在底部。
         ...Array<string>(Math.max(0, page - visible.length)).fill(""),
         "",
-        ...(state.retry ? [` ${c.jin("r retry saving and continue shutdown")}`] : []),
-        ` ${c.jin(state.error ? "f retry force exit" : "f force exit")} ${c.faint(`· PgUp/PgDn scroll · ${Math.min(offset + page, total)}/${total}`)}`,
+        ...footer.map((line) => ` ${line}`),
       ];
     },
     handleInput(data) {
-      if (data === "f") state.force();
-      else if (data === "r") state.retry?.();
+      const choices = actions();
+      const index = Math.max(
+        0,
+        choices.findIndex((a) => a.label === selected),
+      );
+      if (matchesKey(data, Key.up))
+        selected = choices[Math.max(0, index - 1)]?.label ?? "Keep waiting";
+      else if (matchesKey(data, Key.down))
+        selected = choices[Math.min(choices.length - 1, index + 1)]?.label ?? "Keep waiting";
+      else if (matchesKey(data, Key.home)) selected = "Keep waiting";
+      else if (matchesKey(data, Key.end)) selected = choices.at(-1)?.label ?? "Keep waiting";
+      else if (matchesKey(data, Key.enter)) choices[index]?.run();
       else if (matchesKey(data, Key.pageUp)) offset = Math.max(0, offset - page);
       else if (matchesKey(data, Key.pageDown))
         offset = Math.min(Math.max(0, total - page), offset + page);
@@ -117,10 +148,13 @@ export class PendingInputsView implements Component {
   private editing: { id: string; editor: Editor } | undefined;
   private message = "";
   private hasFocus = false;
+  private actions: ListPicker | undefined;
   constructor(
     private readonly ctx: TuiContext,
     private readonly resume: () => void,
-  ) {}
+  ) {
+    this.selected = ctx.agent.pending[0]?.id;
+  }
   invalidate(): void {
     this.editing?.editor.invalidate();
   }
@@ -135,6 +169,7 @@ export class PendingInputsView implements Component {
     if (this.editing) this.editing.editor.focused = value;
   }
   render(width: number): string[] {
+    if (this.actions) return this.actions.render(width);
     const items = this.ctx.agent.pending;
     if (!items.some((p) => p.id === this.selected)) this.selected = items[0]?.id;
     const inner = Math.max(1, width - 2);
@@ -174,8 +209,8 @@ export class PendingInputsView implements Component {
             .slice(start, start + page)
             .map((p, offset) =>
               line(
-                (p.id === this.selected ? c.ink : c.faint)(
-                  `${p.id === this.selected ? "›" : " "} ${start + offset + 1}. [${p.paused ? "paused" : "queued"}] ${p.deliverAs === "followUp" ? "follow-up" : "steering"}${p.images?.length ? ` · ${p.images.length} image(s)` : ""} · ${p.text.split("\n")[0]}`,
+                (p.id === this.selected ? selectedText : c.faint)(
+                  `${p.id === this.selected ? G.cursor : " "} ${start + offset + 1}. [${p.paused ? "paused" : "queued"}] ${p.deliverAs === "followUp" ? "follow-up" : "steering"}${p.images?.length ? ` · ${p.images.length} image(s)` : ""} · ${p.text.split("\n")[0]}`,
                 ),
               ),
             )
@@ -196,15 +231,13 @@ export class PendingInputsView implements Component {
       )
         .slice(0, 2)
         .map((s) => line(this.ctx.deps.inputs?.error ? c.zhu(s) : c.soft(s))),
-      ...(items.length
-        ? [line(c.faint("↑↓ select · Enter edit · d remove · c continue all"))]
-        : []),
-      line(c.faint("s retry saving · Esc back")),
+      line(c.faint("↑↓ select · Enter actions · Esc back")),
     ];
   }
   handleInput(data: string): void {
     try {
-      if (this.editing) {
+      if (this.actions) this.actions.handleInput(data);
+      else if (this.editing) {
         if (matchesKey(data, Key.escape)) {
           this.editing = undefined;
           this.message = "";
@@ -212,37 +245,61 @@ export class PendingInputsView implements Component {
           this.editing.editor.handleInput(`\x1b[200~${cleanPasteText(data.slice(6, -6))}\x1b[201~`);
         else this.editing.editor.handleInput(data);
       } else if (matchesKey(data, Key.escape)) this.ctx.dialog.close();
-      else if (data === "s") {
-        this.ctx.deps.inputs?.flush();
-        this.message = this.ctx.deps.inputs?.saving
-          ? "Saved locally."
-          : "Local saving is off. Change saveInputs in /settings.";
-      } else if (data === "c") this.resume();
       else {
         const items = this.ctx.agent.pending;
-        const index = items.findIndex((p) => p.id === this.selected);
+        const index = Math.max(
+          0,
+          items.findIndex((p) => p.id === this.selected),
+        );
+        this.selected = items[index]?.id;
         if (matchesKey(data, Key.up)) this.selected = items[Math.max(0, index - 1)]?.id;
         else if (matchesKey(data, Key.down))
           this.selected = items[Math.min(items.length - 1, index + 1)]?.id;
-        else if (data === "d" && this.selected) {
-          this.ctx.agent.removePending(this.selected);
-          this.message = "Message removed.";
-        } else if (matchesKey(data, Key.enter)) {
+        else if (matchesKey(data, Key.enter)) {
           const item = items.find((p) => p.id === this.selected);
-          if (item) {
-            const editor = new Editor(this.ctx.tui, editorTheme, { paddingX: 1 });
-            editor.focused = this.hasFocus;
-            editor.setText(item.text);
-            editor.onSubmit = (text) => {
-              // 组件先清空再回调;消息已投递等失败时保留尚未应用的编辑。
-              editor.setText(text);
-              this.ctx.agent.editPending(item.id, text);
-              this.editing = undefined;
-              this.message = "Message updated.";
-            };
-            this.editing = { id: item.id, editor };
-            this.message = "";
-          }
+          this.actions = new ListPicker(
+            "Pending input actions",
+            [
+              { label: "Edit selected message", disabled: !item },
+              { label: "Remove selected message", disabled: !item },
+              { label: "Continue all pending messages", disabled: !items.length },
+              { label: "Retry saving inputs" },
+            ],
+            "↑↓ choose · Enter select · Esc back",
+            (row) => {
+              this.actions = undefined;
+              if (row.label === "Edit selected message" && item) {
+                const editor = new Editor(this.ctx.tui, editorTheme, { paddingX: 1 });
+                editor.focused = this.hasFocus;
+                editor.setText(item.text);
+                editor.onSubmit = (text) => {
+                  // 组件先清空再回调;消息已投递等失败时保留尚未应用的编辑。
+                  editor.setText(text);
+                  this.ctx.agent.editPending(item.id, text);
+                  this.editing = undefined;
+                  this.message = "Message updated.";
+                };
+                this.editing = { id: item.id, editor };
+                this.message = "";
+              } else if (row.label === "Remove selected message" && item) {
+                this.ctx.agent.removePending(item.id);
+                this.message = "Message removed.";
+              } else if (row.label === "Continue all pending messages") this.resume();
+              else if (row.label === "Retry saving inputs") {
+                this.ctx.deps.inputs?.flush();
+                this.message = this.ctx.deps.inputs?.saving
+                  ? "Saved locally."
+                  : "Local saving is off. Change saveInputs in /settings.";
+              }
+              this.ctx.tui.requestRender();
+            },
+            () => {
+              this.actions = undefined;
+              this.ctx.tui.requestRender();
+            },
+            () => this.ctx.tui.requestRender(),
+            () => this.ctx.deps.terminal.rows,
+          );
         }
       }
     } catch (error) {
@@ -302,7 +359,7 @@ export class SessionSetupReview implements Component {
     const inner = Math.max(1, width - 4);
     this.page = Math.max(1, this.rows() - 8);
     const start = Math.max(0, this.index - this.page + 1);
-    const selected = this.fields[this.index] as SettingDef;
+    const selected = this.fields[this.index];
     const lines = this.fields.slice(start, start + this.page).map((field, offset) => {
       const source = this.edited.has(field.key)
         ? "edited"
@@ -310,10 +367,15 @@ export class SessionSetupReview implements Component {
           ? "defaults"
           : "selected";
       const value = getSetting(this.setup.values, field.key);
-      const line = `${start + offset === this.index ? "›" : " "} [${source}] ${field.key}: ${field.key === "approval" ? (value === undefined ? "not set (inactive)" : JSON.stringify(value)) : formatSetting(field, value)}`;
-      return ` ${truncateToWidth(start + offset === this.index ? c.ink(line) : c.faint(line), inner)}`;
+      const line = `${start + offset === this.index ? G.cursor : " "} [${source}] ${field.key}: ${field.key === "approval" ? (value === undefined ? "not set (inactive)" : JSON.stringify(value)) : formatSetting(field, value)}`;
+      return ` ${truncateToWidth(start + offset === this.index ? selectedText(line) : c.faint(line), inner)}`;
     });
-    let editLine = `${selected.key} > ${this.editing ?? ""}▏`;
+    if (start + this.page > this.fields.length) {
+      lines.push(
+        ` ${truncateToWidth(this.index === this.fields.length ? selectedText(`${G.cursor} Continue with this setup`) : c.ink("  Continue with this setup"), inner)}`,
+      );
+    }
+    let editLine = `${selected?.key ?? ""} > ${this.editing ?? ""}▏`;
     if (this.editing !== undefined) {
       const chars = [...editLine];
       while (chars.length && visibleWidth(chars.join("")) > inner - 1) chars.shift();
@@ -325,13 +387,13 @@ export class SessionSetupReview implements Component {
       "",
       ...lines,
       "",
-      ` ${truncateToWidth(this.editing !== undefined ? editLine : selected.note, inner)}`,
-      ` ${truncateToWidth(this.error ? c.zhu(this.error) : c.faint(this.editing !== undefined ? "Enter apply · Esc cancel edit" : "↑↓ select · Enter edit · c continue · Esc back"), inner)}`,
+      ` ${truncateToWidth(this.editing !== undefined ? editLine : (selected?.note ?? "Start using the reviewed configuration."), inner)}`,
+      ` ${truncateToWidth(this.error ? c.zhu(this.error) : c.faint(this.editing !== undefined ? "Enter apply · Esc cancel edit" : "↑↓ select · Enter choose · End continue · Esc back"), inner)}`,
     ];
   }
   handleInput(data: string): void {
-    const field = this.fields[this.index] as SettingDef;
-    if (this.editing !== undefined) {
+    const field = this.fields[this.index];
+    if (this.editing !== undefined && field) {
       if (matchesKey(data, Key.escape)) {
         this.editing = undefined;
         this.error = "";
@@ -360,24 +422,27 @@ export class SessionSetupReview implements Component {
         this.editing = [...this.editing].slice(0, -1).join("");
       else this.editing += printableInput(data);
     } else if (matchesKey(data, Key.escape)) this.done();
-    else if (data === "c") this.done(this.setup);
     else if (matchesKey(data, Key.up)) this.index = Math.max(0, this.index - 1);
-    else if (matchesKey(data, Key.down))
-      this.index = Math.min(this.fields.length - 1, this.index + 1);
+    else if (matchesKey(data, Key.down)) this.index = Math.min(this.fields.length, this.index + 1);
+    else if (matchesKey(data, Key.home)) this.index = 0;
+    else if (matchesKey(data, Key.end)) this.index = this.fields.length;
     else if (matchesKey(data, Key.pageUp)) this.index = Math.max(0, this.index - this.page);
     else if (matchesKey(data, Key.pageDown))
-      this.index = Math.min(this.fields.length - 1, this.index + this.page);
+      this.index = Math.min(this.fields.length, this.index + this.page);
     else if (matchesKey(data, Key.enter)) {
-      const value = getSetting(this.setup.values, field.key);
-      this.editing =
-        field.key === "approval"
-          ? JSON.stringify(value ?? {})
-          : value === undefined || value === null
-            ? "none"
-            : Array.isArray(value)
-              ? value.join(" ")
-              : String(value);
-      this.error = field.values ? `Options: ${field.values.map((v) => v.label).join(" / ")}` : "";
+      if (!field) this.done(this.setup);
+      else {
+        const value = getSetting(this.setup.values, field.key);
+        this.editing =
+          field.key === "approval"
+            ? JSON.stringify(value ?? {})
+            : value === undefined || value === null
+              ? "none"
+              : Array.isArray(value)
+                ? value.join(" ")
+                : String(value);
+        this.error = field.values ? `Options: ${field.values.map((v) => v.label).join(" / ")}` : "";
+      }
     }
     this.change();
   }

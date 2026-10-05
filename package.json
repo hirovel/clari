@@ -55,6 +55,7 @@
     "@earendil-works/pi-tui": "^0.84.4",
     "@sinclair/typebox": "^0.34.52",
     "@vscode/ripgrep": "^1.18.0",
+    "marked": "18.0.5",
     "proper-lockfile": "4.1.2",
     "semver": "^7.8.5",
     "yaml": "^2.9.1"

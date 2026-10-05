@@ -214,7 +214,7 @@ describe("端到端(假服务器)", () => {
     expect(doc).toContain("✗ request #2 failed  overflow · HTTP 400");
     expect(doc).toContain("≈ overflow retry");
     expect(doc).not.toContain("Response #");
-    expect(doc).not.toContain("expected ≤");
+    expect(doc).not.toContain("unchanged text ≈");
     expect(app.agent.running).toBe(false);
 
     // 检视器视角:四条记录,压缩请求有自己的一行,接收分区有原始流

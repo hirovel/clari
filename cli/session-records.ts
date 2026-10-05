@@ -13,9 +13,9 @@ export type RequestRecording = {
   input?: { messages: Message[]; tools: ToolDef[] };
   attempts?: { n: number; status?: number; state: string; response: string; body?: RecordedBody }[];
   outputs?: {
+    callId: string;
     name: string;
     original: string;
-    model: string;
     state: string;
     source: string;
     body?: RecordedBody;
@@ -183,10 +183,10 @@ export function readRequestRecording(
         }),
     });
     result.outputs?.push({
+      callId: String(callId),
       name: returned?.type === "tool/result" ? returned.name : String(callId),
       original: !section ? originalBody.read() : "",
       ...(section === "received" && { body: originalBody }),
-      model: returned?.type === "tool/result" ? returned.content : "No model result recorded",
       state: returned
         ? "result recorded"
         : finished

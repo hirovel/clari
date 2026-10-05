@@ -8,7 +8,7 @@ Clari is a minimal, configurable AI agent for the terminal.
 
 ![Clari setup: independently configurable components](assets/clari-setup.png)
 
-Configure each component in `/settings`.
+Configure each component in `/settings`, for the current session or as a saved default.
 
 [中文](README.zh-CN.md) · [Changelog](CHANGELOG.md)
 
@@ -28,11 +28,13 @@ Start it in your project directory:
 clari
 ```
 
-On first launch, choose a provider, enter your API key and select a model.
+On first launch, choose a provider, enter your API key, then select a model and its scope.
 
 Type a task and press Enter to send it. Esc interrupts the turn; `/quit` exits.
 
 Inside Clari, use `/help` for commands and keyboard shortcuts, and `/settings` for configuration.
+
+Menus use arrow keys to select, Enter to confirm and Esc to go back. Settings show their actions below the list; use ←→ to select one.
 
 Run `clari --help` for startup options.
 
@@ -54,11 +56,11 @@ Clari checks for updates after startup and shows a manual update command. Disabl
 
 ### Inspect API exchanges
 
-Ctrl+R opens requests in order. Inspect sent messages, tool definitions, captured HTTP JSON, replies, returned reasoning and original tool output. In the sent and received views, use ↑↓ to select a block, Enter to expand it and PgUp/PgDn to page through its contents. Saved bodies, reconstructed views and missing records are labeled separately.
+Ctrl+R opens requests in order. Select a request in the transcript with Shift+PgUp/PgDn, then press Ctrl+R to open its received content directly. Inspect sent messages, tool definitions, captured HTTP JSON, replies, returned reasoning and original tool output. In the sent and received views, use ↑↓ to select a block, Enter to expand it and PgUp/PgDn to page through its contents. Saved bodies, reconstructed views and missing records are labeled separately.
 
 ### Edit context
 
-Ctrl+E opens the next request's context. Edit system instructions, messages and tool results in the internal editor. Exclude messages, restore edited text, or rewind context to an earlier step. Original content and edit records remain available for comparison.
+Ctrl+E opens the next request's context. Gaps in event IDs fold into log rows; select one and press Enter to inspect its records. Edit system instructions, messages and tool results in the internal editor. Exclude messages, restore edited text, or rewind context to an earlier step. Original content and edit records remain available for comparison. Each action states whether it changes the next input, sends a request immediately or creates a session file.
 
 ### Configure your setup
 
@@ -68,7 +70,7 @@ Skills are manual by default: `/name your request`. Automatic selection is optio
 
 ### Work and resume
 
-Built-in tools read, write and edit files, run commands, search file contents and paths, and fetch pages. The agent continues through tool calls until the model finishes; Esc interrupts the turn. `/session` creates, resumes and forks sessions. History, API bodies and original tool output are stored locally.
+Built-in tools read, write and edit files, run commands, search file contents and paths, and fetch pages. The agent continues through tool calls until the model finishes. In fullscreen mode, PgUp/PgDn pages through the transcript; Shift+PgUp/PgDn selects a request, and Enter folds or expands it when the input is empty. Esc closes a view or returns to live output before interrupting a running turn. `/session` creates, resumes and forks sessions. History, API bodies and original tool output are stored locally.
 
 Providers support OpenAI Chat Completions, OpenAI Responses and Anthropic Messages. See the [relay configuration example](examples/config.relay.json) for compatible endpoints.
 

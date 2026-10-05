@@ -30,7 +30,7 @@ export const STATUS_WIDGETS = [
   { id: "queue", name: "Input queue", note: "Queued and paused messages." },
   { id: "elapsed", name: "Elapsed", note: "Time spent in the current turn." },
   { id: "children", name: "Sub-agents", note: "Number of running child tasks." },
-  { id: "position", name: "Reading position", note: "Selected step or history-reading state." },
+  { id: "position", name: "Reading position", note: "Selected request or history-reading state." },
 ] as const;
 export type StatusWidget = (typeof STATUS_WIDGETS)[number]["id"];
 export const DEFAULT_STATUS_WIDGETS: StatusWidget[] = [

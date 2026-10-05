@@ -2,7 +2,7 @@ import { estimateTokens } from "../src/context.js";
 import type { AgentEvent } from "../src/events.js";
 import { isProjected } from "../src/messages.js";
 import { clock, eventTokens, fmtMs, fmtTok, indent } from "./inspector-format.js";
-import { c } from "./theme.js";
+import { c, G, selectedText } from "./theme.js";
 
 type CompactionEvent = Extract<AgentEvent, { type: "compaction" }>;
 
@@ -74,7 +74,7 @@ export function compactionRow(rec: CompactionRecord, selected: boolean): string 
     parts.push(`cleared ${rec.cleared.length} tool results (${fmtTok(rec.clearedTokens)} tok)`);
   }
   const body = `${`#${rec.n}`.padEnd(4)} ${clock(e.at)}  ${e.strategy ?? "unnamed strategy"}  ${parts.join("  ")}`;
-  return `${selected ? c.zhu("▸") : " "} ${selected ? c.bold(c.ink(body)) : c.soft(body)}`;
+  return `${selected ? selectedText(G.cursor) : " "} ${selected ? selectedText(body) : c.soft(body)}`;
 }
 
 function eventBodyLines(events: readonly AgentEvent[], i: number): string[] {

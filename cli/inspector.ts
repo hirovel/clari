@@ -17,12 +17,8 @@ import {
 import type { AgentEvent } from "../src/events.js";
 import { editState, type Message } from "../src/messages.js";
 import type { Provider, ToolDef } from "../src/provider.js";
-import {
-  BodyBrowser,
-  inputBlocks,
-  receivedBlocks,
-  recordingErrorBlock,
-} from "./inspector-bodies.js";
+import { BodyBrowser } from "./body-browser.js";
+import { inputBlocks, receivedBlocks, recordingErrorBlock } from "./inspector-bodies.js";
 import {
   COMPACTION_SECTIONS,
   type CompactionRecord,
@@ -46,6 +42,7 @@ import {
   type EventFilter,
   type EventSection,
   eventLine,
+  eventSummary,
   eventViewLines,
   filteredIndices,
   projectionLines,
@@ -82,18 +79,12 @@ import {
   type Workbench,
   type WorkbenchRow,
   workbench,
+  workbenchHeader,
   workbenchLine,
 } from "./inspector-workbench.js";
 import { type SectionState, sectionStates } from "./prompt-sections.js";
 import type { RecordingSection, RequestRecording } from "./session-records.js";
-import { c, G } from "./theme.js";
-
-export * from "./inspector-compactions.js";
-export * from "./inspector-composition.js";
-export * from "./inspector-events.js";
-export * from "./inspector-format.js";
-export * from "./inspector-requests.js";
-export * from "./inspector-workbench.js";
+import { c, G, selectedText } from "./theme.js";
 
 export type SessionSource = {
   name: string;
@@ -139,6 +130,8 @@ type Mode =
   | "detail"
   | "events"
   | "event"
+  | "records"
+  | "record"
   | "compactions"
   | "compaction"
   | "composition"
@@ -284,6 +277,18 @@ export class RequestInspector implements Component {
     return this.workbench().rows[this.messageSelected];
   }
 
+  /** 日志仍在追加时按正在查看的事件定位,不复用可能已移动的屏幕行。 */
+  private recordGroup(): Extract<WorkbenchRow, { kind: "records" }> | undefined {
+    const rows = this.workbench().rows;
+    const index = rows.findIndex(
+      (r) => r.kind === "records" && this.eventSelected >= r.from && this.eventSelected < r.upTo,
+    );
+    const row = rows[index];
+    if (row?.kind !== "records") return undefined;
+    this.messageSelected = index;
+    return row;
+  }
+
   get isDetail(): boolean {
     return this.mode === "detail";
   }
@@ -324,10 +329,10 @@ export class RequestInspector implements Component {
     this.lineCache.clear();
   }
 
-  private switchSession(): void {
+  private switchSession(direction: -1 | 1): void {
     const n = this.sessions().length;
     if (n <= 1) return;
-    this.sessionIndex = (this.sessionIndex + 1) % n;
+    this.sessionIndex = (this.sessionIndex + direction + n) % n;
     this.selected = Math.max(0, this.records().length - 1);
     this.eventSelected = filteredIndices(this.events(), this.eventFilter).at(-1) ?? 0;
     this.compactionSelected = Math.max(0, this.compactions().length - 1);
@@ -430,11 +435,11 @@ export class RequestInspector implements Component {
   }
 
   private contextReadOnlyReason(): string | undefined {
-    if (this.events() !== this.deps.events()) return "Sub-session context is read-only.";
+    if (this.events() !== this.deps.events()) return "Read-only · Sub-session context.";
     return (
       this.deps.readOnlyReason?.() ??
       (this.busy()
-        ? "Context is read-only while running; Esc in the transcript stops the turn."
+        ? "Context is read-only while running; close this view and use /stop to interrupt."
         : undefined)
     );
   }
@@ -464,36 +469,47 @@ export class RequestInspector implements Component {
     const comps = this.compactions();
     const page = Math.max(1, this.lastViewport - 1);
     const tab = data === "\t";
+    if (
+      ["list", "events", "composition", "compactions"].includes(this.mode) &&
+      this.sessions().length > 1 &&
+      (matchesKey(data, Key.left) || matchesKey(data, Key.right))
+    ) {
+      this.switchSession(matchesKey(data, Key.left) ? -1 : 1);
+      if (this.mode === "composition") this.showComposition();
+      this.deps.requestRender();
+      return;
+    }
     const clampSel = (v: number, len: number) => Math.min(Math.max(0, len - 1), Math.max(0, v));
     const scrollKeys = (): boolean => {
-      if (matchesKey(data, Key.up) || data === "k") this.scroll = Math.max(0, this.scroll - 1);
-      else if (matchesKey(data, Key.down) || data === "j") this.scroll += 1;
+      if (matchesKey(data, Key.up)) this.scroll = Math.max(0, this.scroll - 1);
+      else if (matchesKey(data, Key.down)) this.scroll += 1;
       else if (matchesKey(data, Key.pageUp)) this.scroll = Math.max(0, this.scroll - page);
       else if (matchesKey(data, Key.pageDown)) this.scroll += page;
-      else if (matchesKey(data, Key.home) || data === "g") this.scroll = 0;
-      else if (matchesKey(data, Key.end) || data === "G") this.scroll = Number.MAX_SAFE_INTEGER;
+      else if (matchesKey(data, Key.home)) this.scroll = 0;
+      else if (matchesKey(data, Key.end)) this.scroll = Number.MAX_SAFE_INTEGER;
       else return false;
       return true;
     };
     switch (this.mode) {
       case "list":
-        if (matchesKey(data, Key.escape) || data === "q") this.deps.onClose();
+        if (matchesKey(data, Key.escape)) this.deps.onClose();
         else if (tab) this.showEvents();
-        else if (data === "s") this.switchSession();
-        else if (matchesKey(data, Key.up) || data === "k")
-          this.selected = clampSel(this.selected - 1, recs.length);
-        else if (matchesKey(data, Key.down) || data === "j")
+        else if (matchesKey(data, Key.up)) this.selected = clampSel(this.selected - 1, recs.length);
+        else if (matchesKey(data, Key.down))
           this.selected = clampSel(this.selected + 1, recs.length);
-        else if (matchesKey(data, Key.home) || data === "g") this.selected = 0;
-        else if (matchesKey(data, Key.end) || data === "G")
-          this.selected = Math.max(0, recs.length - 1);
+        else if (matchesKey(data, Key.pageUp))
+          this.selected = clampSel(this.selected - page, recs.length);
+        else if (matchesKey(data, Key.pageDown))
+          this.selected = clampSel(this.selected + page, recs.length);
+        else if (matchesKey(data, Key.home)) this.selected = 0;
+        else if (matchesKey(data, Key.end)) this.selected = Math.max(0, recs.length - 1);
         else if (matchesKey(data, Key.enter) && recs.length > 0) {
           this.mode = "detail";
           this.scroll = 0;
         }
         break;
       case "detail":
-        if (matchesKey(data, Key.escape) || data === "q") {
+        if (matchesKey(data, Key.escape)) {
           this.mode = "list";
           this.scroll = 0;
         } else if (
@@ -504,8 +520,8 @@ export class RequestInspector implements Component {
           // 选择与展开仅属于当前正文视图。
         } else if (scrollKeys()) {
           // 已处理
-        } else if (matchesKey(data, Key.left) || data === "h") this.switchSection(-1);
-        else if (matchesKey(data, Key.right) || data === "l") this.switchSection(1);
+        } else if (matchesKey(data, Key.left)) this.switchSection(-1);
+        else if (matchesKey(data, Key.right)) this.switchSection(1);
         else if (/^[1-7]$/.test(data)) {
           this.section = Number(data) as Section;
           this.scroll = 0;
@@ -515,18 +531,17 @@ export class RequestInspector implements Component {
         }
         break;
       case "events":
-        if (matchesKey(data, Key.escape) || data === "q") this.deps.onClose();
+        if (matchesKey(data, Key.escape)) this.deps.onClose();
         else if (tab) this.showCompactions();
-        else if (data === "s") this.switchSession();
         else if (data === CTRL_UP) this.moveEvent(-1, true);
         else if (data === CTRL_DOWN) this.moveEvent(1, true);
-        else if (matchesKey(data, Key.up) || data === "k") this.moveEvent(-1);
-        else if (matchesKey(data, Key.down) || data === "j") this.moveEvent(1);
+        else if (matchesKey(data, Key.up)) this.moveEvent(-1);
+        else if (matchesKey(data, Key.down)) this.moveEvent(1);
         else if (matchesKey(data, Key.pageUp)) this.moveEvent(-page);
         else if (matchesKey(data, Key.pageDown)) this.moveEvent(page);
-        else if (matchesKey(data, Key.home) || data === "g")
+        else if (matchesKey(data, Key.home))
           this.eventSelected = filteredIndices(events, this.eventFilter)[0] ?? 0;
-        else if (matchesKey(data, Key.end) || data === "G")
+        else if (matchesKey(data, Key.end))
           this.eventSelected = filteredIndices(events, this.eventFilter).at(-1) ?? 0;
         else if (/^[1-5]$/.test(data)) {
           this.eventFilter = Number(data) as EventFilter;
@@ -540,43 +555,73 @@ export class RequestInspector implements Component {
           this.scroll = 0;
         }
         break;
+      case "records": {
+        const group = this.recordGroup();
+        if (group?.kind !== "records") {
+          this.mode = "composition";
+          break;
+        }
+        const move = (step: number) => {
+          this.eventSelected = Math.max(
+            group.from,
+            Math.min(group.upTo - 1, this.eventSelected + step),
+          );
+        };
+        if (matchesKey(data, Key.escape)) this.mode = "composition";
+        else if (matchesKey(data, Key.up)) move(-1);
+        else if (matchesKey(data, Key.down)) move(1);
+        else if (matchesKey(data, Key.pageUp)) move(-page);
+        else if (matchesKey(data, Key.pageDown)) move(page);
+        else if (matchesKey(data, Key.home)) this.eventSelected = group.from;
+        else if (matchesKey(data, Key.end)) this.eventSelected = group.upTo - 1;
+        else if (matchesKey(data, Key.enter)) {
+          this.mode = "record";
+          this.eventSection = 1;
+          this.scroll = 0;
+        }
+        break;
+      }
       case "event":
-        if (matchesKey(data, Key.escape) || data === "q") {
-          this.mode = "events";
+      case "record":
+        if (matchesKey(data, Key.escape)) {
+          this.mode = this.mode === "record" ? "records" : "events";
           this.scroll = 0;
         } else if (scrollKeys()) {
           // 已处理
         } else if (/^[1-3]$/.test(data)) {
           this.eventSection = Number(data) as EventSection;
           this.scroll = 0;
-        } else if (matchesKey(data, Key.left) || data === "h") {
+        } else if (matchesKey(data, Key.left)) {
           this.eventSection = (this.eventSection === 1 ? 3 : this.eventSection - 1) as EventSection;
           this.scroll = 0;
-        } else if (matchesKey(data, Key.right) || data === "l") {
+        } else if (matchesKey(data, Key.right)) {
           this.eventSection = (this.eventSection === 3 ? 1 : this.eventSection + 1) as EventSection;
           this.scroll = 0;
         } else if (data === "[" || data === "]") {
-          this.moveEvent(data === "]" ? 1 : -1);
+          const row = this.mode === "record" ? this.recordGroup() : undefined;
+          if (this.mode === "record" && row?.kind === "records")
+            this.eventSelected = Math.max(
+              row.from,
+              Math.min(row.upTo - 1, this.eventSelected + (data === "]" ? 1 : -1)),
+            );
+          else this.moveEvent(data === "]" ? 1 : -1);
           this.scroll = 0;
         }
         break;
       case "composition": {
         const row = this.selectedRow();
-        if (matchesKey(data, Key.escape) || data === "q") this.deps.onClose();
+        if (matchesKey(data, Key.escape)) this.deps.onClose();
         else if (tab) {
           this.mode = "list";
           this.scroll = 0;
-        } else if (data === "s") {
-          this.switchSession();
-          this.showComposition();
-        } else if (matchesKey(data, Key.up) || data === "k") this.moveRow(-1);
-        else if (matchesKey(data, Key.down) || data === "j") this.moveRow(1);
+        } else if (matchesKey(data, Key.up)) this.moveRow(-1);
+        else if (matchesKey(data, Key.down)) this.moveRow(1);
         else if (matchesKey(data, Key.pageUp)) this.moveRow(-page);
         else if (matchesKey(data, Key.pageDown)) this.moveRow(page);
-        else if (matchesKey(data, Key.home) || data === "g") {
+        else if (matchesKey(data, Key.home)) {
           this.messageSelected = 0;
           this.moveRow(0);
-        } else if (matchesKey(data, Key.end) || data === "G") {
+        } else if (matchesKey(data, Key.end)) {
           this.messageSelected = this.workbench().rows.length - 1;
           this.moveRow(0);
         } else if (matchesKey(data, Key.enter) && row) this.enterRow(row);
@@ -592,10 +637,10 @@ export class RequestInspector implements Component {
           0,
           items.findIndex((item) => item.action === previous),
         );
-        if (matchesKey(data, Key.escape) || data === "q") this.mode = "composition";
-        else if (matchesKey(data, Key.up) || data === "k")
+        if (matchesKey(data, Key.escape)) this.mode = "composition";
+        else if (matchesKey(data, Key.up))
           this.actionSelected = items[clampSel(selected - 1, items.length)]?.action ?? "view";
-        else if (matchesKey(data, Key.down) || data === "j")
+        else if (matchesKey(data, Key.down))
           this.actionSelected = items[clampSel(selected + 1, items.length)]?.action ?? "view";
         else if (/^[1-9]$/.test(data) && Number(data) <= items.length)
           this.actionSelected = items[Number(data) - 1]?.action ?? "view";
@@ -615,7 +660,7 @@ export class RequestInspector implements Component {
         break;
       }
       case "message": {
-        if (matchesKey(data, Key.escape) || data === "q") {
+        if (matchesKey(data, Key.escape)) {
           this.mode = "composition";
           this.scroll = 0;
         } else if (scrollKeys()) {
@@ -631,11 +676,17 @@ export class RequestInspector implements Component {
       case "sections": {
         const { states, names } = this.sections();
         const n = states?.length ?? names.length;
-        if (matchesKey(data, Key.escape) || data === "q") this.mode = "composition";
-        else if (matchesKey(data, Key.up) || data === "k")
+        if (matchesKey(data, Key.escape)) this.mode = "composition";
+        else if (matchesKey(data, Key.up))
           this.sectionSelected = clampSel(this.sectionSelected - 1, n);
-        else if (matchesKey(data, Key.down) || data === "j")
+        else if (matchesKey(data, Key.down))
           this.sectionSelected = clampSel(this.sectionSelected + 1, n);
+        else if (matchesKey(data, Key.pageUp))
+          this.sectionSelected = clampSel(this.sectionSelected - page, n);
+        else if (matchesKey(data, Key.pageDown))
+          this.sectionSelected = clampSel(this.sectionSelected + page, n);
+        else if (matchesKey(data, Key.home)) this.sectionSelected = 0;
+        else if (matchesKey(data, Key.end)) this.sectionSelected = Math.max(0, n - 1);
         else if (/^[1-9]$/.test(data) && Number(data) <= n) this.sectionSelected = Number(data) - 1;
         else if (matchesKey(data, Key.enter) && states) {
           const s = states[this.sectionSelected];
@@ -646,22 +697,24 @@ export class RequestInspector implements Component {
         break;
       }
       case "covered":
-        if (matchesKey(data, Key.escape) || data === "q") {
+        if (matchesKey(data, Key.escape)) {
           this.mode = "composition";
           this.scroll = 0;
         } else scrollKeys();
         break;
       case "compactions":
-        if (matchesKey(data, Key.escape) || data === "q") this.deps.onClose();
+        if (matchesKey(data, Key.escape)) this.deps.onClose();
         else if (tab) this.showComposition();
-        else if (data === "s") this.switchSession();
-        else if (matchesKey(data, Key.up) || data === "k")
+        else if (matchesKey(data, Key.up))
           this.compactionSelected = clampSel(this.compactionSelected - 1, comps.length);
-        else if (matchesKey(data, Key.down) || data === "j")
+        else if (matchesKey(data, Key.down))
           this.compactionSelected = clampSel(this.compactionSelected + 1, comps.length);
-        else if (matchesKey(data, Key.home) || data === "g") this.compactionSelected = 0;
-        else if (matchesKey(data, Key.end) || data === "G")
-          this.compactionSelected = Math.max(0, comps.length - 1);
+        else if (matchesKey(data, Key.pageUp))
+          this.compactionSelected = clampSel(this.compactionSelected - page, comps.length);
+        else if (matchesKey(data, Key.pageDown))
+          this.compactionSelected = clampSel(this.compactionSelected + page, comps.length);
+        else if (matchesKey(data, Key.home)) this.compactionSelected = 0;
+        else if (matchesKey(data, Key.end)) this.compactionSelected = Math.max(0, comps.length - 1);
         else if (matchesKey(data, Key.enter) && comps.length > 0) {
           this.mode = "compaction";
           this.compactionSection = 1;
@@ -669,7 +722,7 @@ export class RequestInspector implements Component {
         }
         break;
       case "compaction":
-        if (matchesKey(data, Key.escape) || data === "q") {
+        if (matchesKey(data, Key.escape)) {
           this.mode = "compactions";
           this.scroll = 0;
         } else if (scrollKeys()) {
@@ -677,12 +730,12 @@ export class RequestInspector implements Component {
         } else if (/^[1-4]$/.test(data)) {
           this.compactionSection = Number(data) as CompactionSection;
           this.scroll = 0;
-        } else if (matchesKey(data, Key.left) || data === "h") {
+        } else if (matchesKey(data, Key.left)) {
           this.compactionSection = (
             this.compactionSection === 1 ? 4 : this.compactionSection - 1
           ) as CompactionSection;
           this.scroll = 0;
-        } else if (matchesKey(data, Key.right) || data === "l") {
+        } else if (matchesKey(data, Key.right)) {
           this.compactionSection = (
             this.compactionSection === 4 ? 1 : this.compactionSection + 1
           ) as CompactionSection;
@@ -702,6 +755,12 @@ export class RequestInspector implements Component {
   /** 工作台里按 Enter:按行的种类分派。 */
   private enterRow(row: WorkbenchRow): void {
     switch (row.kind) {
+      case "records":
+        this.mode = "records";
+        this.eventSelected = row.from;
+        this.eventSection = 1;
+        this.scroll = 0;
+        return;
       case "message":
         if (row.row.stages.some((s) => s.startsWith("summary"))) {
           const comps = this.compactions();
@@ -824,9 +883,9 @@ export class RequestInspector implements Component {
     const list = this.sessions();
     if (list.length <= 1) return undefined;
     const items = list.map((s, i) =>
-      i === this.sessionIndex ? c.ink(`▸ ${s.name}`) : c.faint(`  ${s.name}`),
+      i === this.sessionIndex ? selectedText(`${G.cursor} ${s.name}`) : c.faint(`  ${s.name}`),
     );
-    return `${items.join("   ")}   ${c.faint("s switch session")}`;
+    return `${items.join("   ")}   ${c.faint("←/→ select session")}`;
   }
 
   /** 页签行:[1 name] 2 name 3 name。 */
@@ -838,12 +897,12 @@ export class RequestInspector implements Component {
     const full = names
       .map((name, i) => {
         const n = i + 1;
-        return n === current ? c.bold(c.ink(`[${n} ${name}]`)) : c.soft(` ${n} ${name} `);
+        return n === current ? selectedText(`[${n} ${name}]`) : c.soft(` ${n} ${name} `);
       })
       .join(" ");
     return visibleWidth(full) <= width
       ? full
-      : `${c.bold(c.ink(`[${current} ${names[current - 1]}]`))} ${c.faint(`· ${current}/${names.length} · ←→ or 1–${names.length}`)}`;
+      : `${selectedText(`[${current} ${names[current - 1]}]`)} ${c.faint(`· ${current}/${names.length} · ←→ or 1–${names.length}`)}`;
   }
 
   render(width: number): string[] {
@@ -868,6 +927,7 @@ export class RequestInspector implements Component {
       ...head.slice(1),
     ];
     const cacheKey = (k: string) => `${this.sessionIndex}:${events.length}:${inner}:${k}`;
+    const controls = (hint: string) => wrapTextWithAnsi(c.faint(hint), inner).map(pad);
 
     if (this.mode === "list") {
       const recs = this.records();
@@ -881,7 +941,9 @@ export class RequestInspector implements Component {
       const head = withSession([pad(title), pad(columns), pad(rule)]);
       const foot = [
         pad(rule),
-        pad(c.faint("↑↓ select · Enter details · Tab next view · s session · Esc close")),
+        ...controls(
+          "Enter details · Esc close · ↑↓ select · PgUp/PgDn page · Tab views · ←/→ session",
+        ),
       ];
       const viewport = rows - head.length - foot.length;
       const pageItems = narrow ? Math.max(1, Math.floor(viewport / 2)) : viewport;
@@ -911,10 +973,8 @@ export class RequestInspector implements Component {
       const head = withSession([pad(title), pad(columns), pad(rule)]);
       const foot = [
         pad(rule),
-        pad(
-          c.faint(
-            "↑↓ move · Enter details · 1–5 filter · Ctrl+↑↓ request · PgUp/PgDn · Tab compactions · s session · Esc close",
-          ),
+        ...controls(
+          "Enter details · Esc close · ↑↓ move · PgUp/PgDn page · 1–5 filter · Ctrl+↑↓ request · Tab compactions · ←/→ session",
         ),
       ];
       const viewport = rows - head.length - foot.length;
@@ -941,12 +1001,73 @@ export class RequestInspector implements Component {
       return [...head, ...fill(body, viewport), ...foot];
     }
 
-    if (this.mode === "event") {
+    if (this.mode === "records") {
+      const group = this.recordGroup();
+      if (group?.kind !== "records") {
+        this.mode = "composition";
+        return this.render(width);
+      }
+      this.eventSelected = Math.max(group.from, Math.min(group.upTo - 1, this.eventSelected));
+      const head = [
+        pad(c.bold(c.ink(`Log records #${group.from}–#${group.upTo - 1}`))),
+        pad(c.soft("Not extra model messages · Enter inspects one")),
+        pad(rule),
+      ];
+      const foot = [
+        pad(rule),
+        ...controls("Enter details · Esc context · ↑↓ select · PgUp/PgDn page"),
+      ];
+      const viewport = rows - head.length - foot.length;
+      this.lastViewport = viewport;
+      const offset = windowStart(
+        this.eventSelected - group.from,
+        group.upTo - group.from,
+        viewport,
+      );
+      const body: string[] = [];
+      for (
+        let i = group.from + offset;
+        i < Math.min(group.upTo, group.from + offset + viewport);
+        i++
+      ) {
+        const e = events[i];
+        if (!e) continue;
+        const kind = e.type === "ext/event" ? e.kind : e.type;
+        const summary = eventSummary(events, i).text;
+        const duplicate = e.type === "ext/event" && summary === `${e.source} · ${e.kind}`;
+        const text = `#${i}  ${kind}${duplicate ? "" : ` · ${summary}`}`;
+        body.push(
+          pad(i === this.eventSelected ? selectedText(`${G.cursor} ${text}`) : `  ${c.soft(text)}`),
+        );
+      }
+      return [...head, ...fill(body, viewport), ...foot];
+    }
+
+    if (this.mode === "event" || this.mode === "record") {
       const e = events[this.eventSelected];
       const idx = filteredIndices(events, this.eventFilter);
       const pos = idx.indexOf(this.eventSelected);
-      const title = `${c.bold(c.ink(`Event #${this.eventSelected}`))}  ${c.ink(e?.type ?? "")}  ${c.faint(e ? clock(e.at) : "")}  ${c.faint(`(${pos + 1}/${idx.length})`)}   ${this.tabs(EVENT_SECTIONS, this.eventSection)}`;
-      const head = [pad(title), focusLine, pad(rule)];
+      const group = this.mode === "record" ? this.recordGroup() : undefined;
+      if (this.mode === "record" && !group) {
+        this.mode = "composition";
+        return this.render(width);
+      }
+      const position =
+        group?.kind === "records"
+          ? `${this.eventSelected - group.from + 1}/${group.upTo - group.from}`
+          : `${pos + 1}/${idx.length}`;
+      const kind = e?.type === "ext/event" ? `${e.source}/${e.kind}` : (e?.type ?? "");
+      const title = `${c.bold(c.ink(`Event #${this.eventSelected}`))}  ${c.ink(kind)}  ${group ? "" : c.faint(e ? clock(e.at) : "")}  ${c.faint(`(${position})`)}`;
+      const head = [
+        pad(title),
+        pad(
+          group
+            ? c.soft("Log record · not in current input")
+            : c.jin("Inspector · Ctrl+R returns to draft"),
+        ),
+        pad(this.tabs(EVENT_SECTIONS, this.eventSection, inner)),
+        pad(rule),
+      ];
       const content = this.cached(
         cacheKey(`event:${this.eventSelected}:${this.eventSection}`),
         () => {
@@ -982,7 +1103,9 @@ export class RequestInspector implements Component {
       const head = withSession([pad(title), pad(columns), pad(rule)]);
       const foot = [
         pad(rule),
-        pad(c.faint("↑↓ select · Enter details · Tab context · s session · Esc close")),
+        ...controls(
+          "Enter details · Esc close · ↑↓ select · PgUp/PgDn page · Tab context · ←/→ session",
+        ),
       ];
       const viewport = rows - head.length - foot.length;
       this.lastViewport = viewport;
@@ -1013,46 +1136,68 @@ export class RequestInspector implements Component {
       const main = events === this.deps.events();
       const window = main ? this.deps.contextWindow?.() : undefined;
       const size = `≈${fmtTok(wb.total)}${hasImages ? " text tok" : " tok"}${window ? ` of ${fmtTok(window)} · ${pctOf(wb.total, window)}${hasImages ? " text only" : ""}` : ""}`;
-      const cacheNote = !main
-        ? ""
-        : wb.prefixTokens === undefined
-          ? c.faint("nothing sent yet")
-          : wb.broken
-            ? c.jin(`same prefix ≈${fmtTok(wb.prefixTokens)} · changed tail`)
-            : c.faint(`same prefix ≈${fmtTok(wb.prefixTokens)}`);
-      const title = `${c.bold(c.ink("Context"))}  ${c.soft(main ? "what the model sees on the next request" : "derived from sub-session history")}   ${c.soft(size)}   ${cacheNote}`;
-      const columns = c.faint(
-        "   #     what                                                              tok  share",
+      const row = this.selectedRow();
+      const reason = this.busyNote ?? this.contextReadOnlyReason();
+      let action = "Enter actions";
+      switch (row?.kind) {
+        case "system":
+          action = reason ? "Enter view" : "Enter sections";
+          break;
+        case "tools":
+          action = reason ? "Read-only" : "Enter tools";
+          break;
+        case "covered":
+          action = "Enter originals";
+          break;
+        case "dropped":
+          action = "Original in Events";
+          break;
+        case "records":
+          action = "Enter inspect log";
+          break;
+      }
+      const hints = controls(
+        inner < 48
+          ? `${action} · Esc close`
+          : `${action} · Esc close · ↑↓ select · PgUp/PgDn page · Tab requests${this.sessions().length > 1 ? " · ←/→ session" : ""}`,
       );
-      const head = withSession([pad(title), pad(columns), pad(rule)]);
-      if (hasImages)
-        head.splice(
-          1,
-          0,
-          pad(c.jin("Image tokens unknown before next request · estimate covers text only")),
-        );
-      if (!main)
-        head.splice(1, 0, pad(c.soft("Read-only · messages only; tools in request details")));
+      // 至少保留一个列表行、一个预览行和分隔线;短窗口先省略可在请求详情阅读的统计。
+      const headLimit = Math.max(1, rows - hints.length - 3);
+      const head = [
+        pad(c.bold(c.ink(main ? "Context · Next request" : "Context · Sub-session"))),
+        ...(reason
+          ? [
+              pad(
+                c.jin(
+                  this.busy() && !this.busyNote
+                    ? "Context is read-only while running · Esc returns to transcript"
+                    : reason,
+                ),
+              ),
+            ]
+          : []),
+        ...(hasImages ? [pad(c.jin("Image tokens unknown before next request · text only"))] : []),
+        pad(c.soft(`Next input estimate: ${size}`)),
+        pad(c.faint("⋯ Log rows explain event gaps; not extra input")),
+        ...(sessionLine ? [pad(sessionLine)] : []),
+      ].slice(0, headLimit);
       const last = this.records().at(-1);
-      if (last)
-        head.splice(
-          1,
-          0,
-          ...[
-            `Last request #${last.n}`,
-            ...cacheUsageLines(last.response?.usage ?? last.compaction?.usage, inner),
+      const measured = last?.response?.usage ?? last?.compaction?.usage;
+      const stats = last
+        ? [
+            measured
+              ? `Last API #${last.n}: ${fmtTok(measured.inputTokens)} input tok measured by provider`
+              : `Last API #${last.n}: input usage not reported`,
+            ...cacheUsageLines(measured, inner),
           ]
             .flatMap((line) => wrapTextWithAnsi(c.soft(line), inner))
-            .map(pad),
-        );
-      const measured = last?.response?.usage ?? last?.compaction?.usage;
-      if (measured)
-        head.splice(
-          1,
-          0,
-          pad(c.soft(`Last API input: ${fmtTok(measured.inputTokens)} tok measured by provider`)),
-        );
-      const row = this.selectedRow();
+            .map(pad)
+        : [pad(c.faint("No API request yet"))];
+      if (rows >= 24 && head.length + stats.length + 2 <= headLimit) head.push(...stats);
+      else if (last && head.length + 3 <= headLimit)
+        head.push(pad(c.faint(`Last API #${last.n} · Tab requests for measured usage`)));
+      if (head.length < headLimit) head.push(pad(c.faint(workbenchHeader(inner))));
+      if (head.length < headLimit) head.push(pad(rule));
       const maxTok = wb.rows.reduce(
         (m, r) =>
           r.kind === "message" || r.kind === "system" || r.kind === "tools"
@@ -1060,25 +1205,22 @@ export class RequestInspector implements Component {
             : m,
         1,
       );
+      const previewHeight = Math.min(
+        PREVIEW_LINES,
+        Math.max(1, rows - head.length - hints.length - 1 - Math.min(3, wb.rows.length)),
+      );
       const preview = row
         ? previewLines(events, wb, row, {
             width: inner,
-            lines: PREVIEW_LINES - 1,
-            busy: this.busyNote ?? (!main ? this.contextReadOnlyReason() : undefined),
+            lines: previewHeight - 1,
           })
         : [];
-      const previewBox = fill(preview.map(pad), PREVIEW_LINES);
       const foot = [
         pad(rule),
-        ...previewBox.slice(0, PREVIEW_LINES),
-        pad(rule),
-        pad(
-          c.faint(
-            "↑↓ move · Enter actions · PgUp/PgDn page · Tab requests · s session · Esc close",
-          ),
-        ),
+        ...fill(preview.slice(0, previewHeight).map(pad), previewHeight),
+        ...hints,
       ];
-      const viewport = Math.max(3, rows - head.length - foot.length);
+      const viewport = rows - head.length - foot.length;
       this.lastViewport = viewport;
       let body: string[];
       if (wb.rows.length === 0) body = [pad(c.faint("no messages yet"))];
@@ -1134,15 +1276,17 @@ export class RequestInspector implements Component {
         const index = start + i;
         return pad(
           index === sel
-            ? `${c.zhu(G.cursor)} ${c.bold(c.ink(`${index + 1}  ${item.label}`))}`
+            ? selectedText(`${G.cursor} ${index + 1}  ${item.label}`)
             : `  ${c.soft(`${index + 1}  ${item.label}`)}`,
         );
       });
       const reason = this.contextReadOnlyReason();
       const details = [
         ...(reason ? [c.jin(reason)] : []),
-        c.soft(chosen.hint),
-        c.faint(consequenceOf(chosen.action, r, crows, events, this.deps.currentProvider?.())),
+        ...consequenceOf(chosen.action, r, crows, events, this.deps.currentProvider?.())
+          .split("\n")
+          .map((line, i) => (i === 0 ? c.ink(line) : c.soft(line))),
+        c.faint(chosen.hint),
       ].flatMap((line) => wrapTextWithAnsi(line, inner));
       const viewport = Math.max(1, available - listHeight - 1);
       this.lastViewport = viewport;
@@ -1188,12 +1332,42 @@ export class RequestInspector implements Component {
       const start = events.find((e) => e.type === "session/start");
       const metas = start?.type === "session/start" ? (start.sections ?? []) : [];
       const total = metas.reduce((n, s) => n + Math.ceil(s.chars / 4), 0);
-      const title = `${c.bold(c.ink("System prompt"))}  ${c.soft(`${metas.length} sections · ≈${total} tok`)}   ${c.faint(states ? "Enter flips a section for this session" : "section texts cannot be recovered from this log: read-only")}`;
+      const title = `${c.bold(c.ink("System prompt"))}  ${c.soft(`${metas.length} sections · ≈${total} tok`)}`;
       const head = [pad(title), focusLine, pad(rule)];
       const list =
         states ?? names.map((name) => ({ name, on: true, text: "", chars: 0, source: undefined }));
+      const foot = [
+        pad(rule),
+        ...controls(
+          states
+            ? "Enter toggle · Esc back · ↑↓ or 1–9 choose · PgUp/PgDn page"
+            : "Esc back · ↑↓ choose · PgUp/PgDn page",
+        ),
+      ];
+      const reason = this.busyNote ?? this.contextReadOnlyReason();
+      const details = (
+        reason
+          ? wrapTextWithAnsi(c.jin(reason), inner)
+          : states
+            ? wrapTextWithAnsi(
+                c.faint(
+                  "Changes this session's next input · /settings prompt.sections saves defaults",
+                ),
+                inner,
+              )
+            : wrapTextWithAnsi(
+                c.faint("Read-only · Section text not recorded in this session"),
+                inner,
+              )
+      ).map(pad);
+      const available = Math.max(1, rows - head.length - foot.length);
+      const detailHeight = Math.min(details.length, Math.max(0, available - 1));
+      const viewport = available - detailHeight;
+      this.lastViewport = viewport;
+      const offset = windowStart(this.sectionSelected, list.length, viewport);
       const body: string[] = [];
-      list.forEach((s, i) => {
+      list.slice(offset, offset + viewport).forEach((s, k) => {
+        const i = offset + k;
         const meta = metas[i];
         const tok = Math.ceil((meta?.chars ?? s.chars) / 4);
         const first =
@@ -1208,28 +1382,13 @@ export class RequestInspector implements Component {
         body.push(
           pad(
             i === this.sectionSelected
-              ? `  ${c.zhu(G.cursor)} ${c.bold(c.ink(line))}`
+              ? `  ${selectedText(`${G.cursor} ${line}`)}`
               : `    ${s.on ? c.soft(line) : c.faint(line)}`,
           ),
         );
       });
       if (list.length === 0) body.push(pad(c.faint("no section metadata in this session")));
-      body.push(pad(""));
-      if (this.busyNote) body.push(pad(c.zhu(`  ${this.busyNote}`)));
-      else if (states)
-        body.push(
-          ...wrapTextWithAnsi(
-            `${c.soft("If you do this")}  ${c.faint("the system prompt changes for this session (recorded as an edit of event #0) · input changes from the top on the next request · /settings prompt.sections makes it stick")}`,
-            inner,
-          ).map(pad),
-        );
-      const foot = [
-        pad(rule),
-        pad(c.faint(states ? "↑↓ or 1–9 choose · Enter flip · Esc back" : "Esc back")),
-      ];
-      const viewport = rows - head.length - foot.length;
-      this.lastViewport = viewport;
-      return [...head, ...fill(body.slice(0, viewport), viewport), ...foot];
+      return [...head, ...fill(body, viewport), ...details.slice(0, detailHeight), ...foot];
     }
 
     if (this.mode === "covered") {
@@ -1291,20 +1450,53 @@ export class RequestInspector implements Component {
     const head = [pad(title), focusLine, pad(tabs), pad(rule)];
     if ((this.section === 3 || this.section === 6) && this.prepareBodies(rec)) {
       const body = this.bodies.render(inner);
-      const bodyHead = [
-        ...head.slice(0, -1),
-        ...wrapTextWithAnsi(c.soft(`${body.position} · ${this.bodyEvidence}`), inner).map(pad),
-        ...(this.section === 3
+      const action = `↑↓ block · Enter ${body.action} · PgUp/Dn read`;
+      const context = body.context
+        ? truncateToWidth(
+            visibleWidth(`${body.position} · ${body.context}`) <= inner
+              ? `${body.position} · ${body.context}`
+              : body.context,
+            inner,
+            "…",
+          )
+        : `${body.position} · ${this.bodyEvidence}`;
+      const evidence = wrapTextWithAnsi(c.soft(context), inner).map(pad);
+      const cache =
+        this.section === 3
           ? cacheUsageLines(rec.response?.usage ?? rec.compaction?.usage, inner)
               .flatMap((line) => wrapTextWithAnsi(c.soft(line), inner))
               .map(pad)
-          : []),
+          : [];
+      // 先给身份、选中目标、两行正文及真实换行后的操作提示留位置。
+      // 次要信息按优先级整组加入,渲染时仍保持原来的阅读顺序。
+      const footerHeight = wrapTextWithAnsi(c.soft(action), inner).length + 1;
+      let room = Math.max(0, rows - footerHeight - 4);
+      const takeRows = (lines: string[]): string[] => {
+        if (lines.length > room) return [];
+        room -= lines.length;
+        return lines;
+      };
+      const sectionHead = takeRows([pad(tabs)]);
+      const origin = takeRows(evidence.slice(0, 1));
+      const definitions = takeRows(evidence.slice(1));
+      const measured = takeRows(cache.slice(0, 1));
+      const scale = takeRows(cache.slice(1));
+      const separator = takeRows([pad(rule)]);
+      const focus = takeRows([focusLine]);
+      const bodyHead = [
+        pad(title),
+        ...focus,
+        ...sectionHead,
+        ...origin,
+        ...definitions,
+        ...measured,
+        ...scale,
         pad(
           c.ink(
             `Selected · ${body.selected} · ${body.action === "collapse" ? "expanded" : "collapsed"}`,
           ),
         ),
-        head.at(-1) as string,
+        ...separator,
       ];
       const viewport = Math.max(1, rows - bodyHead.length - 2);
       if (
@@ -1312,7 +1504,6 @@ export class RequestInspector implements Component {
         (body.focus < this.scroll || body.focus >= this.scroll + viewport - 2)
       )
         this.scroll = body.focus;
-      const action = `↑↓ block · Enter ${body.action} · PgUp/Dn read`;
       return this.scrollable(bodyHead, body.lines, action, rows, pad, rule, true);
     }
     const build = () =>
@@ -1345,7 +1536,13 @@ export class RequestInspector implements Component {
     rule: string,
     controlsFirst = false,
   ): string[] {
-    const viewport = Math.max(1, rows - head.length - 2);
+    const hints = hint.split(" · ");
+    const back = hints.find((part) => part.startsWith("Esc")) ?? "Esc back";
+    const keys = wrapTextWithAnsi(
+      c.soft(hints.filter((part) => part !== back).join(" · ")),
+      visibleWidth(rule),
+    ).map(pad);
+    const viewport = Math.max(1, rows - head.length - keys.length - 1);
     this.lastViewport = viewport;
     const maxScroll = Math.max(0, content.length - viewport);
     this.scroll = Math.min(this.scroll, maxScroll);
@@ -1355,10 +1552,11 @@ export class RequestInspector implements Component {
       content.length <= viewport
         ? `${content.length} lines`
         : `lines ${this.scroll + 1}-${Math.min(content.length, this.scroll + viewport)} of ${content.length}`;
-    // 位置在前:窄终端截断的是按键提示,不是"第几行"。
-    const foot = controlsFirst
-      ? [pad(`${c.faint(pos)} · ${c.faint("[ ] request · Esc back")}`), pad(c.soft(hint))]
-      : [pad(rule), pad(`${c.soft(pos)}  ${c.faint(hint)}`)];
+    // 返回入口常驻,其余按键换行,不让位置计数截掉操作说明。
+    const foot = [
+      pad(c.faint(`${back}${controlsFirst ? " · [ ] request" : ""} · ${pos}`)),
+      ...keys,
+    ];
     return [...head, ...slice.map(pad), ...foot];
   }
 }

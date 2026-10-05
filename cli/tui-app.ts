@@ -13,7 +13,6 @@ import {
   type Component,
   Container,
   Editor,
-  getKeybindings,
   isViewportTUI,
   Key,
   matchesKey,
@@ -42,6 +41,7 @@ import type { Tool } from "../src/tools.js";
 import { DEFAULT_RESULT_VIEWS, firstRunLines, thinkingLines } from "./cards.js";
 import { type ClipboardInput, imageFromPath, readClipboardInput } from "./clipboard-input.js";
 import { RequestInspector, type SessionSource } from "./inspector.js";
+import { fmtTok } from "./inspector-format.js";
 import type { McpServerStatus } from "./mcp/bridge.js";
 import type { ModelSettings } from "./model-settings.js";
 import type { Skill } from "./prompt.js";
@@ -65,7 +65,7 @@ import {
   openUrl,
   withFocusTracking,
 } from "./terminal-extras.js";
-import { c, editorTheme, G } from "./theme.js";
+import { c, editorTheme, G, selectedText } from "./theme.js";
 import type { MemoryFiles } from "./tools/memory.js";
 import { Block } from "./tui-block.js";
 import { applyTools, COMMANDS, command, openLogin, openPalette, submit } from "./tui-commands.js";
@@ -231,8 +231,7 @@ export type TuiApp = {
 /** 头部的窗口标签:1M ctx (models.dev);假设值用朱色,提醒去配置里写。 */
 function contextTag(info: TuiAppDeps["info"]): string {
   if (!info.contextWindow) return "";
-  const n = info.contextWindow;
-  const w = n >= 1_000_000 ? `${Math.round(n / 100_000) / 10}M` : `${Math.round(n / 1024)}k`;
+  const w = fmtTok(info.contextWindow);
   const src = info.capabilitySource ?? "config";
   return src === "assumed" ? c.zhu(`${w} ctx assumed`) : c.faint(`${w} ctx (${src})`);
 }
@@ -302,13 +301,6 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
         { component: bottom, basis: "auto", shrink: 1, minSize: 1 },
       ]),
     );
-    // PgUp / PgDn 归账簿(按步移动光标并滚到那一步);引擎的整页滚动让给它。Ctrl+↑↓ 仍是引擎的按标记跳。
-    const kb = getKeybindings();
-    kb.setUserBindings({
-      ...kb.getUserBindings(),
-      "tui.altScreen.pageUp": [],
-      "tui.altScreen.pageDown": [],
-    });
   } else {
     tui.addChild(header);
     tui.addChild(new Spacer(1));
@@ -727,8 +719,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
         },
       ],
       "↑↓ choose · Enter select · Esc back",
-      (row, key) => {
-        if (key !== "enter") return;
+      (row) => {
         closeQuitPrompt();
         if (row.label === "Exit") ctx.exit();
       },
@@ -797,9 +788,8 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
               "",
               ...ctx.draftImages.slice(start, start + count).map((image, index) => {
                 const i = start + index;
-                return line(
-                  ` ${selected === i ? "›" : " "} ${i + 1}. ${image.name ?? image.mimeType} · ${imageBytes(image)} bytes`,
-                );
+                const text = ` ${selected === i ? G.cursor : " "} ${i + 1}. ${image.name ?? image.mimeType} · ${imageBytes(image)} bytes`;
+                return line(selected === i ? selectedText(text) : c.ink(text));
               }),
               ...(ctx.draftImages.length ? [] : [" No images attached."]),
               "",
@@ -863,7 +853,13 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     if (matchesKey(data, Key.ctrl("r"))) {
       if (approval.overlay || ctx.dialog.overlay) return undefined;
       if (ctx.inspector.overlay) ctx.inspector.close();
-      else ctx.inspector.open();
+      else {
+        ctx.inspector.open();
+        // 主屏已选请求时直接查看它的接收内容,不再让用户在列表里重复定位。
+        const step = ctx.steps[ctx.view.selectedStep ?? -1];
+        if (step) inspector.showRequest(step.n, 6);
+        tui.requestRender();
+      }
       return { consume: true };
     }
     if (matchesKey(data, Key.ctrl("e"))) {
@@ -900,13 +896,9 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       toggleFold(ctx);
       return { consume: true };
     }
-    // 账簿光标:PgUp / PgDn 在步之间移动并滚到那一步;Enter(输入框为空)展开或折起;Esc 放开。
-    if (matchesKey(data, "pageUp") || matchesKey(data, "pageDown")) {
-      const direction = matchesKey(data, "pageUp") ? -1 : 1;
-      if (!selectStep(ctx, direction) && scroll) {
-        scroll.scrollBy(direction * Math.max(1, scroll.viewportHeight - 1));
-        tui.requestRender();
-      }
+    // 翻页归终端引擎;请求选择使用修饰键,不覆盖正文阅读或菜单翻页。
+    if (matchesKey(data, "shift+pageUp") || matchesKey(data, "shift+pageDown")) {
+      selectStep(ctx, matchesKey(data, "shift+pageUp") ? -1 : 1);
       return { consume: true };
     }
     if (
@@ -984,9 +976,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
             heading,
             rows,
             "↑↓ choose · Enter select · Esc back",
-            (row, key) => {
-              if (key === "enter") done(row.label);
-            },
+            (row) => done(row.label),
             () => done(),
             () => tui.requestRender(),
             () => deps.terminal.rows,

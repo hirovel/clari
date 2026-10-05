@@ -3,7 +3,7 @@
 import { now } from "../src/events.js";
 import { contextFields, type EditField, editState } from "../src/messages.js";
 import { forkSession, SESSIONS_DIR } from "./bootstrap.js";
-import type { CompositionRow, ContextAction } from "./inspector.js";
+import type { CompositionRow, ContextAction } from "./inspector-composition.js";
 import { sectionStates, systemWithSections } from "./prompt-sections.js";
 import { c, G } from "./theme.js";
 import type { TuiContext } from "./tui-context.js";

@@ -3,7 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { collectRequests } from "../cli/inspector.js";
+import { BodyBrowser } from "../cli/body-browser.js";
+import { receivedBlocks } from "../cli/inspector-bodies.js";
+import { collectRequests } from "../cli/inspector-requests.js";
 import { readRequestRecording } from "../cli/session-records.js";
 import { clearToolResults, keepRecentTokens, llmSummarize } from "../src/compaction.js";
 import type { AgentEvent } from "../src/events.js";
@@ -19,6 +21,7 @@ import { openaiCompat } from "../src/providers/openai-chat.js";
 import { openaiResponses } from "../src/providers/openai-responses.js";
 import { defineTool } from "../src/tools.js";
 import { testImage } from "./helpers/image.js";
+import { stripAnsi } from "./helpers/virtual-terminal.js";
 
 const echo = defineTool({
   name: "echo",
@@ -95,7 +98,7 @@ describe("请求层记录", () => {
     expect(typeof resp.latencyMs).toBe("number");
   });
 
-  it("执行过的工具结果带耗时;未执行的(未知工具)没有", async () => {
+  it("工具结果按请求显示,拒绝与校验失败没有原文附件也不能遗漏", async () => {
     const log = fresh();
     await runTurn({
       log,
@@ -105,16 +108,138 @@ describe("请求层记录", () => {
           toolCalls: [
             { id: "c1", name: "echo", args: { text: "a" } },
             { id: "c2", name: "nope", args: {} },
+            { id: "c3", name: "echo", args: { text: "denied" } },
+            { id: "c4", name: "echo", args: {} },
           ],
           stopReason: "tool",
         },
         { text: "done", toolCalls: [], stopReason: "end" },
       ]),
       tools: [echo],
+      slots: {
+        approve: async (call) =>
+          call.id === "c3" ? { allowed: false, reason: "Run tests first" } : true,
+      },
     });
     const results = log.events.filter((e) => e.type === "tool/result");
     expect(results[0] && "durationMs" in results[0] && typeof results[0].durationMs).toBe("number");
     expect(results[1] && "durationMs" in results[1]).toBe(false);
+    expect(results).toHaveLength(4);
+    expect(results[2]?.content).toBe("The user denied this call: Run tests first");
+    expect(results[3]?.isError).toBe(true);
+    const records = collectRequests(log.events);
+    const first = records[0];
+    if (!first) throw new Error("missing request");
+    const displayed = receivedBlocks(first).filter((block) => block.id.startsWith("model-"));
+    expect(displayed.map((block) => block.lines().join("\n"))).toEqual(
+      results.map((result) => result.content),
+    );
+    expect(displayed.map((block) => block.meta)).toEqual([
+      expect.stringContaining("c1 · success"),
+      expect.stringContaining("c2 · error"),
+      expect.stringContaining("c3 · error"),
+      expect.stringContaining("c4 · error"),
+    ]);
+    expect(records[1]?.results).toEqual([]);
+    const captured = receivedBlocks(first, {
+      bodies: [],
+      outputs: [
+        {
+          callId: "c1",
+          name: "echo",
+          original: "full output",
+          state: "result recorded",
+          source: "original output",
+        },
+      ],
+      error: "Original attachment unavailable",
+    });
+    expect(captured.filter((block) => block.id.startsWith("model-"))).toHaveLength(4);
+    expect(captured.filter((block) => block.id.startsWith("original-"))).toHaveLength(1);
+    expect(captured.findIndex((block) => block.id === "original-c1") + 1).toBe(
+      captured.findIndex((block) => block.id === "model-c1"),
+    );
+    expect(
+      captured.filter((block) => /^(call|original|model)-/.test(block.id)).map((block) => block.id),
+    ).toEqual([
+      "call-c1",
+      "original-c1",
+      "model-c1",
+      "call-c2",
+      "model-c2",
+      "call-c3",
+      "model-c3",
+      "call-c4",
+      "model-c4",
+    ]);
+    expect(captured[0]?.title).toBe("Recording unavailable or damaged");
+    // 分组只用于显示。同一文件的两次调用不能合并,折叠也不能删改完整参数。
+    if (!first.response) throw new Error("Expected a recorded response");
+    const path = "/project/alpha/settings.json";
+    const grouped = receivedBlocks({
+      ...first,
+      response: {
+        ...first.response,
+        toolCalls: ["c1", "c2"].map((id) => ({ id, name: "read", args: { path } })),
+      },
+      results: first.results.slice(0, 2),
+    });
+    const argumentsBlocks = grouped.filter((block) => block.id.startsWith("call-"));
+    expect(argumentsBlocks.map((block) => block.group?.id)).toEqual(["c1", "c2"]);
+    expect(argumentsBlocks.map((block) => block.lines().join("\n"))).toEqual([
+      JSON.stringify({ path }, null, 2),
+      JSON.stringify({ path }, null, 2),
+    ]);
+    expect(argumentsBlocks.every((block) => !block.preview.includes(path))).toBe(true);
+    const groupedBrowser = new BodyBrowser();
+    groupedBrowser.set("grouped", grouped);
+    const folded = groupedBrowser.render(60);
+    expect(folded.context).toContain("alpha/settings.json");
+    expect(
+      folded.lines.map(stripAnsi).filter((line) => line.trim() === "read · alpha/settings.json"),
+    ).toHaveLength(2);
+    groupedBrowser.handleInput("\r");
+    expect(groupedBrowser.render(60).lines.map(stripAnsi).join("\n")).toContain(path);
+    groupedBrowser.handleInput("\x1b[B");
+    expect(groupedBrowser.render(60).context).toContain("alpha/settings.json");
+    expect(deriveMessages(log.events).filter((message) => message.role === "tool")).toHaveLength(4);
+    const partial = receivedBlocks({ ...first, results: first.results.slice(1) });
+    expect(partial.find((block) => block.id === "call-c1")?.meta).toContain("result not recorded");
+    // 长调用ID不能挤掉当前最重要的缺失说明;不把缺失推断为仍在运行。
+    if (!first.response) throw new Error("Expected a recorded response");
+    const missing = receivedBlocks({
+      ...first,
+      response: {
+        ...first.response,
+        toolCalls: [{ id: `call_${"long".repeat(12)}`, name: "echo", args: { text: "a" } }],
+      },
+      results: [],
+    });
+    const browser = new BodyBrowser();
+    browser.set("missing", missing);
+    const narrow = browser.render(32).lines.map(stripAnsi).join("\n");
+    expect(narrow).toContain("result not recorded");
+    expect(narrow).not.toContain("running");
+    expect(partial.some((block) => block.id === "model-c1")).toBe(false);
+    // 未匹配结果不能丢失,且未知状态优先于成功标记。
+    const unknown = receivedBlocks({
+      ...first,
+      results: [
+        ...first.results,
+        {
+          type: "tool/result",
+          at: "t",
+          callId: "unmatched",
+          name: "echo",
+          content: "Check external state",
+          isError: false,
+          outcome: "unknown",
+        },
+      ],
+    });
+    const unknownBlock = unknown.find((block) => block.id === "model-unmatched");
+    expect(unknownBlock?.title).toContain("outcome unknown");
+    expect(unknownBlock?.lines()).toEqual(["Check external state"]);
   });
 
   it("未配置压缩时 request 不带阈值", async () => {
@@ -157,18 +282,29 @@ describe("请求层记录", () => {
   });
 
   it("请求最终失败记 request/error 后再抛出", async () => {
-    const log = fresh();
+    const failure = new ProviderError("provider 500: boom", { status: 500 });
+    let calls = 0;
     const provider: Provider = {
       model: "fake",
       async complete() {
-        throw new ProviderError("provider 500: boom", { status: 500 });
+        calls++;
+        throw failure;
       },
     };
-    await expect(runTurn({ log, provider, tools: [] })).rejects.toThrow("boom");
-    expect(types(log)).toEqual(["session/start", "user/message", "request", "request/error"]);
-    const err = log.events[3];
-    if (err?.type !== "request/error") throw new Error("应为 request/error");
-    expect(err.status).toBe(500);
+    for (const reason of ["turn", "compaction"] as const) {
+      const log = fresh();
+      const result =
+        reason === "turn"
+          ? runTurn({ log, provider, tools: [] })
+          : recordingProvider(log, provider).complete(deriveMessages(log.events), []);
+      await expect(result).rejects.toBe(failure);
+      expect(types(log)).toEqual(["session/start", "user/message", "request", "request/error"]);
+      expect(log.events[2]).toMatchObject({ type: "request", reason });
+      const err = log.events[3];
+      if (err?.type !== "request/error") throw new Error("应为 request/error");
+      expect(err.status).toBe(500);
+    }
+    expect(calls).toBe(2);
   });
 
   it("插话注入先落 steering 决策,再落留言;终止叫停落 termination 决策", async () => {
@@ -442,13 +578,22 @@ describe("wire 层与实际发送一致", () => {
       try {
         const file = join(dir, "s.jsonl");
         const log = new EventLog(file);
-        const record = exchangeRecorder(log, 0);
-        if (!record) throw new Error("missing recorder");
-        await provider.complete(messages, tools, {
-          record,
+        const retries: number[] = [];
+        await recordingProvider(log, provider).complete(messages, tools, {
           onRequest: (body) => captures.push(body),
+          onRetry: (info) => retries.push(info.attempt),
         });
-        const saved = readRequestRecording(file, EventLog.load(file).events, 0);
+        const events = EventLog.load(file).events;
+        const saved = readRequestRecording(file, events, 0);
+        expect(events[0]).toMatchObject({ type: "request", reason: "compaction" });
+        expect(events.filter((e) => e.type === "retry")).toEqual([
+          expect.objectContaining({ attempt: 1, status: 503 }),
+        ]);
+        expect(retries).toEqual([1]);
+        expect(
+          events.some((e) => e.type === "assistant/message" || e.type === "request/error"),
+        ).toBe(false);
+        expect(saved?.input).toEqual({ messages, tools });
         expect(saved?.bodies).toEqual(sent);
         const wire = JSON.parse(sent[1] ?? "{}");
         if (create === anthropic)

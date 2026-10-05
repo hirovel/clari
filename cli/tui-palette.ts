@@ -9,7 +9,7 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import { c } from "./theme.js";
+import { c, G, selectedText } from "./theme.js";
 import { printableInput } from "./tui-format.js";
 
 export type PaletteKind = "command" | "model" | "skill" | "template" | "login" | "setting";
@@ -84,9 +84,9 @@ export class Palette implements Component {
       line(`  ${c.zhu("›")} ${c.ink(this.query)}${c.faint("▏")}`),
       ...visible.map((r, offset) => {
         const i = start + offset;
-        const cursor = i === this.index ? c.ink("▸") : " ";
+        const cursor = i === this.index ? selectedText(G.cursor) : " ";
         const label = r.label + " ".repeat(Math.max(0, labelWidth - visibleWidth(r.label)));
-        const text = i === this.index ? c.bold(c.ink(label)) : c.ink(label);
+        const text = i === this.index ? selectedText(label) : c.ink(label);
         return line(
           `  ${cursor} ${text}  ${c.faint(KIND_TAG[r.kind])}${r.note ? `  ${c.faint(r.note.replace(/\s+/g, " "))}` : ""}`,
         );

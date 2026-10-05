@@ -111,16 +111,16 @@ describe("变化说明里的编辑点与预计命中", () => {
     );
     expect(edit.startsWith("✎ ")).toBe(true);
     expect(edit).toContain("1 edited (#6)");
-    expect(edit).toContain("2 recomputed");
+    expect(edit).toContain("2 after prefix");
     expect(edit).toContain("1 thinking block dropped");
-    expect(edit).toMatch(/cache ≤\S+ of \S+/);
+    expect(edit).toMatch(/unchanged ≈\S+ tok/);
     const predicted = predictedCache(prev, cur);
     expect(predicted).toBeGreaterThan(0);
     // 实测命中明显低于预计时才有缓存说明;预计与实测并排。
     const note = plain(
       cacheNote({ inputTokens: 5000, outputTokens: 5, cacheReadTokens: 1000 }, 4000) ?? "",
     );
-    expect(note).toMatch(/^≈ cache 20% · \S+ of \S+ hit · expected ≤\S+$/);
+    expect(note).toMatch(/^≈ cache hit 20% · \S+ of \S+ tok · unchanged text ≈\S+ tok$/);
   });
 });
 

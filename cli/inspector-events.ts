@@ -16,7 +16,7 @@ import type { Provider } from "../src/provider.js";
 import { compactionDecisionText } from "./cards.js";
 import { renderExtEvent } from "./ext-events.js";
 import { clock, firstLine, fmtMs, fmtTok, indent, pctOf } from "./inspector-format.js";
-import { c, G } from "./theme.js";
+import { c, G, selectedText } from "./theme.js";
 
 export const EVENT_FILTERS = ["all", "conversation", "kernel", "changes", "extensions"] as const;
 export type EventFilter = 1 | 2 | 3 | 4 | 5;
@@ -294,7 +294,7 @@ export function eventLine(
   const e = events[i] as AgentEvent;
   const s = eventSummary(events, i);
   const sees = modelSees(events, i);
-  const cursor = opts.selected ? c.zhu(G.cursor) : " ";
+  const cursor = opts.selected ? selectedText(G.cursor) : " ";
   // request 是章节:靠上面的空行与正文色区分,不靠缩进 —— 缩进会把右边每一列都错开。
   const isRequest = e.type === "request";
   const fixed = 2 + 6 + 10 + 17 + 2 + 6 + 2 + 13;
@@ -304,7 +304,7 @@ export function eventLine(
   const body = `${`#${i}`.padEnd(5)} ${clock(e.at)}  ${e.type.padEnd(16)} ${what} ${(s.tok === undefined ? "" : String(s.tok)).padStart(5)}`;
   const seesText = sees.changed ? c.jin(sees.text) : c.faint(sees.text);
   const tone = opts.selected
-    ? c.bold(c.ink(body))
+    ? selectedText(body)
     : isRequest
       ? c.ink(body)
       : isProjected(e)

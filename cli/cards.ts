@@ -186,7 +186,7 @@ export function changeNote(input: ChangeInput): string | undefined {
     note(
       edited.length > 0 ? c.jin(G.edited) : c.jin(G.compact),
       c.jin(parts.join(" · ")),
-      `→ ${recomputed} recomputed · cache ≤${fmtTok(tokensOf(messages, keep))} of ${fmtTok(tokensOf(messages))} · Ctrl+E`,
+      `→ ${recomputed} after prefix · unchanged ≈${fmtTok(tokensOf(messages, keep))} tok · Ctrl+E`,
     ),
   );
   return lines.join("\n");
@@ -205,7 +205,7 @@ export function cacheNote(u: Usage, predicted: number | undefined): string | und
   const ratio = u.cacheReadTokens / u.inputTokens;
   if (ratio >= 0.5) return undefined;
   return `${c.jin(G.compact)} ${c.faint(
-    `cache ${Math.round(ratio * 100)}% · ${fmtTok(u.cacheReadTokens)} of ${fmtTok(u.inputTokens)} hit · expected ≤${fmtTok(predicted)}`,
+    `cache hit ${Math.round(ratio * 100)}% · ${fmtTok(u.cacheReadTokens)} of ${fmtTok(u.inputTokens)} tok · unchanged text ≈${fmtTok(predicted)} tok`,
   )}`;
 }
 
@@ -264,8 +264,8 @@ export function resultView(views: Record<string, ResultView>, name: string): Res
 const ERROR_LINES = 20;
 
 /**
- * 工具结果:一行头(└ ✓/✗、名字、行数、耗时),正文缩到正文列。
- * 折叠按可见度:count 只有头;head 前 N 行;tail 后 N 行;all 全部。出错的结果不按 count 折。
+ * 工具结果:状态、行数与耗时独立于正文折叠,未知结果也能展开完整原因。
+ * 折叠按可见度:count 只有头;head 前 N 行;tail 后 N 行;all 全部。异常结果不按 count 折。
  */
 export function resultLines(
   r: Pick<
@@ -274,28 +274,30 @@ export function resultLines(
   >,
   opts: { folded: boolean; head: number; view: ResultView },
 ): string[] {
-  if (r.outcome === "unknown")
-    return [
-      `${c.faint(G.body)} ${c.jin("?")} ${c.soft(r.name)} ${c.jin("· result unknown")}`,
-      `  ${c.soft(r.content.split("\n")[0] ?? "")}`,
-      `  ${c.jin("/session recovery")} ${c.soft("· reason and original arguments")}`,
-    ];
+  const unknown = r.outcome === "unknown";
+  const abnormal = r.isError || unknown;
   // 静成功、响失败:✓ 是次要色,只有 ✗ 用朱。
-  const mark = r.isError ? c.zhu(G.err) : c.soft(G.ok);
+  const mark = unknown ? c.jin("?") : r.isError ? c.zhu(G.err) : c.soft(G.ok);
   const trimmed = r.content.trim();
   const all = trimmed ? trimmed.split("\n") : [];
   const meta = [
+    ...(unknown ? ["result unknown"] : []),
     all.length > 0 ? `${all.length} line${all.length === 1 ? "" : "s"}` : "no output",
     ...(r.durationMs !== undefined ? [fmtMs(r.durationMs)] : []),
-    ...(r.isError ? ["error"] : []),
+    ...(r.isError && !unknown ? ["error"] : []),
   ];
-  const lines = [`${c.faint(G.body)} ${mark} ${c.soft(r.name)}${c.faint(`  ${meta.join(" · ")}`)}`];
+  const lines = [
+    `${c.faint(G.body)} ${mark} ${c.soft(r.name)}${(unknown ? c.jin : c.faint)(`  ${meta.join(" · ")}`)}`,
+    ...(unknown
+      ? [`  ${c.jin("/session recovery")} ${c.soft("· reason and original arguments")}`]
+      : []),
+  ];
   if (all.length === 0) return lines;
-  const tone = r.isError ? c.soft : c.faint;
+  const tone = abnormal ? c.soft : c.faint;
   const body = (l: string) => `  ${tone(l)}`;
   const more = (n: number, where: string) => `  ${c.soft(`… +${n} lines${where} · Ctrl+O`)}`;
-  const view = r.isError ? "head" : opts.view;
-  const head = r.isError ? Math.max(opts.head, ERROR_LINES) : opts.head;
+  const view = abnormal ? "head" : opts.view;
+  const head = abnormal ? Math.max(opts.head, ERROR_LINES) : opts.head;
   const limit = view === "count" ? 0 : head;
   if (!opts.folded || view === "all" || all.length <= limit) {
     lines.push(...all.map(body));
@@ -349,8 +351,8 @@ export function firstRunLines(): string[] {
 /** 论点两句:/help 的开头。 */
 export function thesisLines(): string[] {
   return [
-    c.soft("Everything the model sees, and everything the kernel decides, is one append-only log."),
-    c.soft("This screen is a projection of it. So is every request."),
+    c.soft("Messages, tool results and context changes are kept in one append-only log."),
+    c.soft("Requests are projected from it. Interface actions are not all saved."),
   ];
 }
 
@@ -365,11 +367,14 @@ export function shortcutLines(): string[] {
     k("Alt+V", "paste clipboard image; Ctrl+V if terminal forwards it"),
     k("Alt+I", "inspect or remove draft images"),
     k("Esc", "close view / return live / interrupt"),
+    k("↑↓ / Enter", "select and confirm menu actions; numbers select only"),
+    k("←→", "select settings actions or inspector sessions and sections"),
     k("Ctrl+K", "search commands, models, skills and templates"),
-    k("PgUp PgDn", "select step · Enter folds or unfolds"),
+    k("PgUp PgDn", "page through transcript in fullscreen mode"),
+    k("Shift+PgUp PgDn", "select request · Enter folds or unfolds"),
     k("Ctrl+↑ ↓", "jump between user prompts"),
     k("Ctrl+E", "context workbench · inspect or edit messages"),
-    k("Ctrl+R", "request inspector · Tab switches views"),
+    k("Ctrl+R", "selected request's received content, or request list · Tab switches views"),
     k("Ctrl+O", "fold results · cycle sub-agent views"),
     k("Ctrl+T", "expand or collapse thinking"),
     k("Ctrl+C", "confirm exit"),

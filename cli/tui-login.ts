@@ -12,7 +12,7 @@ import type { ModelConfig } from "../src/config.js";
 import { errorMessage } from "../src/providers/errors.js";
 import type { ProviderSummary } from "./model-settings.js";
 import { describeInferred, type Inferred } from "./registry.js";
-import { c } from "./theme.js";
+import { c, G, selectedText } from "./theme.js";
 import { cleanPasteText, printableInput } from "./tui-format.js";
 
 export type PickRow = {
@@ -24,23 +24,26 @@ export type PickRow = {
   current?: boolean;
 };
 
-function isUp(data: string): boolean {
-  return matchesKey(data, Key.up) || data === "k";
-}
-function isDown(data: string): boolean {
-  return matchesKey(data, Key.down) || data === "j";
+export const SAVE_MODEL_DEFAULT = "Use and save as default";
+
+/** 登录与模型菜单共用显式动作,切换和保存作用域不靠隐藏键区分。 */
+export function modelUseRows(): PickRow[] {
+  return [
+    { label: "Use for this session", note: "Saved defaults stay unchanged." },
+    { label: SAVE_MODEL_DEFAULT, note: "Also use this model for future starts." },
+  ];
 }
 
-/** 渲染一列可选行:▸ 标当前光标并加粗,行前编号(1–9 直接按),disabled 淡显,current 泥金。 */
+/** 渲染一列可选行:› 标当前光标并泥金加粗,行前编号(1–9 直接按),disabled 淡显,current 泥金。 */
 function renderRows(rows: PickRow[], index: number): string[] {
   const width = Math.max(0, ...rows.map((r) => visibleWidth(r.label)));
   const numWidth = String(rows.length).length;
   return rows.map((r, i) => {
-    const mark = i === index ? c.ink("▸") : " ";
+    const mark = i === index ? selectedText(G.cursor) : " ";
     const num = i < 9 ? `${i + 1}.`.padStart(numWidth + 1) : " ".repeat(numWidth + 1);
     const label = r.label + " ".repeat(Math.max(0, width - visibleWidth(r.label)));
-    const text = r.disabled ? c.faint(label) : i === index ? c.bold(c.ink(label)) : c.ink(label);
-    return `  ${mark} ${c.faint(num)} ${text}${r.note ? `  ${c.faint(r.note)}` : ""}`;
+    const text = r.disabled ? c.faint(label) : i === index ? selectedText(label) : c.ink(label);
+    return `  ${mark} ${i === index ? selectedText(num) : c.faint(num)} ${text}${r.note ? `  ${c.faint(r.note)}` : ""}`;
   });
 }
 
@@ -62,7 +65,7 @@ function nextIndex(rows: PickRow[], from: number, step: 1 | -1): number {
 
 /**
  * 通用列表选择器:/model 与 /models 用。
- * onPick 收到选中的行与触发键(Enter 或 d),d 的语义由调用方定(切换并设为缺省)。
+ * 数字只选择,Enter 执行;普通字母不触发动作。
  */
 export class ListPicker implements Component {
   private index: number;
@@ -75,7 +78,7 @@ export class ListPicker implements Component {
     private readonly title: string,
     private readonly rows: PickRow[],
     private readonly hint: string,
-    private readonly onPick: (row: PickRow, key: "enter" | "d") => void,
+    private readonly onPick: (row: PickRow) => void,
     private readonly onCancel: () => void,
     private readonly onChange: () => void = () => {},
     private readonly height: () => number = () => 24,
@@ -149,8 +152,8 @@ export class ListPicker implements Component {
   handleInput(data: string): void {
     const previous = this.index;
     const numbered = numberedIndex(this.rows, data);
-    if (isUp(data)) this.index = nextIndex(this.rows, this.index, -1);
-    else if (isDown(data)) this.index = nextIndex(this.rows, this.index, 1);
+    if (matchesKey(data, Key.up)) this.index = nextIndex(this.rows, this.index, -1);
+    else if (matchesKey(data, Key.down)) this.index = nextIndex(this.rows, this.index, 1);
     else if (numbered !== undefined) this.index = numbered;
     else if (matchesKey(data, Key.pageUp))
       this.detailOffset = Math.max(0, this.detailOffset - this.detailPage);
@@ -159,9 +162,9 @@ export class ListPicker implements Component {
         Math.max(0, this.detailTotal - this.detailPage),
         this.detailOffset + this.detailPage,
       );
-    else if (matchesKey(data, Key.enter) || data === "d") {
+    else if (matchesKey(data, Key.enter)) {
       const row = this.rows[this.index];
-      if (row && !row.disabled) this.onPick(row, data === "d" ? "d" : "enter");
+      if (row && !row.disabled) this.onPick(row);
       return;
     } else if (matchesKey(data, Key.escape)) {
       this.onCancel();
@@ -368,8 +371,7 @@ export class LoginDialog implements Component {
           note: `${p.protocol}   ${p.keySource ? `key: ${p.keySource}` : "no key"}${p.env ? `   ${p.env}` : ""}`,
         })),
         "↑↓ choose · Enter continue · Esc close (/login opens this again)",
-        (row, key) => {
-          if (key !== "enter") return;
+        (row) => {
           const provider = providers.find((p) => p.name === row.label);
           if (provider) this.step = { kind: "key", provider, buffer: "" };
           this.deps.onChange();
@@ -456,17 +458,35 @@ export class LoginDialog implements Component {
     const picker = new ListPicker(
       `${c.bold(c.ink(provider.name))}  ${c.soft("key saved")} · ${verified ? c.soft(status) : c.zhu(status)}`,
       rows,
-      "↑↓ choose · Enter use this model · d use it and make it the default · Esc done",
-      (row, picked) => {
-        try {
-          const add = inferred.get(row.label);
-          if (add) this.deps.addModel?.(provider.name, add);
-          this.deps.useModel(`${provider.name}/${row.label}`, picked === "d");
-          this.deps.onDone();
-        } catch (error) {
-          const message = errorMessage(error);
-          picker.showError(cleanPasteText(message.replaceAll(key, "[redacted]")));
-        }
+      "↑↓ choose · Enter actions · Esc done",
+      (row) => {
+        const actions = new ListPicker(
+          `${provider.name}/${row.label}`,
+          modelUseRows(),
+          "↑↓ choose · Enter apply · Esc back",
+          (action) => {
+            try {
+              const add = inferred.get(row.label);
+              if (add) this.deps.addModel?.(provider.name, add);
+              this.deps.useModel(
+                `${provider.name}/${row.label}`,
+                action.label === SAVE_MODEL_DEFAULT,
+              );
+              this.deps.onDone();
+            } catch (error) {
+              const message = errorMessage(error);
+              actions.showError(cleanPasteText(message.replaceAll(key, "[redacted]")));
+            }
+          },
+          () => {
+            this.step = { kind: "models", picker };
+            this.deps.onChange();
+          },
+          () => this.deps.onChange(),
+          () => this.deps.height?.() ?? 24,
+        );
+        this.step = { kind: "models", picker: actions };
+        this.deps.onChange();
       },
       () => this.deps.onDone(),
       () => this.deps.onChange(),

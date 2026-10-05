@@ -151,7 +151,7 @@ describe("会话恢复", () => {
 
     // 旧请求的线路正文:模型相同,用当前 provider 重建
     app2.inspector.open();
-    app2.inspector.key("g");
+    app2.inspector.key("\x1b[H");
     app2.inspector.key("\r");
     app2.inspector.key("5");
     const insp = app2.inspector.lines(100).map(stripAnsi).join("\n");

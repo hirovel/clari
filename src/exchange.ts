@@ -2,26 +2,61 @@ import { join } from "node:path";
 import { now } from "./events.js";
 import type { EventLog } from "./log.js";
 import type { Message } from "./messages.js";
-import type { ToolDef } from "./provider.js";
+import type { AssistantTurn, CompleteOptions, Provider, ToolDef } from "./provider.js";
+import { classifyError, errorMessage, ProviderError, providerMessage } from "./providers/errors.js";
 import type { HttpRecorder } from "./providers/http.js";
 import type { ContentRef } from "./recording.js";
 
-export async function recordInput(
+/** 调用者已追加请求事实;这里负责实际请求与记录,不决定循环或响应的用途。 */
+export async function completeRecorded(
   log: EventLog,
+  provider: Provider,
   messages: Message[],
   tools: ToolDef[],
-  signal?: AbortSignal,
-): Promise<HttpRecorder | undefined> {
+  opts: CompleteOptions = {},
+): Promise<AssistantTurn> {
   const request = log.events.length - 1;
-  if (log.recording) {
-    const input = log.recording.open("Adapter input: messages and tools");
-    input.write(JSON.stringify({ messages, tools }));
-    await log.checkpoint(signal);
-    recordEvent(log, "request/input", { request, input: { ...input.ref, bytes: input.bytes } });
+  try {
+    if (log.recording) {
+      const input = log.recording.open("Adapter input: messages and tools");
+      input.write(JSON.stringify({ messages, tools }));
+      await log.checkpoint(opts.signal);
+      recordEvent(log, "request/input", { request, input: { ...input.ref, bytes: input.bytes } });
+    }
+    await log.checkpoint(opts.signal);
+    opts.signal?.throwIfAborted();
+    const record = exchangeRecorder(log, request, opts.signal);
+    return await provider.complete(messages, tools, {
+      ...opts,
+      ...(record && { record }),
+      onRetry: (info) => {
+        opts.onRetry?.(info);
+        const status = info.error instanceof ProviderError ? info.error.status : undefined;
+        log.append({
+          type: "retry",
+          at: now(),
+          attempt: info.attempt,
+          delayMs: info.delayMs,
+          error: errorMessage(info.error),
+          ...(status !== undefined && { status }),
+        });
+      },
+    });
+  } catch (err) {
+    const status = err instanceof ProviderError ? err.status : undefined;
+    const provider = providerMessage(err);
+    const body = err instanceof ProviderError ? err.body?.slice(0, 4096) : undefined;
+    log.append({
+      type: "request/error",
+      at: now(),
+      error: errorMessage(err),
+      ...(status !== undefined && { status }),
+      kind: classifyError(err),
+      ...(provider && { provider }),
+      ...(body && { body }),
+    });
+    throw err;
   }
-  await log.checkpoint(signal);
-  signal?.throwIfAborted();
-  return exchangeRecorder(log, request, signal);
 }
 
 export function recordEvent(log: EventLog, kind: string, payload: Record<string, unknown>): void {

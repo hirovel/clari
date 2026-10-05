@@ -325,6 +325,8 @@ describe("写进配置", () => {
     expect(out).toContain("deepseek-v4-flash-vision-exp  not in config · 1M ctx · models.dev");
     dlg.handleInput("\x1b[B");
     dlg.handleInput("\r");
+    expect(calls).toEqual([]);
+    dlg.handleInput("\r");
     expect(calls).toEqual([
       "add:deepseek/deepseek-v4-flash-vision-exp:live",
       "use:deepseek/deepseek-v4-flash-vision-exp",

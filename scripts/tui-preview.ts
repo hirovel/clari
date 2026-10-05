@@ -122,7 +122,7 @@ const divider = (t: string) => ["", `\x1b[38;2;201;165;78m━━ ${t} ━━\x1b
 const shots: string[] = [];
 app.inspector.open();
 shots.push(...divider("Ctrl+R 请求检视:列表"), ...app.inspector.lines(100));
-app.inspector.key("g");
+app.inspector.key("\x1b[H");
 app.inspector.key("\r");
 shots.push(...divider("详情 · 1 概要"), ...app.inspector.lines(100));
 app.inspector.key("3");

@@ -110,8 +110,10 @@ describe("listSessions / pruneSessions", () => {
 
   it("子进程入口:clari sessions 列表;prune 不带 --yes 只打印计划", async () => {
     tmp = mkdtempSync(join(tmpdir(), "clari-sessions-"));
-    session(tmp, "s1", "2026-07-01T00:00:00.000Z");
-    session(tmp, "s2", "2026-09-03T00:00:00.000Z");
+    const now = Date.now();
+    const day = 24 * 60 * 60 * 1000;
+    session(tmp, "s1", new Date(now - 60 * day).toISOString());
+    session(tmp, "s2", new Date(now - day).toISOString());
     const run = (args: string[]) =>
       new Promise<{ code: number | null; out: string }>((done) => {
         const child = spawn(

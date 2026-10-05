@@ -144,7 +144,8 @@ describe("真实入口(子进程)", () => {
           }
           if (mode === "force" && !forced && stdout.includes("releasing resources")) {
             forced = true;
-            send("f");
+            send("\x1b[F");
+            send("\r");
           }
         },
       });

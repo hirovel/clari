@@ -1,6 +1,13 @@
 // 策略槽在会话中切换:每次切换记 session/slot,下一次 turn 起生效。
 // 审批槽的三种形态与审批提示组件也在这里:它是唯一需要界面参与的槽。
-import { type Component, Key, matchesKey, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import {
+  type Component,
+  Key,
+  matchesKey,
+  truncateToWidth,
+  visibleWidth,
+  wrapTextWithAnsi,
+} from "@earendil-works/pi-tui";
 import {
   type ApprovalConfig,
   type ApproveDecision,
@@ -12,7 +19,7 @@ import { DEFAULT_CONFIG_PATH, updateConfig } from "../src/config.js";
 import { now, type ToolCall } from "../src/events.js";
 import { type ApprovePolicy, allowAll, queueToTurnEnd, steer } from "../src/loop.js";
 import { isCompactionTrigger, loadCompactionStrategy, parsePreservation } from "./bootstrap.js";
-import { c } from "./theme.js";
+import { c, G, selectedText } from "./theme.js";
 import {
   applyToolPrompts,
   describeToolPrompts,
@@ -28,28 +35,29 @@ import { TextEditor } from "./tui-text-editor.js";
 
 // ---------- 审批 ----------
 
-type ApprovalChoice = { kind: "y" | "n" | "a"; reason?: string };
+type ApprovalChoice = { kind: "allow" | "deny" | "allow-session"; reason?: string };
 
 /** 审批的四个选项,顺序固定:允许一次、允许并记住(作用域写在文案里)、拒绝并说明、拒绝。 */
-type ApprovalOption = { kind: ApprovalChoice["kind"] | "r"; key: string; label: string };
+type ApprovalOption = { kind: ApprovalChoice["kind"] | "reason"; label: string };
 
-const OPTIONS = (tool: string): ApprovalOption[] => [
-  { kind: "y", key: "y", label: "Allow once" },
-  { kind: "a", key: "a", label: `Allow ${tool} for the rest of this session` },
-  { kind: "r", key: "r", label: "Deny and tell the model why" },
-  { kind: "n", key: "n", label: "Deny" },
+const OPTIONS: ApprovalOption[] = [
+  { kind: "allow", label: "Allow once" },
+  { kind: "allow-session", label: "Allow this tool for this session" },
+  { kind: "reason", label: "Deny and tell the model why" },
+  { kind: "deny", label: "Deny" },
 ];
 
 /**
  * 审批提示:一行问题(工具、参数、为什么要问),edit/write 的 diff,四个纵向选项,一行淡色提示。
- * ↑↓ 移动,Enter 选中;数字 1–4 或字母 y a r n 直接选;Esc 视为拒绝。
- * r 进入输入理由,理由原样进工具结果喂回模型。
+ * ↑↓ 或数字 1–4 移动,Enter 执行;Esc 视为拒绝。
+ * 第三项进入输入理由,理由原样进工具结果喂回模型。
  */
 export class ApprovalPrompt implements Component {
   private mode: "choose" | "reason" = "choose";
   private reason = "";
   private index = 0;
   private offset = 0;
+  private reasonOffset = 0;
   private page = 1;
   private contentRows = 0;
   private contentWidth = -1;
@@ -65,28 +73,45 @@ export class ApprovalPrompt implements Component {
 
   render(width = 120): string[] {
     const inner = Math.max(1, width - 2);
-    const head = `${c.zhu("?")} ${c.bold(c.ink(this.call.name))}  ${c.soft(formatArgs(this.call.args))}  ${c.faint(this.why)}`;
-    if (this.contentWidth !== inner) {
+    if (this.mode === "choose" && this.contentWidth !== inner) {
       const detail =
         toolCallDetail(this.call.name, this.call.args, "full") ||
         JSON.stringify(this.call.args, null, 2);
-      this.content = [head, ...(detail ? detail.split("\n") : [])].flatMap((line) =>
-        wrapTextWithAnsi(line, inner),
-      );
+      this.content = [
+        c.faint(this.why),
+        ...(visibleWidth(this.call.name) > inner - 2 ? [c.soft(this.call.name)] : []),
+        c.soft(formatArgs(this.call.args)),
+        ...(detail ? detail.split("\n") : []),
+      ].flatMap((line) => wrapTextWithAnsi(line, inner));
       this.contentWidth = inner;
     }
-    const all = this.content;
+    const all =
+      this.mode === "reason"
+        ? wrapTextWithAnsi(`${c.soft("reason:")} ${c.ink(this.reason)}${c.faint("▏")}`, inner)
+        : this.content;
     const layout = (actions: string[]) => {
       const rows = actions.flatMap((line) => wrapTextWithAnsi(line, inner));
       this.contentRows = all.length;
-      this.page = Math.max(1, this.height() - rows.length - 4);
-      this.offset = Math.min(this.offset, Math.max(0, all.length - this.page));
+      // 身份、分隔与操作先占预算;内容超长时再为分页读数留一行。
+      const room = Math.max(1, this.height() - rows.length - 2);
+      this.page = Math.max(1, room - Number(all.length > room));
+      const offset = Math.min(
+        this.mode === "reason" ? this.reasonOffset : this.offset,
+        Math.max(0, all.length - this.page),
+      );
+      if (this.mode === "reason") this.reasonOffset = offset;
+      else this.offset = offset;
       return [
-        ...all.slice(this.offset, this.offset + this.page),
+        truncateToWidth(`${c.zhu("?")} ${c.bold(c.ink(this.call.name))}`, inner, "…"),
+        ...all.slice(offset, offset + this.page),
         ...(all.length > this.page
           ? [
-              c.faint(
-                `PgUp/PgDn details · ${this.offset + 1}-${Math.min(all.length, this.offset + this.page)}/${all.length}`,
+              truncateToWidth(
+                c.faint(
+                  `PgUp/PgDn ${this.mode === "reason" ? "reason" : "details"} · ${offset + 1}-${Math.min(all.length, offset + this.page)}/${all.length}`,
+                ),
+                inner,
+                "…",
               ),
             ]
           : []),
@@ -95,25 +120,23 @@ export class ApprovalPrompt implements Component {
       ].map((line) => ` ${line}`);
     };
     if (this.mode === "reason") {
-      return layout([
-        `${c.soft("  reason:")} ${c.ink(this.reason)}${c.faint("▏")}`,
-        c.faint("  Enter deny with this reason · Esc back"),
-      ]);
+      return layout([c.faint("  Enter deny with this reason · Esc back")]);
     }
-    const options = OPTIONS(this.call.name);
+    const options = OPTIONS;
     const labelWidth = Math.max(...options.map((o) => o.label.length));
+    // 窄屏不补齐短选项;尾部空格会把按键提示挤到下一行,耗尽详情和操作区域。
+    const aligned = labelWidth + 16 <= inner;
     const rows = options.map((o, i) => {
-      const cursor = i === this.index ? c.ink("▸") : " ";
-      const label = o.label.padEnd(labelWidth);
-      const text = i === this.index ? c.bold(c.ink(label)) : c.ink(label);
-      const key = o.kind === "n" ? `${o.key} · Esc` : o.key;
-      return `  ${cursor} ${c.faint(`${i + 1}.`)} ${text}  ${c.faint(key)}`;
+      const cursor = i === this.index ? selectedText(G.cursor) : " ";
+      const label = aligned ? o.label.padEnd(labelWidth) : o.label;
+      const text = i === this.index ? selectedText(label) : c.ink(label);
+      return `  ${cursor} ${c.faint(`${i + 1}.`)} ${text}${o.kind === "deny" ? c.faint("  Esc") : ""}`;
     });
-    return layout([...rows, c.faint("  ↑↓ choose · Enter confirm · 1-4 or the letter")]);
+    return layout([...rows, c.faint("  ↑↓ or 1–4 choose · Enter confirm · Esc deny")]);
   }
 
   private choose(o: ApprovalOption): void {
-    if (o.kind === "r") {
+    if (o.kind === "reason") {
       this.mode = "reason";
       this.onChange();
       return;
@@ -123,46 +146,47 @@ export class ApprovalPrompt implements Component {
 
   handleInput(data: string): void {
     if (matchesKey(data, "pageUp") || matchesKey(data, "pageDown")) {
-      this.offset = Math.max(
+      const offset = Math.max(
         0,
         Math.min(
           Math.max(0, this.contentRows - this.page),
-          this.offset + (matchesKey(data, "pageUp") ? -this.page : this.page),
+          (this.mode === "reason" ? this.reasonOffset : this.offset) +
+            (matchesKey(data, "pageUp") ? -this.page : this.page),
         ),
       );
+      if (this.mode === "reason") this.reasonOffset = offset;
+      else this.offset = offset;
       this.onChange();
       return;
     }
     if (this.mode === "reason") {
+      const before = this.reason;
       if (matchesKey(data, Key.enter)) {
         const reason = this.reason.trim();
-        this.onDecide({ kind: "n", ...(reason && { reason }) });
+        this.onDecide({ kind: "deny", ...(reason && { reason }) });
       } else if (matchesKey(data, Key.escape)) {
         this.mode = "choose";
         this.reason = "";
+        this.reasonOffset = 0;
       } else if (matchesKey(data, Key.backspace) || data === "\b")
         this.reason = Array.from(this.reason).slice(0, -1).join("");
       else if (!data.startsWith("\x1b") || data.startsWith("\x1b[200~"))
         this.reason += printableInput(data);
+      // 编辑仍发生在末尾;分页查看不会改文本,继续输入时才回到末尾。
+      if (this.mode === "reason" && this.reason !== before)
+        this.reasonOffset = Number.POSITIVE_INFINITY;
       this.onChange();
       return;
     }
-    const options = OPTIONS(this.call.name);
-    const byKey = options.find((o) => o.key === data.toLowerCase());
-    const byNumber = /^[1-4]$/.test(data) ? options[Number(data) - 1] : undefined;
-    if (matchesKey(data, Key.up) || data === "k") this.index = (this.index + 3) % 4;
-    else if (matchesKey(data, Key.down) || data === "j") this.index = (this.index + 1) % 4;
+    const options = OPTIONS;
+    if (matchesKey(data, Key.up)) this.index = (this.index + 3) % 4;
+    else if (matchesKey(data, Key.down)) this.index = (this.index + 1) % 4;
+    else if (/^[1-4]$/.test(data)) this.index = Number(data) - 1;
     else if (matchesKey(data, Key.enter)) {
       this.choose(options[this.index] as ApprovalOption);
       return;
-    } else if (byKey) {
-      this.choose(byKey);
-      return;
-    } else if (byNumber) {
-      this.choose(byNumber);
-      return;
     } else if (matchesKey(data, Key.escape)) {
-      this.onDecide({ kind: "n" });
+      this.onDecide({ kind: "deny" });
       return;
     }
     this.onChange();
@@ -183,49 +207,63 @@ export function initialApproval(approve: TuiAppDeps["approve"]): ApprovalState {
   };
 }
 
-/** 问一次就是一次;a 把该工具加进本会话的放行名单。拒绝以错误结果回喂模型。 */
+/** 问一次就是一次;选择本会话放行才把工具加进临时名单。拒绝以错误结果回喂模型。 */
 export function askApproval(
   ctx: TuiContext,
   call: ToolCall,
   why = "asked for every call",
+  signal?: AbortSignal,
 ): Promise<ApproveDecision> {
   const a = ctx.approval;
+  if (signal?.aborted) return Promise.resolve(false);
   if (a.alwaysAllow.has(call.name) || a.skillAllow.has(call.name)) return Promise.resolve(true);
   return new Promise((resolve) => {
-    const prompt = new ApprovalPrompt(
-      call,
-      why,
-      (decision) => {
+    let settled = false;
+    const finish = (decision?: ApprovalChoice) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener("abort", onAbort);
+      if (a.prompt === prompt) {
         a.overlay?.hide();
         a.overlay = undefined;
         a.prompt = undefined;
         ctx.updateStatus();
         ctx.tui.setFocus(ctx.editor);
-        if (decision.kind === "a") {
-          a.alwaysAllow.add(call.name);
-          // 同时写进规则,/approve 能看到本会话放行了什么。
-          a.cfg.allow = a.cfg.allow ?? [];
-          if (!a.cfg.allow.includes(call.name)) a.cfg.allow.push(call.name);
-        }
-        const allowed = decision.kind !== "n";
-        ctx.note(
-          allowed
-            ? c.faint(
-                `· approve: allowed ${call.name}${decision.kind === "a" ? " (not asked again this session)" : ""}`,
-              )
-            : c.zhu(
-                `· approve: denied ${call.name}${decision.reason ? `: ${decision.reason}` : ""}`,
-              ),
-        );
-        resolve(
-          allowed ? true : { allowed: false, ...(decision.reason && { reason: decision.reason }) },
-        );
-      },
+      }
+      if (!decision) {
+        ctx.note(c.faint(`· approve: cancelled ${call.name}; not executed`));
+        resolve(false);
+        return;
+      }
+      if (decision.kind === "allow-session") {
+        a.alwaysAllow.add(call.name);
+        // 同时写进规则,/approve 能看到本会话放行了什么。
+        a.cfg.allow = a.cfg.allow ?? [];
+        if (!a.cfg.allow.includes(call.name)) a.cfg.allow.push(call.name);
+      }
+      const allowed = decision.kind !== "deny";
+      ctx.note(
+        allowed
+          ? c.faint(
+              `· approve: allowed ${call.name}${decision.kind === "allow-session" ? " (not asked again this session)" : ""}`,
+            )
+          : c.zhu(`· approve: denied ${call.name}${decision.reason ? `: ${decision.reason}` : ""}`),
+      );
+      resolve(
+        allowed ? true : { allowed: false, ...(decision.reason && { reason: decision.reason }) },
+      );
+    };
+    const onAbort = () => finish();
+    const prompt = new ApprovalPrompt(
+      call,
+      why,
+      finish,
       () => ctx.tui.requestRender(),
       () => ctx.deps.terminal.rows,
     );
     a.prompt = prompt;
     a.overlay = ctx.tui.showOverlay(prompt, { width: "100%", anchor: "bottom-left" });
+    signal?.addEventListener("abort", onAbort, { once: true });
     ctx.updateStatus();
     ctx.notify(`approval needed: ${call.name}`);
   });
@@ -238,8 +276,11 @@ export function approveImpl(ctx: TuiContext): ApprovePolicy {
   const label = (why: string, origin?: { agent: string }) =>
     origin ? `${origin.agent} · ${why}` : why;
   if (a.mode === "ask")
-    return (call, origin) => askApproval(ctx, call, label("asked for every call", origin));
-  return policyApprove(a.cfg, (call, why, origin) => askApproval(ctx, call, label(why, origin)));
+    return (call, origin, signal) =>
+      askApproval(ctx, call, label("asked for every call", origin), signal);
+  return policyApprove(a.cfg, (call, why, origin, signal) =>
+    askApproval(ctx, call, label(why, origin), signal),
+  );
 }
 
 export function approveValue(a: ApprovalState): string {
@@ -270,6 +311,53 @@ export function recordSlot(ctx: TuiContext, slot: string, value: string): void {
   ctx.log.append({ type: "session/slot", at: now(), slot, value });
 }
 
+/** 设置与命令共用实际修改;失败抛异常,不把显示文案当作结果协议。 */
+export async function applySlotValue(ctx: TuiContext, slot: string, value: string): Promise<void> {
+  if (ctx.agent.running) throw new Error("Cannot switch a slot while running; press Esc first.");
+  switch (slot) {
+    case "compaction":
+      ctx.compaction.strategy = await loadCompactionStrategy(value);
+      break;
+    case "compactionTrigger":
+      if (!isCompactionTrigger(value)) throw new Error("Unknown compaction trigger");
+      ctx.compaction.trigger = value;
+      break;
+    case "preservation":
+      ctx.compaction.preservation = parsePreservation(value).policy;
+      break;
+    case "execution":
+      if (value !== "sequential" && value !== "parallel")
+        throw new Error("Unknown execution strategy");
+      ctx.agent.setSlot("execution", value);
+      break;
+    case "steering":
+      if (value !== "step" && value !== "turn") throw new Error("Unknown steering strategy");
+      ctx.agent.setSlot("steering", value === "step" ? steer : queueToTurnEnd);
+      break;
+    case "approve":
+      if (value !== "all" && value !== "ask" && value !== "policy")
+        throw new Error("Unknown approval mode");
+      ctx.approval.mode = value;
+      ctx.agent.setSlot("approve", approveImpl(ctx));
+      value = approveValue(ctx.approval);
+      break;
+    case "toolPrompts":
+      setToolPromptStyle(ctx, value);
+      return;
+    default:
+      throw new Error(`Unknown slot ${slot}`);
+  }
+  recordSlot(ctx, slot, value);
+}
+
+function setToolPromptStyle(ctx: TuiContext, value: string): string[] {
+  if (!isToolPromptStyle(value)) throw new Error("Unknown tool prompt style");
+  ctx.slots.toolPrompts.style = value;
+  const changed = applyToolPrompts(ctx.tools, ctx.slots.toolPrompts);
+  recordSlot(ctx, "toolPrompts", describeToolPrompts(ctx.slots.toolPrompts));
+  return changed;
+}
+
 function slotDescription(ctx: TuiContext, slot: string, value: string): string {
   if (slot === "compaction") return `${value} · trigger ${ctx.compaction.trigger ?? "threshold"}`;
   if (slot === "preservation")
@@ -293,14 +381,12 @@ const done = (slot: string, value: string, when = "takes effect from the next tu
   `${c.soft(`· ${slot} → ${value}`)}  ${c.faint(when)}`;
 
 async function compactionSlot(ctx: TuiContext, v: string): Promise<string> {
-  const { compaction } = ctx;
   if (!v)
     return c.faint(
       `compaction is ${ctx.slots.state.compaction}. Usage: /compaction llm|clear|pipeline|./strategy.mjs (strategy) · /compaction threshold|manual|remind (trigger)`,
     );
   if (isCompactionTrigger(v)) {
-    compaction.trigger = v;
-    recordSlot(ctx, "compactionTrigger", v);
+    await applySlotValue(ctx, "compactionTrigger", v);
     return done(
       "compaction",
       `trigger ${v}`,
@@ -311,55 +397,45 @@ async function compactionSlot(ctx: TuiContext, v: string): Promise<string> {
           : "no automatic compaction; the status bar says when you are past the threshold",
     );
   }
-  try {
-    compaction.strategy = await loadCompactionStrategy(v);
-  } catch (err) {
-    return c.zhu(`✗ ${(err as Error).message}`);
-  }
-  recordSlot(ctx, "compaction", v);
+  await applySlotValue(ctx, "compaction", v);
   return done("compaction", v, "used by the next auto or manual compaction");
 }
 
-function preservationSlot(ctx: TuiContext, v: string): string {
+async function preservationSlot(ctx: TuiContext, v: string): Promise<string> {
   const usage = c.faint(
     `preservation is ${ctx.slots.state.preservation}. Usage: /preservation tokens 20000 | ratio 0.3`,
   );
   if (!v) return usage;
-  let parsed: ReturnType<typeof parsePreservation>;
   try {
-    parsed = parsePreservation(v);
+    await applySlotValue(ctx, "preservation", v);
   } catch (err) {
     const msg = (err as Error).message;
     return msg.startsWith("preservation must be")
       ? usage
       : c.zhu(msg.replace(/^preservation /, ""));
   }
-  ctx.compaction.preservation = parsed.policy;
-  recordSlot(ctx, "preservation", v);
   return done("preservation", v, "used by the next compaction");
 }
 
-function executionSlot(ctx: TuiContext, v: string): string {
+async function executionSlot(ctx: TuiContext, v: string): Promise<string> {
   if (v !== "sequential" && v !== "parallel")
     return c.faint(
       `execution is ${ctx.slots.state.execution}. Usage: /execution sequential|parallel`,
     );
-  ctx.agent.setSlot("execution", v);
-  recordSlot(ctx, "execution", v);
+  await applySlotValue(ctx, "execution", v);
   return done("execution", v);
 }
 
-function steeringSlot(ctx: TuiContext, v: string): string {
+async function steeringSlot(ctx: TuiContext, v: string): Promise<string> {
   if (v !== "step" && v !== "turn")
     return c.faint(
       `steering is ${ctx.slots.state.steering}. Usage: /steering step|turn  (step = inject queued messages at the next step; turn = only when the model stops calling tools)`,
     );
-  ctx.agent.setSlot("steering", v === "step" ? steer : queueToTurnEnd);
-  recordSlot(ctx, "steering", v);
+  await applySlotValue(ctx, "steering", v);
   return done("steering", v);
 }
 
-function approveSlot(ctx: TuiContext, v: string): string {
+async function approveSlot(ctx: TuiContext, v: string): Promise<string> {
   const a = ctx.approval;
   const sub = v.match(/^\S+/)?.[0] ?? "";
   const rule = v.slice(sub.length).trim();
@@ -373,9 +449,8 @@ function approveSlot(ctx: TuiContext, v: string): string {
         "rule = tool or tool:pattern; bash patterns match the command (bash:git *), path tools match the path (edit:src/**)",
       ),
     ].join("\n");
-  const apply = (label: string) => {
-    ctx.agent.setSlot("approve", approveImpl(ctx));
-    recordSlot(ctx, "approve", approveValue(a));
+  const apply = async (label: string) => {
+    await applySlotValue(ctx, "approve", a.mode);
     return done("approve", label, "applies to the next tool call");
   };
   if (!sub) return show();
@@ -432,9 +507,7 @@ function toolPromptsSlot(ctx: TuiContext, v: string): string {
     ].join("\n");
   }
   if (isToolPromptStyle(sub)) {
-    cfg.style = sub;
-    const changed = applyToolPrompts(tools, cfg);
-    recordSlot(ctx, "toolPrompts", describeToolPrompts(cfg));
+    const changed = setToolPromptStyle(ctx, sub);
     return done(
       "toolPrompts",
       `${sub} (${styleTokens(tools, cfg)} tok)`,

@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it, vi } from "vitest";
 import { createTuiApp } from "../cli/tui-app.js";
+import { ApprovalPrompt } from "../cli/tui-slots.js";
 import { Agent } from "../src/agent.js";
 import { DEFAULT_APPROVAL, decide, describeApproval, policyApprove } from "../src/approval.js";
 import { EventLog } from "../src/log.js";
@@ -103,8 +104,49 @@ describe("规则裁决", () => {
   });
 });
 
-describe("界面:策略提示、r 附理由、/approve 规则", () => {
-  it("非只读工具弹提示并写明原因;r + 理由 → 拒绝结果带理由;/approve allow 后不再问", async () => {
+describe("界面:策略提示、选择理由、/approve 规则", () => {
+  it("非只读工具弹提示并写明原因;选择第三项 + 理由 → 拒绝结果带理由;/approve allow 后不再问", async () => {
+    let rows = 12;
+    let decision: { kind: string; reason?: string } | undefined;
+    const prompt = new ApprovalPrompt(
+      call(`mcp__server__${"long_tool_name_".repeat(5)}`, {
+        command: `review-start ${"long argument ".repeat(100)}review-end`,
+      }),
+      "needs approval",
+      (value) => {
+        decision = value;
+      },
+      () => {},
+      () => rows,
+    );
+    const narrow = prompt.render(36).map(plain);
+    expect(narrow.length).toBeLessThanOrEqual(rows);
+    expect(narrow.join("\n")).toContain("Enter confirm");
+    for (let i = 0; i < 150; i++) prompt.handleInput("\x1b[6~");
+    const parameterEnd = prompt.render(36).map(plain).join("\n");
+    expect(parameterEnd).toContain("review-end");
+    expect(parameterEnd).toContain("mcp__server__");
+    prompt.handleInput("3");
+    prompt.handleInput("\r");
+    const reason = `reason-start ${"中文理由 ".repeat(200)}reason-end`;
+    prompt.handleInput(reason);
+    const reasonEnd = prompt.render(36).map(plain);
+    expect(reasonEnd.length).toBeLessThanOrEqual(rows);
+    expect(reasonEnd.join("\n")).toContain("reason-end");
+    expect(reasonEnd.join("\n")).toContain("Enter deny");
+    for (let i = 0; i < 150; i++) prompt.handleInput("\x1b[5~");
+    expect(prompt.render(36).map(plain).join("\n")).toContain("reason-start");
+    rows = 18;
+    expect(prompt.render(60).length).toBeLessThanOrEqual(rows);
+    prompt.handleInput("\x1b");
+    rows = 12;
+    expect(prompt.render(36).map(plain).join("\n")).toContain("review-end");
+    expect(decision).toBeUndefined();
+    prompt.handleInput("\r");
+    prompt.handleInput(reason);
+    prompt.handleInput("\r");
+    expect(decision).toEqual({ kind: "deny", reason });
+
     let n = 0;
     const provider: Provider = {
       model: "m",
@@ -163,7 +205,14 @@ describe("界面:策略提示、r 附理由、/approve 规则", () => {
     expect(reviewed.length).toBeLessThanOrEqual(24);
     expect(reviewed.join("\n")).toContain("review-end");
     expect(reviewed.join("\n")).toContain("Enter confirm");
-    app.approvalInput("r");
+    const eventCount = log.events.length;
+    const unchanged = plain(app.approvalLines().join("\n"));
+    for (const key of ["y", "a", "r", "n", "j", "k", "Y"]) app.approvalInput(key);
+    expect(log.events).toHaveLength(eventCount);
+    expect(plain(app.approvalLines().join("\n"))).toBe(unchanged);
+    app.approvalInput("3");
+    expect(log.events).toHaveLength(eventCount);
+    app.approvalInput("\r");
     for (const ch of "not now") app.approvalInput(ch);
     lines = plain(app.approvalLines().join("\n"));
     expect(lines).toContain("reason: not now");
@@ -184,7 +233,27 @@ describe("界面:策略提示、r 附理由、/approve 规则", () => {
     await app.command("/set approve");
     expect(plain(app.dialogLines().join("\n"))).toContain("now policy");
     app.dialogInput("\x1b");
-    app.stop();
+    await app.command("/set approve ask");
+    const cancelling = app.submit("three");
+    try {
+      await vi.waitFor(() => expect(app.approvalLines().length).toBeGreaterThan(0));
+      app.setDraft("Keep this draft");
+      app.agent.interrupt();
+      await vi.waitFor(() => expect(app.agent.running).toBe(false), { timeout: 150 });
+      await cancelling;
+      expect(app.approvalLines()).toEqual([]);
+      expect(app.draft()).toBe("Keep this draft");
+      expect(log.events.filter((e) => e.type === "tool/result").at(-1)).toMatchObject({
+        isError: true,
+        content: "Interrupted by the user; not executed.",
+      });
+      expect(n).toBe(5);
+    } finally {
+      // 失败的取消复现也释放旧审批,不让测试留下悬挂任务或计时器。
+      app.approvalInput("\x1b");
+      await cancelling;
+      app.stop();
+    }
   });
 });
 

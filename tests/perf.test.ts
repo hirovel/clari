@@ -1,7 +1,8 @@
 // 生产级会话的规模下,投影、切段与检视器渲染必须在按键级延迟内完成。
 // 阈值放得宽(CI 机器慢),目的是防止回归成二次方或每键重算全文。
 import { describe, expect, it } from "vitest";
-import { collectRequests, RequestInspector } from "../cli/inspector.js";
+import { RequestInspector } from "../cli/inspector.js";
+import { collectRequests } from "../cli/inspector-requests.js";
 import { estimateAfter } from "../src/compaction.js";
 import type { AgentEvent } from "../src/events.js";
 import { EventLog } from "../src/log.js";

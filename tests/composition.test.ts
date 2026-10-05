@@ -1,6 +1,7 @@
 // 上下文组装:composeContext 的来历与省略、三家 wireMap、组装槽记 body、检视器组装视图。
 import { describe, expect, it } from "vitest";
-import { compositionLines, compositionRows, RequestInspector } from "../cli/inspector.js";
+import { RequestInspector } from "../cli/inspector.js";
+import { compositionLines, compositionRows } from "../cli/inspector-composition.js";
 import type { AgentEvent } from "../src/events.js";
 import { EventLog } from "../src/log.js";
 import { runTurn } from "../src/loop.js";
@@ -251,8 +252,7 @@ describe("检视器组装视图", () => {
     insp.handleInput("\t");
     expect(insp.currentMode).toBe("composition");
     const screen = insp.render(120).map(plain).join("\n");
-    expect(screen).toContain("Context");
-    expect(screen).toContain("what the model sees on the next request");
+    expect(screen).toContain("Context · Next request");
     // 前两行是系统提示词与工具定义;摘要行带 ≈,它下面折一行被覆盖的消息
     expect(screen).toMatch(/#0\s+system/);
     expect(screen).toMatch(/tools\s+0 definitions/);
@@ -260,7 +260,8 @@ describe("检视器组装视图", () => {
     expect(screen).toContain("#2–#5  4 messages · ");
     expect(screen).toContain("→ summary · Enter shows them");
     // 底部预览:最后一条的来历
-    expect(screen).toContain("next request messages[4] · from event user/message · not sent yet");
+    expect(screen).toContain("next request messages[4] · from event user/message");
+    expect(screen).toContain("not sent yet");
     // Enter 先开动作菜单,第一项"View full message"再 Enter 才进全文
     insp.handleInput("\r");
     expect(insp.currentMode).toBe("actions");

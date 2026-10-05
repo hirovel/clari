@@ -208,12 +208,19 @@ describe("命令选单", () => {
 
   it("/tools 选单里 Enter 翻开关:关掉的不随请求发出,/inspect tools 标 off,记 session/slot;打字 only 一次选集", async () => {
     const seen: ToolDef[][] = [];
-    const { app, doc, menu } = boot({}, seen);
+    const log = new EventLog();
+    const { app, doc, menu } = boot({ log }, seen);
     await app.command("/tools");
     const m = menu();
     expect(m).toContain("2 of 2 on");
     expect(m).toContain("echo");
     app.dialogInput("2"); // shout
+    const selected = menu();
+    const eventCount = log.events.length;
+    for (const key of ["d", "j", "k", "q", "s", "c", "y", "n"]) app.dialogInput(key);
+    await tick();
+    expect(menu()).toBe(selected);
+    expect(log.events).toHaveLength(eventCount);
     app.dialogInput("\r");
     await tick();
     expect(menu()).toContain("1 of 2 on"); // 翻完重开
@@ -242,7 +249,13 @@ describe("命令选单", () => {
     expect(menu()).toContain("fresh log");
     app.dialogInput("\r"); // new
     await tick();
-    expect(targets).toEqual([{ kind: "new" }]);
+    expect(menu()).toContain("Session setup");
+    expect(targets).toEqual([]);
+    app.dialogInput("d");
+    expect(targets).toEqual([]);
+    app.dialogInput("\r");
+    await tick();
+    expect(targets).toEqual([{ kind: "new", source: "current" }]);
     const bare = boot();
     await bare.app.command("/session new");
     expect(bare.doc()).toContain("switching sessions is not available here");

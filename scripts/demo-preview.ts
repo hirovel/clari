@@ -63,7 +63,7 @@ try {
   const shot = (title: string) => shots.push(...divider(title), ...app.inspector.lines(110));
   app.inspector.open();
   shot("Ctrl+R Requests:一行一请求");
-  app.inspector.key("g");
+  app.inspector.key("\x1b[H");
   app.inspector.key("\r");
   shot("Request #1 · 1 summary");
   app.inspector.key("2");

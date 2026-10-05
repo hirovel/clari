@@ -7,19 +7,13 @@ import {
   type PreservationPolicy,
 } from "./compaction.js";
 import { type AgentEvent, now, type ToolCall } from "./events.js";
-import { recordEvent, recordInput, toolOutput } from "./exchange.js";
+import { completeRecorded, recordEvent, toolOutput } from "./exchange.js";
 import { annotateResult, DEFAULT_FACTS, dateNote, type FactsConfig } from "./facts.js";
 import type { EventLog } from "./log.js";
 import { deriveMessages, type Message } from "./messages.js";
 import { DEFAULT_PLAN_REMINDER, planOpen, planState, planText, stepsSincePlan } from "./plan.js";
 import type { AssistantTurn, EffortLevel, Provider, ToolDef } from "./provider.js";
-import {
-  classifyError,
-  errorMessage,
-  isContextOverflow,
-  ProviderError,
-  providerMessage,
-} from "./providers/errors.js";
+import { isContextOverflow } from "./providers/errors.js";
 import { RECORDING_FULL } from "./recording.js";
 import { type Tool, ToolOutcomeUnknownError, validateArgs } from "./tools.js";
 
@@ -48,10 +42,11 @@ export const queueToTurnEnd: SteeringPolicy = (boundary) => boundary === "turn";
 /** 谁在问:子 agent 的调用带上自己的名字,审批提示据此标明来源。主会话不带。 */
 export type ApproveOrigin = { agent: string };
 
-/** 审批策略:执行每个工具调用前询问。false 或 {allowed:false} = 拒绝,以错误结果回喂,理由原样带上。 */
+/** 审批策略:执行前询问;拒绝以错误结果回喂。异步交互使用当前轮信号取消等待。 */
 export type ApprovePolicy = (
   call: ToolCall,
   origin?: ApproveOrigin,
+  signal?: AbortSignal,
 ) => ApproveDecision | Promise<ApproveDecision>;
 
 /** 缺省不弹确认;隔离由运行环境负责。 */
@@ -169,22 +164,11 @@ export function recordingProvider(
         reason: "compaction",
         body: describeRequestBody(log.events, messages),
       });
-      try {
-        const record = await recordInput(log, messages, tools, callOpts.signal);
-        return await provider.complete(messages, tools, {
-          ...callOpts,
-          ...(record && { record }),
-          ...(opts.onRaw && { onRaw: opts.onRaw }),
-          ...(opts.onRequest && { onRequest: opts.onRequest }),
-          onRetry: (info) => {
-            callOpts.onRetry?.(info);
-            logRetry(log, info);
-          },
-        });
-      } catch (err) {
-        logRequestError(log, err);
-        throw err;
-      }
+      return completeRecorded(log, provider, messages, tools, {
+        ...callOpts,
+        ...(opts.onRaw && { onRaw: opts.onRaw }),
+        ...(opts.onRequest && { onRequest: opts.onRequest }),
+      });
     },
   };
 }
@@ -328,19 +312,15 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
 
     let turn: AssistantTurn;
     try {
-      const record = await recordInput(log, messages, defs, signal);
-      turn = await provider.complete(messages, defs, {
-        ...(record && { record }),
+      turn = await completeRecorded(log, provider, messages, defs, {
         ...(onDelta && { onDelta }),
         ...(onReasoning && { onReasoning }),
         ...(signal && { signal }),
         ...(deps.onRaw && { onRaw: deps.onRaw }),
         ...(deps.onRequest && { onRequest: deps.onRequest }),
         ...(effort && { effort }),
-        onRetry: (info) => logRetry(log, info),
       });
     } catch (err) {
-      logRequestError(log, err);
       if (signal?.aborted) return "aborted";
       // 溢出恢复:压缩取得进展才许重试,且只重试一次。
       const overflow = cfg && (cfg.isOverflow ?? defaultIsOverflow)(err as Error);
@@ -451,37 +431,6 @@ export function describeRequestBody(
     }
   }
   return { prefixEvents: 0, tail: messages };
-}
-
-function statusOf(err: unknown): number | undefined {
-  return err instanceof ProviderError ? err.status : undefined;
-}
-
-function logRetry(log: EventLog, info: { attempt: number; delayMs: number; error: Error }): void {
-  const status = statusOf(info.error);
-  log.append({
-    type: "retry",
-    at: now(),
-    attempt: info.attempt,
-    delayMs: info.delayMs,
-    error: errorMessage(info.error),
-    ...(status !== undefined && { status }),
-  });
-}
-
-function logRequestError(log: EventLog, err: unknown): void {
-  const status = statusOf(err);
-  const provider = providerMessage(err);
-  const body = err instanceof ProviderError ? err.body?.slice(0, 4096) : undefined;
-  log.append({
-    type: "request/error",
-    at: now(),
-    error: errorMessage(err),
-    ...(status !== undefined && { status }),
-    kind: classifyError(err),
-    ...(provider && { provider }),
-    ...(body && { body }),
-  });
 }
 
 function appendResult(
@@ -595,7 +544,8 @@ async function executeCalls(
   const prepare = async (call: ToolCall): Promise<Prepared> => {
     const tool = ctx.tools.find((t) => t.name === call.name);
     if (!tool) return { call, immediate: `Unknown tool "${call.name}".` };
-    const decision = await ctx.approve(call, ctx.origin);
+    const decision = await ctx.approve(call, ctx.origin, signal);
+    if (signal.aborted) return { call, immediate: interruptedNotice(signal) };
     const allowed = typeof decision === "boolean" ? decision : decision.allowed;
     if (!allowed) {
       const reason = typeof decision === "object" ? decision.reason : undefined;

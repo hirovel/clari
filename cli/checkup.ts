@@ -8,8 +8,9 @@ import type { UsageTotals } from "../src/cost.js";
 import type { AgentEvent } from "../src/events.js";
 import type { Message } from "../src/messages.js";
 import { predictedCache, unchangedPrefix } from "./cards.js";
-import { collectCompactions, collectRequests, messagesFor } from "./inspector.js";
+import { collectCompactions } from "./inspector-compactions.js";
 import { fmtMs, fmtTok } from "./inspector-format.js";
+import { collectRequests, messagesFor } from "./inspector-requests.js";
 
 export type CheckupRow = {
   n: number;

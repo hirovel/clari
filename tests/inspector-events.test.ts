@@ -177,7 +177,7 @@ describe("事件一句话", () => {
     expect(s).not.toContain("user/message");
     expect(s).toContain("context/edit");
     insp.handleInput("1");
-    insp.handleInput("g");
+    insp.handleInput("\x1b[H");
     insp.handleInput("\x1b[1;5B"); // Ctrl+↓ → 下一个 request
     insp.handleInput("\r");
     s = insp.render(130).map(stripAnsi).join("\n");

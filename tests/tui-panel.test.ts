@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ClipboardInput } from "../cli/clipboard-input.js";
-import { actionsFor, compositionRows, consequenceOf } from "../cli/inspector.js";
+import { actionsFor, compositionRows, consequenceOf } from "../cli/inspector-composition.js";
 import { createTuiApp, type TuiApp, type TuiAppDeps } from "../cli/tui-app.js";
 import { type AgentEvent, now } from "../src/events.js";
 import { EventLog } from "../src/log.js";
@@ -46,11 +46,11 @@ function pick(app: TuiApp, label: string): void {
     "Edit content",
     "Edit thinking",
     "Compare with original",
-    "Restore original",
-    "Drop this message",
-    "Rewind to here",
-    "Retry last step",
-    "Fork here",
+    "Restore original text",
+    "Exclude from input",
+    "Keep input through here",
+    "Retry latest reply",
+    "Fork new session here",
   ];
   const present = labels.filter((l) => lines.some((x) => x.includes(l)));
   const idx = present.indexOf(label);
@@ -154,13 +154,11 @@ describe("上下文面板的动作与后果", () => {
       complete: async () => ({}) as AssistantTurn,
     } as unknown as Provider;
     const edit = consequenceOf("edit", asst, rows, events, anthropic);
-    expect(edit).toContain("2 messages after #2 recomputed");
-    expect(edit).toContain("input changes from #2 on; cache impact unconfirmed");
+    expect(edit).toContain("Later input: 2 messages");
+    expect(edit).toContain("input changes from #2; hit impact unknown");
     expect(edit).toContain("Anthropic drops 1 thinking block");
     expect(consequenceOf("drop", asst, rows, events)).toContain("with its 1 tool result");
-    expect(consequenceOf("rewind", tool, rows, events)).toContain(
-      "the next request starts from #3",
-    );
+    expect(consequenceOf("rewind", tool, rows, events)).toContain("Input: keep through #3");
     expect(consequenceOf("view", tool, rows, events)).toBe("read-only · nothing changes");
     const initial = events.slice(0, 2);
     const initialRows = compositionRows(initial).rows;
@@ -280,8 +278,8 @@ describe("面板动作菜单", () => {
     expect(doc(app)).toContain("#1.content  original 5 chars → current 14 chars");
 
     app.inspector.openComposition();
-    expect(findRowWith(app, "Restore original")).toBe(true);
-    pick(app, "Restore original");
+    expect(findRowWith(app, "Restore original text")).toBe(true);
+    pick(app, "Restore original text");
     await tick();
     expect(doc(app)).toContain("restored event #1");
 
@@ -301,6 +299,22 @@ describe("面板动作菜单", () => {
     const screen = (await terminal.screen()).join("\n");
     expect(screen).toContain("中文 34 EDITED");
     expect(screen).toContain("Apply");
+    // 同一编辑器缩窗后仍看见光标内容和操作,放大后全文不变。
+    for (const rows of [12, 8]) {
+      terminal.resize(36, rows);
+      app.tui.renderNow(true);
+      const small = (await terminal.screen()).join("\n");
+      expect(small).toContain("中文 34 EDITED");
+      expect(small).toContain("Apply");
+      expect(small).toContain("Esc cancel");
+      expect(app.dialogLines().length).toBeLessThanOrEqual(rows);
+      terminal.feed("\x1b[A");
+      app.tui.renderNow(true);
+      expect((await terminal.screen()).join("\n")).toContain("中文 33 EDITED");
+      terminal.feed("\x1b[B");
+    }
+    terminal.resize(60, 24);
+    app.tui.renderNow(true);
     terminal.feed("\x03");
     terminal.feed("\x03");
     expect(plain(app.dialogLines().join("\n"))).toContain("Quit Clari");
@@ -368,6 +382,13 @@ describe("面板动作菜单", () => {
     terminal.feed("\x1bv");
     await tick();
     expect(plain(app.dialogLines().join("\n"))).toContain("fixture unavailable");
+    terminal.resize(36, 8);
+    app.tui.renderNow(true);
+    const failedPaste = (await terminal.screen()).join("\n");
+    expect(failedPaste).toContain("Paste failed: fixture unavailable");
+    expect(failedPaste).toContain("Esc cancel");
+    expect(app.dialogLines().length).toBeLessThanOrEqual(8);
+    terminal.resize(60, 24);
     clipboard = async () => ({ image: { mimeType: "image/png", data: "", name: "fixture" } });
     terminal.feed("\x16");
     await tick();
@@ -399,8 +420,8 @@ describe("面板动作菜单", () => {
 
     // Rewind 到第一条:之后的消息全部丢弃
     app.inspector.openComposition();
-    expect(findRowWith(app, "Rewind to here")).toBe(true);
-    pick(app, "Rewind to here");
+    expect(findRowWith(app, "Keep input through here")).toBe(true);
+    pick(app, "Keep input through here");
     await tick();
     expect(doc(app)).toContain("rewound to event #");
     expect(log.events.filter((e) => e.type === "context/drop").length).toBeGreaterThan(0);
@@ -428,7 +449,7 @@ describe("/retry 与面板的 drop、fork", () => {
     app.inspector.openComposition();
     app.inspector.key("\r");
     let ins = plain(app.inspector.lines(120).join("\n"));
-    expect(ins).toContain("Drop this message");
+    expect(ins).toContain("Exclude from input");
     app.inspector.key("\x1b[B");
     app.inspector.key("\x1b[B");
     app.inspector.key("\r");
@@ -442,7 +463,9 @@ describe("/retry 与面板的 drop、fork", () => {
     const items = ins
       .split("\n")
       .filter((l) =>
-        /Fork here|Retry last step|Drop this message|Edit content|View full message/.test(l),
+        /Fork new session here|Retry latest reply|Exclude from input|Edit content|View full message/.test(
+          l,
+        ),
       );
     expect(items.length).toBeGreaterThan(2);
     for (let i = 0; i < 6; i++) app.inspector.key("\x1b[B");
@@ -492,7 +515,7 @@ describe("/retry 与面板的 drop、fork", () => {
     expect(doc(app)).toContain(`#${target}.content`);
     app.inspector.openComposition();
     app.inspector.key("\r");
-    pick(app, "Restore original");
+    pick(app, "Restore original text");
     await tick();
     expect(current()?.content).toBe(original.content);
     expect(log.events[target]).toBe(original);

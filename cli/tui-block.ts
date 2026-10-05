@@ -16,7 +16,7 @@ import { c } from "./theme.js";
 
 const GUIDE_PLAIN = "  ┆ ";
 /** 行首记号:用户、调用、结果、思考与说明、上下文变化、编辑、失败、折起的步、光标。续行缩到记号之后。 */
-const MARK = /^[›»└✓✗≈✎≡▸◇?●•·] /;
+const MARK = /^[›»└✓✗≈✎≡◇?●•·] /;
 
 /** 一行的悬挂缩进列数。 */
 export function hangingIndent(plain: string): number {

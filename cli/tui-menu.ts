@@ -5,7 +5,7 @@ import { c } from "./theme.js";
 import type { TuiContext } from "./tui-context.js";
 import { ListPicker, type PickRow } from "./tui-login.js";
 
-export type Picked = { row: PickRow; key: "enter" | "d" };
+export type Picked = { row: PickRow };
 
 export const HINT = "↑↓ or 1–9 choose · Enter pick · Esc back";
 
@@ -21,8 +21,8 @@ export function choose(
       title,
       rows,
       hint,
-      (row, key) => {
-        resolve({ row, key });
+      (row) => {
+        resolve({ row });
         ctx.dialog.close();
       },
       () => {

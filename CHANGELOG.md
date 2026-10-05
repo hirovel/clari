@@ -5,6 +5,36 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ## [Unreleased]
 
+### Changed
+
+- Show one compact identity per tool call in the received inspector. Label arguments, original output and model results by role; keep the selected call visible while paging. Preview argument fields when folded and preserve the complete JSON when expanded.
+
+
+- Group each received tool call with its arguments, original output and model result. Use thin dividers and explicit result states; preserve selection while evidence arrives and keep unmatched records visible.
+- Clarify that the session log keeps messages, tool results and context changes; not every interface action is saved. Keep approval reasons in the existing tool results without adding a separate approval history.
+- Remove single-letter menu shortcuts. Show model scope, session setup, settings actions, pending-input actions and shutdown actions explicitly. Arrow keys or numbers select; Enter confirms. Keep letters available in search and text inputs.
+- Page through the fullscreen transcript with PgUp/PgDn, including long replies. Use Shift+PgUp/PgDn to select a request for folding. Keep menu paging and draft editing separate; update help and both READMEs.
+- Keep the editing cursor, Apply/Cancel actions and controls visible in short text-editor dialogs. Shorten explanatory text to fit, retain clipboard failure notices, and restore the full view when resized.
+- Make input hints describe the current Enter and Esc actions. Reserve room for input and controls in short fullscreen terminals, shorten status readings without changing widget settings, and restore them when the window grows.
+- Keep request bodies in place while folded so replies arriving during a run remain available when expanded. Show selection on open request titles and skip leading blank lines when jumping to a request.
+- Use the same gold highlight and `›` cursor across menus, settings and inspectors. Keep expansion markers and keyboard behavior; avoid wrapping padded approval choices in narrow terminals.
+- Share setting mutations between menus and commands. Keep current-session changes and saved defaults distinct, and report failures without interpreting display text.
+- Use one recording path for regular and compaction requests, including adapter inputs, HTTP attempts, retries and failures. Keep their response handling separate.
+- Fix inspector pagination and section scrolling. Reserve room for selected content and controls before fitting optional headers in short terminals; keep edit state and read-only reasons visible.
+- Show gaps between context event IDs as folded log groups. Inspect individual records and JSON, then return to the selected group; keep model input unchanged.
+- Distinguish request numbers from event IDs and state when context actions take effect. Label token units, relative size and small percentages; show unchanged text separately from measured cache hits.
+
+### Fixed
+
+- Keep missing tool-result notices visible before long call IDs in narrow received views. Do not infer that a missing result is still running.
+- Show every tool result in the received inspector, including denied calls, unknown tools and invalid arguments without captured output. Keep original output separate and match it by call ID.
+- Cancel pending tool approvals when the turn is interrupted. Close the prompt, stop waiting and mark unexecuted calls as interrupted, including inherited subagent approvals; preserve drafts and queued input during shutdown.
+- Keep approval actions visible with long tool names and denial reasons in short terminals. Page through complete parameters and reasons, preserve the parameter reading position when returning, and send the full reason to the model.
+- Parse copied code blocks with the Markdown parser already used by the terminal UI. Handle tilde fences, longer fences, nested blocks and indented code; keep whole-reply copies unchanged.
+- Let unknown tool results use the normal fold and unfold controls. Keep their status, recorded reason, duration and recovery entry visible without changing execution or retry behavior.
+- Open the selected transcript request's received content with Ctrl+R. Keep the latest-request list when no request is selected, and preserve the draft and reading position when returning.
+- Format context-window tokens consistently in the header, status bar and inspectors; remove the header's separate 1024-based conversion.
+
 ## [0.1.2] - 2026-10-01
 
 ### Changed

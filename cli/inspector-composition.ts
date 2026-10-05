@@ -11,7 +11,7 @@ import {
 } from "../src/messages.js";
 import type { Provider } from "../src/provider.js";
 import { firstLine, fmtTok, indent, messageTokens, roleLabel } from "./inspector-format.js";
-import { c } from "./theme.js";
+import { c, G, selectedText } from "./theme.js";
 
 // ---------- 组装视图:模型下一步会看到的每条消息从哪来、经过了什么、落在线路的第几条 ----------
 
@@ -52,8 +52,8 @@ export function compositionRow(r: CompositionRow, selected: boolean): string {
   const wire = r.wire === undefined ? "  ?" : r.wire < 0 ? "top" : String(r.wire).padStart(3);
   const stages = r.stages.length > 0 ? r.stages.join(" ") : "";
   const body = `${String(r.i).padStart(3)}  ${`#${r.event}`.padEnd(5)} ${wire}  ${roleLabel(m).padEnd(14)} ${String(tok).padStart(6)}  ${stages.padEnd(22)} ${truncateToWidth(brief, 60, "…")}`;
-  const mark = selected ? c.zhu("▸") : " ";
-  const tone = selected ? c.bold(c.ink(body)) : r.stages.length > 0 ? c.jin(body) : c.soft(body);
+  const mark = selected ? selectedText(G.cursor) : " ";
+  const tone = selected ? selectedText(body) : r.stages.length > 0 ? c.jin(body) : c.soft(body);
   return `${mark} ${tone}`;
 }
 
@@ -143,15 +143,15 @@ export function actionsFor(
     });
     out.push({
       action: "restore",
-      label: "Restore original",
+      label: "Restore original text",
       hint: "recorded as another edit; nothing is deleted",
     });
   }
   if (src?.type === "user/message" || src?.type === "assistant/message")
     out.push({
       action: "drop",
-      label: "Drop this message",
-      hint: "assistant messages take their tool results with them",
+      label: "Exclude from input",
+      hint: "exclude this message; assistant tool results follow it",
     });
   if (
     r.i < total &&
@@ -164,18 +164,18 @@ export function actionsFor(
   )
     out.push({
       action: "rewind",
-      label: "Rewind to here",
-      hint: `drop everything after #${r.event}`,
+      label: "Keep input through here",
+      hint: `exclude later messages from input; keep event #${r.event}`,
     });
   if (events.some((e, i) => e.type === "assistant/message" && !state.dropped.has(i)))
     out.push({
       action: "retry",
-      label: "Retry last step",
-      hint: "drop the last reply and its tool results, then ask again",
+      label: "Retry latest reply",
+      hint: "retry the latest assistant reply, regardless of selection",
     });
   out.push({
     action: "fork",
-    label: "Fork here",
+    label: "Fork new session here",
     hint: `copy events up to #${r.event} into a new session file`,
   });
   return out;
@@ -198,9 +198,9 @@ export function consequenceOf(
   ).length;
   const fromHere = [
     after.length > 0
-      ? `${plural(after.length, "message")} after #${r.event} recomputed (${fmtTok(afterTok)} tok)`
-      : `nothing after #${r.event} to recompute`,
-    `input changes from #${r.event} on; cache impact unconfirmed`,
+      ? `Later input: ${plural(after.length, "message")} (${fmtTok(afterTok)} tok)`
+      : "No later messages in input",
+    `Cache: input changes from #${r.event}; hit impact unknown`,
     ...(anthropic && thinking > 0 ? [`Anthropic drops ${plural(thinking, "thinking block")}`] : []),
   ];
   switch (action) {
@@ -210,20 +210,38 @@ export function consequenceOf(
     case "edit":
     case "edit-reasoning":
     case "restore":
-      return [...fromHere, "send your next message to use this context"].join(" · ");
+      return [
+        "Applies: next message you send",
+        "History: original text kept; files unchanged",
+        ...fromHere,
+      ].join("\n");
     case "drop": {
       const src = events[r.event];
       const calls = src?.type === "assistant/message" ? src.toolCalls.length : 0;
       return [
-        `#${r.event} leaves the projection${calls > 0 ? ` with its ${plural(calls, "tool result")}` : ""}`,
+        "Applies: next message you send",
+        `Input: exclude #${r.event}${calls > 0 ? ` with its ${plural(calls, "tool result")}` : ""}`,
+        "History: original records kept; files unchanged",
         ...fromHere,
-      ].join(" · ");
+      ].join("\n");
     }
     case "rewind":
-      return `${plural(after.length, "message")} after #${r.event} leave the projection (${fmtTok(afterTok)} tok) · the next request starts from #${r.event} · nothing is deleted`;
+      return [
+        "Applies: next message you send",
+        `Input: keep through #${r.event}; exclude ${plural(after.length, "message")} after it (${fmtTok(afterTok)} tok)`,
+        "History: original records kept; files unchanged",
+      ].join("\n");
     case "retry":
-      return "drops the last assistant reply and its tool results · asks again from the current context · no new prompt";
+      return [
+        "Applies: sends an API request immediately; no new prompt",
+        "Input: exclude latest reply and its tool results",
+        "History: original records kept; tool changes are not undone",
+      ].join("\n");
     case "fork":
-      return `copies the first ${r.event + 1} events into a new session file · this session is untouched`;
+      return [
+        "Applies: saves a session file; no API request",
+        `Creates: new session with the first ${r.event + 1} events`,
+        "Current session and files unchanged",
+      ].join("\n");
   }
 }

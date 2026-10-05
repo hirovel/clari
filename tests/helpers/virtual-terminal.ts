@@ -39,6 +39,12 @@ export class VirtualTerminal implements PiTerminal {
   get rows(): number {
     return this.rowCount;
   }
+  /** 在同一终端实例调整窗口,保留缓冲区与输入连接。 */
+  resize(columns: number, rows: number): void {
+    this.cols = columns;
+    this.rowCount = rows;
+    this.xterm.resize(columns, rows);
+  }
   get kittyProtocolActive(): boolean {
     return false;
   }

@@ -3,11 +3,12 @@
 // 调色板是莫兰迪调子,用 OKLCH 推导(2026-09-06),规则写在这里,值由规则算出:
 //   底(只给预览用,真实底色是用户终端的)L .215 C .006 H 70,带灰的暖黑。
 //   墨三阶 ink / soft / faint:L .90 / .75 / .61 等距,色度 ≤ .014 偏暖;faint 对底 4.6:1,对纯黑 5.1:1,过 WCAG AA。
-//   两个强调色:朱(赭红 H 28,L .66 C .10)是刀,只给工具动作与错误;泥金(燕麦沙 H 80,L .76 C .065)只给品牌与"变化"。
+//   两个强调色:朱(赭红 H 28,L .66 C .10)给工具动作与错误;泥金(燕麦沙 H 80,L .76 C .065)给品牌、变化与选中项。
 //   朱比金重一档(不严格等明度):主强调色要有分量,严格等明度会发灰。
 //   绿(豆绿 H 135,L .74 C .05)只给 diff 增行的前景;成功记号 ✓ 用墨色,静成功、响失败。
 //   三处底色都从底推:底带 = 底 +.06 L;diff 增/删 = 底 +.10 L 带色相。
-// 不画框,不用竖线;层次靠明暗,不靠颜色种类。
+// 不用外框包正文;短连接线表达归属,层次主要靠明暗。
+// 选中项统一泥金加粗与 › 光标,不加反白或底带。说明与正文保留自己的明暗;操作提示放底部。
 import type { EditorTheme, MarkdownTheme, SelectListTheme } from "@earendil-works/pi-tui";
 
 // FORCE_COLOR 强制开(离线预览/测试用);NO_COLOR 强制关;否则跟随是否为 TTY。
@@ -48,7 +49,7 @@ export const c = {
 
 /**
  * 记号表:一套笔画系,不混几何与装饰字符。
- * 你 › · 调用 » · 结果正文 └ · 成功 ✓(墨色)· 失败 ✗(朱)· 提示 · · 压缩 ≈(泥金)· 光标 ▸ · 引导 ┆ · 印 ▪
+ * 你 › · 调用 » · 结果正文 └ · 成功 ✓(墨色)· 失败 ✗(朱)· 提示 · · 压缩 ≈(泥金)· 光标 › · 引导 ┆ · 印 ▪
  */
 export const G = {
   you: "›",
@@ -58,7 +59,7 @@ export const G = {
   err: "✗",
   note: "·",
   compact: "≈",
-  cursor: "▸",
+  cursor: "›",
   guide: "┆",
   seal: "▪",
   running: "●",
@@ -68,9 +69,14 @@ export const G = {
   fold: "≡",
 } as const;
 
+/** 选择样式只标当前可操作目标,不覆盖错误、差异或正文颜色。 */
+export function selectedText(text: string): string {
+  return c.jin(c.bold(text));
+}
+
 export const selectListTheme: SelectListTheme = {
-  selectedPrefix: (t) => c.ink(t),
-  selectedText: (t) => c.bold(c.ink(t)),
+  selectedPrefix: selectedText,
+  selectedText,
   description: (t) => c.soft(t),
   scrollInfo: (t) => c.faint(t),
   noMatch: (t) => c.faint(t),

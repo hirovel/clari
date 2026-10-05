@@ -138,7 +138,7 @@ export function childApprove(
   if (policy === "allow") return allowAll;
   const base = parent ?? allowAll;
   if (policy === undefined || policy === "inherit") return base;
-  return async (call, origin) => {
+  return async (call, origin, signal) => {
     for (const r of policy.deny) {
       if (ruleMatches(r, call, cwd)) {
         return { allowed: false, reason: `sub-agent policy: deny rule ${r}` };
@@ -147,7 +147,7 @@ export function childApprove(
     if (policy.outsideCwd === "deny" && outsideCwd(call, cwd)) {
       return { allowed: false, reason: "sub-agent policy: path outside the working directory" };
     }
-    return base(call, origin);
+    return base(call, origin, signal);
   };
 }
 

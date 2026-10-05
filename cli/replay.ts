@@ -11,14 +11,16 @@ import { deriveMessages } from "../src/messages.js";
 import {
   COMPACTION_SECTIONS,
   collectCompactions,
-  collectRequests,
   compactionLines,
   compactionRow,
+} from "./inspector-compactions.js";
+import {
+  collectRequests,
   decisionLines,
   listRow,
   messagesFor,
   sentLines,
-} from "./inspector.js";
+} from "./inspector-requests.js";
 import { readRequestRecording } from "./session-records.js";
 
 const [file, ...flags] = process.argv.slice(2);

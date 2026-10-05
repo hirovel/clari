@@ -5,6 +5,7 @@ import { keepRecentTokens } from "../src/compaction.js";
 import type { Preset, ResultView, SkillsConfig } from "../src/config.js";
 import { now } from "../src/events.js";
 import { DEFAULT_PLAN_REMINDER } from "../src/plan.js";
+import type { EffortLevel } from "../src/provider.js";
 import {
   formatSetting,
   getSetting,
@@ -24,6 +25,27 @@ import { replaceSystemSection } from "./prompt-sections.js";
 import { applyToolPrompts } from "./tool-prompts.js";
 import { createSkillTool, skillCatalog } from "./tools/skill.js";
 import type { TuiContext } from "./tui-context.js";
+import { applySlotValue } from "./tui-slots.js";
+
+/** 模型切换只更新实际运行值;显示和保存默认值由各入口负责。 */
+export function switchModel(ctx: TuiContext, name: string): void {
+  if (!ctx.deps.settings) throw new Error("settings interface not configured");
+  if (ctx.agent.running) throw new Error("cannot switch models while running; press Esc first");
+  const choice = ctx.deps.settings.switchModel(name);
+  ctx.agent.setProvider(choice.provider);
+  ctx.model.info = {
+    ...ctx.model.info,
+    model: choice.model,
+    providerName: choice.providerName,
+    contextWindow: choice.contextWindow,
+    ...(choice.capabilitySource && { capabilitySource: choice.capabilitySource }),
+  };
+  ctx.model.effortLevels = choice.effortLevels;
+  ctx.model.contextWindow = choice.contextWindow;
+  ctx.compaction.window = choice.contextWindow;
+  ctx.updateHeader();
+  ctx.updateStatus();
+}
 
 export function effectiveSetting(ctx: TuiContext, def: SettingDef): unknown {
   const initial = () => getSetting(ctx.setupInitial, def.key) ?? def.builtin;
@@ -182,8 +204,7 @@ export async function applySettingNow(
   ctx: TuiContext,
   def: SettingDef,
   value: unknown,
-  slot: (name: string, value: string) => Promise<string>,
-): Promise<string | undefined> {
+): Promise<void> {
   const { view } = ctx;
   switch (def.key) {
     case "prompt.skills.mode":
@@ -244,7 +265,8 @@ export async function applySettingNow(
       const name = value ?? ctx.deps.settings?.defaultModel?.();
       if (!name)
         throw new Error("No default model is configured. Choose a model or use /login first.");
-      return slot("model", String(name));
+      switchModel(ctx, String(name));
+      return;
     }
     case "fold":
       view.foldResults = value as boolean;
@@ -306,29 +328,25 @@ export async function applySettingNow(
       return;
     }
     case "toolPrompts":
-      return slot("toolprompts", String(value));
     case "approve":
-      return slot("approve", String(value));
     case "compaction":
-      return slot("compaction", String(value));
     case "compactionTrigger":
-      return slot("trigger", String(value));
+    case "execution":
+    case "steering":
+      return applySlotValue(ctx, def.key, String(value));
     case "preservation":
       if (value === undefined) {
         ctx.compaction.preservation = keepRecentTokens(Math.min(20000, ctx.compaction.window / 4));
         ctx.slots.state.preservation = "";
         return;
       }
-      parsePreservation(String(value));
-      return slot("preservation", String(value));
-    case "execution":
-      return slot("execution", String(value));
-    case "steering":
-      return slot("steering", String(value));
+      return applySlotValue(ctx, def.key, String(value));
     case "effort":
-      return slot("effort", value === undefined ? "auto" : String(value));
+      ctx.agent.setEffort(value as EffortLevel | undefined);
+      ctx.updateStatus();
+      return;
     default:
-      return "takes effect at the next start";
+      return;
   }
 }
 
@@ -365,7 +383,6 @@ export async function changeSetting(
   def: SettingDef,
   value: unknown,
   scope: SetupScope | "both",
-  slot: (name: string, value: string) => Promise<string>,
 ): Promise<SettingChange> {
   try {
     validate(def, value);
@@ -399,11 +416,7 @@ export async function changeSetting(
     }
     if (ctx.agent.running && (SLOT_SETTINGS.has(def.key) || def.key === "prompt.skills.sources"))
       throw new Error(settingTiming(ctx, def, "session"));
-    const applied = await applySettingNow(ctx, def, value ?? def.builtin, slot);
-    // 老槽函数把错误返回成文案;设置入口必须识别失败,不能继续保存或显示成功。
-    // biome-ignore lint/suspicious/noControlCharactersInRegex: 槽返回的终端文案需要先去掉 SGR。
-    const plain = (applied ?? "").replace(/\u001b\[[0-9;]*m/g, "");
-    if (/^(✗|Cannot |cannot |unknown |Usage:)/.test(plain)) throw new Error(plain);
+    await applySettingNow(ctx, def, value ?? def.builtin);
     ctx.log.append({
       type: "ext/event",
       at: now(),

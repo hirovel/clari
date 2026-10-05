@@ -10,6 +10,7 @@ import type { ModelSettings } from "../cli/model-settings.js";
 import { SessionInputs } from "../cli/session-inputs.js";
 import { appendMemory } from "../cli/tools/memory.js";
 import { createTuiApp, type TuiApp, type TuiAppDeps } from "../cli/tui-app.js";
+import { ApprovalPrompt } from "../cli/tui-slots.js";
 import { llmSummarize } from "../src/compaction.js";
 import { DEFAULT_CONFIG_PATH } from "../src/config.js";
 import { EventLog } from "../src/log.js";
@@ -173,8 +174,8 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
     const { app, term } = boot(scripted([]), settings);
 
     await app.command("/model");
-    // 无参数:弹列表选择器,当前模型带 ▸;Esc 关闭
-    expect(app.dialogLines().map(stripAnsi).join("\n")).toContain("▸ 1. fake/fake-model");
+    // 无参数:弹列表选择器,当前模型带 ›;Esc 关闭
+    expect(app.dialogLines().map(stripAnsi).join("\n")).toContain("› 1. fake/fake-model");
     app.dialogInput("\x1b");
     expect(app.dialogLines()).toEqual([]);
 
@@ -215,7 +216,7 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
     expect(app.inspector.isOpen()).toBe(true);
     let doc = app.inspector.lines(100).map(stripAnsi).join("\n");
     expect(doc).toContain("Requests");
-    expect(doc).toContain("▸ #1");
+    expect(doc).toContain("› #1");
     app.inspector.key("\r");
     doc = app.inspector.lines(100).map(stripAnsi).join("\n");
     expect(doc).toContain("Request #1");
@@ -396,6 +397,8 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
     term.feed("\x1b[B");
     term.feed("\r");
     await tick();
+    term.feed("\r");
+    await tick();
     expect(text(app)).toContain("Fixture config unavailable");
 
     provider.listModels = (cancel) => {
@@ -412,7 +415,7 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
     expect(app.dialogLines()).toEqual([]);
   });
 
-  it("--approve ask:每个调用弹一行确认;y 执行、n 以拒绝结果回喂、a 本会话不再问", async () => {
+  it("--approve ask:每个调用选择后确认,允许与拒绝回喂模型,本会话记住同名工具", async () => {
     const term = new VirtualTerminal(100, 40);
     const log = new EventLog();
     const app = createTuiApp({
@@ -439,9 +442,14 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
           toolCalls: [{ id: "c4", name: "echo", args: { text: "four" } }],
           stopReason: "tool",
         },
+        {
+          text: "",
+          toolCalls: [{ id: "c5", name: "other", args: { text: "five" } }],
+          stopReason: "tool",
+        },
         { text: "完事", toolCalls: [], stopReason: "end" },
       ]),
-      tools: [echo],
+      tools: [echo, { ...echo, name: "other" }],
       compaction: { strategy: async () => null, window: 100000, reserveTokens: 32000 },
       reserveTokens: 32000,
       info: { model: "fake-model", providerName: "fake", sessionFile: "s" },
@@ -455,8 +463,8 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
     await tick();
     const prompt = app.approvalLines().map(stripAnsi).join("\n");
     expect(prompt).toContain("? echo");
-    expect(prompt).toContain("▸ 1. Allow once");
-    expect(prompt).toContain("2. Allow echo for the rest of this session");
+    expect(prompt).toContain("› 1. Allow once");
+    expect(prompt).toContain("2. Allow this tool for this session");
     expect(prompt).toContain("4. Deny");
     app.tui.renderNow(true);
     expect((await term.screen()).join("\n")).toContain("Quit Clari");
@@ -465,13 +473,20 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
     expect(app.agent.running).toBe(true);
     term.feed("\x1b");
     expect(app.dialogLines()).toEqual([]);
-    term.feed("y");
+    term.feed("1");
+    term.feed("\r");
     await tick();
     await tick();
-    term.feed("n");
+    term.feed("4");
+    term.feed("\r");
     await tick();
     await tick();
-    term.feed("a");
+    term.feed("2");
+    term.feed("\r");
+    await vi.waitFor(() =>
+      expect(app.approvalLines().map(stripAnsi).join("\n")).toContain("? other"),
+    );
+    term.feed("\x1b"); // 本会话许可不跨工具;Esc 拒绝当前调用,模型仍可继续。
     await running;
     const doc = text(app);
     expect(app.approvalLines()).toEqual([]);
@@ -483,7 +498,8 @@ describe("命令:帮助、设置、检视器入口、强度、模型、审批", 
       "echo:one",
       "The user denied this call.",
       "echo:three",
-      "echo:four", // a 之后同名工具直接放行
+      "echo:four", // 允许本会话后同名工具直接放行
+      "The user denied this call.",
     ]);
     expect(doc).toContain("完事");
     app.stop();
@@ -721,6 +737,7 @@ describe("提交", () => {
     app.setDraft("keep the main draft");
     await app.command("/session inputs");
     expect(plain(app.dialogLines().join("\n"))).toContain("[queued]");
+    term.feed("\r");
     term.feed("\r");
     expect(plain(app.dialogLines().join("\n"))).toContain("Edit message");
     term.feed("\x01");
@@ -1080,7 +1097,23 @@ describe("槽命令的分支", () => {
     app.stop();
   });
 
-  it("审批提示:r 进理由,退格与 Esc 返回;a 放行后不再问;Esc 视为拒绝", async () => {
+  it("审批提示:选第三项进理由,退格与 Esc 返回;第二项放行后不再问;Esc 视为拒绝", async () => {
+    const narrow = new ApprovalPrompt(
+      { id: "narrow", name: "read", args: { path: "README.md" } },
+      "Tool approval is enabled",
+      () => {},
+      () => {},
+      () => 12,
+    );
+    const narrowLines = narrow.render(36).map(plain);
+    expect(narrowLines.length).toBeLessThanOrEqual(12);
+    expect(narrowLines.every((line) => line.length <= 36)).toBe(true);
+    const options = narrowLines.join(" ").replace(/\s+/g, " ");
+    expect(options).toContain("Allow once");
+    expect(options).toContain("Allow this tool for this session");
+    expect(options).toContain("Deny and tell the model why");
+    expect(options).toContain("Esc");
+    expect(options).toContain("Enter confirm");
     const { app } = bootB(
       scriptedB([
         {
@@ -1098,7 +1131,8 @@ describe("槽命令的分支", () => {
     const run = app.submit("go");
     for (let i = 0; i < 20 && app.approvalLines().length === 0; i++) await tick();
     expect(plain(app.approvalLines().join("\n"))).toContain("asked for every call");
-    app.approvalInput("r");
+    app.approvalInput("3");
+    app.approvalInput("\r");
     app.approvalInput("a");
     app.approvalInput("b");
     app.approvalInput("\x7f");
@@ -1108,10 +1142,10 @@ describe("槽命令的分支", () => {
     expect(plain(app.approvalLines().join("\n"))).toContain("reason: a中文");
     app.approvalInput("\x1b");
     expect(plain(app.approvalLines().join("\n"))).toContain("Allow once");
-    // ↓ 移到第 2 项再 Enter,与直接按 a 或 2 等价
-    app.approvalInput("\x1b[B");
+    // 数字只选择,Enter 才执行;普通字母在审批选择阶段不生效。
+    app.approvalInput("2");
     expect(plain(app.approvalLines().join("\n"))).toContain(
-      "▸ 2. Allow echo for the rest of this session",
+      "› 2. Allow this tool for this session",
     );
     app.approvalInput("\r");
     await run;

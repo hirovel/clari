@@ -30,7 +30,7 @@ import {
 } from "../src/setup.js";
 import { STATUS_WIDGETS, type StatusStyle } from "../src/status-bar.js";
 import { skillSources } from "./prompt.js";
-import { c, G } from "./theme.js";
+import { c, G, selectedText } from "./theme.js";
 import type { TuiContext } from "./tui-context.js";
 import { printableInput } from "./tui-format.js";
 import { type SettingChange, settingTiming, setupRead, sourceOf } from "./tui-settings.js";
@@ -68,6 +68,7 @@ export class SetupView implements Component {
   private notice: SettingChange | undefined;
   private busy = false;
   private pageSize = 1;
+  private action: string | undefined;
 
   constructor(private readonly deps: SetupViewDeps) {}
   invalidate(): void {}
@@ -346,6 +347,39 @@ export class SetupView implements Component {
     ];
   }
 
+  /** 可见动作只属于当前焦点;不混入设置值或保存到配置。 */
+  private actions(): Row[] {
+    const m = this.mode;
+    if (m.kind !== "browse" && m.kind !== "choices" && m.kind !== "members") return [];
+    if (this.searching && m.kind === "browse") return [];
+    const def = "def" in m ? m.def : this.rows()[this.index]?.def;
+    if (!def) return [];
+    return [
+      ...(m.kind === "choices" && ["number", "text"].includes(def.type)
+        ? [{ title: "Custom value", run: () => this.startText("value", def) }]
+        : []),
+      {
+        title: "Details",
+        run: () => {
+          this.returnIndex = m.kind === "browse" ? this.index : this.returnIndex;
+          this.mode = { kind: "info", def, offset: 0, from: m, index: this.index };
+        },
+      },
+      ...(m.kind === "browse"
+        ? [
+            {
+              title: "Restore recommended",
+              run: () => {
+                this.returnIndex = this.index;
+                this.mode = { kind: "restore", def };
+                this.index = 0;
+              },
+            },
+          ]
+        : []),
+    ];
+  }
+
   private edit(def: SettingDef): void {
     this.returnIndex = this.index;
     this.notice = undefined;
@@ -511,6 +545,41 @@ export class SetupView implements Component {
   handleInput(data: string): void {
     if (this.busy) return;
     const m = this.mode;
+    const actions = this.actions();
+    if (matchesKey(data, Key.escape) && this.action) {
+      this.action = undefined;
+      this.deps.onChange();
+      return;
+    }
+    if (actions.length && (matchesKey(data, Key.left) || matchesKey(data, Key.right))) {
+      const index = actions.findIndex((a) => a.title === this.action);
+      const next = matchesKey(data, Key.right)
+        ? (index + 1) % actions.length
+        : index < 0
+          ? actions.length - 1
+          : (index + actions.length - 1) % actions.length;
+      this.action = actions[next]?.title;
+      this.deps.onChange();
+      return;
+    }
+    if (this.action && matchesKey(data, Key.enter)) {
+      const action = actions.find((a) => a.title === this.action);
+      this.action = undefined;
+      action?.run();
+      this.deps.onChange();
+      return;
+    }
+    if (
+      matchesKey(data, Key.up) ||
+      matchesKey(data, Key.down) ||
+      matchesKey(data, Key.tab) ||
+      matchesKey(data, Key.home) ||
+      matchesKey(data, Key.end) ||
+      matchesKey(data, Key.pageUp) ||
+      matchesKey(data, Key.pageDown) ||
+      /^[1-9]$/.test(data)
+    )
+      this.action = undefined;
     if (matchesKey(data, Key.escape)) {
       this.notice = undefined;
       if (m.kind === "info") {
@@ -607,30 +676,6 @@ export class SetupView implements Component {
       if (matchesKey(data, Key.backspace) || data === "\b")
         this.query = Array.from(this.query).slice(0, -1).join("");
       else this.query += printableInput(data);
-      this.index = 0;
-    } else if (
-      (data === "e" || data === "E") &&
-      m.kind === "choices" &&
-      ["number", "text"].includes(m.def.type)
-    )
-      this.startText("value", m.def);
-    else if (
-      (data === "i" || data === "I") &&
-      !this.searching &&
-      (m.kind === "browse" || m.kind === "choices" || m.kind === "members")
-    ) {
-      const def = "def" in m ? m.def : this.rows()[this.index]?.def;
-      if (def) {
-        this.returnIndex = m.kind === "browse" ? this.index : this.returnIndex;
-        this.mode = { kind: "info", def, offset: 0, from: m, index: this.index };
-      }
-    } else if (
-      (data === "r" || data === "R") &&
-      m.kind === "browse" &&
-      this.rows()[this.index]?.def
-    ) {
-      this.returnIndex = this.index;
-      this.mode = { kind: "restore", def: this.rows()[this.index]?.def as SettingDef };
       this.index = 0;
     } else {
       const rows = this.rows();
@@ -904,19 +949,21 @@ export class SetupView implements Component {
           : m.text;
       head.push(pad(`${c.soft(label)}${c.ink(text)}${c.jin("▏")}`));
     }
-    const hint =
-      m.kind === "text"
+    const actions = this.actions();
+    const hint = this.action
+      ? `Enter ${this.action.toLowerCase()} · ←→ actions · ↑↓ list · Esc list`
+      : m.kind === "text"
         ? `Enter ${m.purpose === "source" ? "add" : "save"} · Ctrl+U clear · Esc back`
         : m.kind === "info"
           ? "↑↓ scroll · PgUp/PgDn · Esc back"
           : m.kind === "presetReview"
             ? "↑↓ scroll review · Enter use defaults · Esc cancel"
             : m.kind === "choices"
-              ? `↑↓ choose · Enter apply${["number", "text"].includes(m.def.type) ? " · E custom" : ""} · I details · Esc back`
+              ? "↑↓ choose · Enter apply · ←→ actions · Esc back"
               : m.kind === "members"
-                ? `↑↓ move · Enter ${m.def.type === "map" && m.def.key !== "prompt.skills.sources" ? "cycle" : "toggle"}${m.def.key === "prompt.skills.sources" ? " · Del remove" : ""} · I details · Esc back`
+                ? `↑↓ move · Enter ${m.def.type === "map" && m.def.key !== "prompt.skills.sources" ? "cycle" : "toggle"}${m.def.key === "prompt.skills.sources" ? " · Del remove" : ""} · ←→ actions · Esc back`
                 : m.kind === "browse"
-                  ? `↑↓ move · Enter open · / search${rows[this.index]?.def ? " · R restore · I details" : ""} · Esc back`
+                  ? `↑↓ move · Enter open · / search${actions.length ? " · ←→ actions" : ""} · Esc back`
                   : "↑↓ move · Enter select · Esc back";
     const notice = this.notice
       ? wrap([`${this.notice.ok ? "✓" : "!"} ${this.notice.message}`], inner)
@@ -926,6 +973,20 @@ export class SetupView implements Component {
     const footer = [
       ...notice,
       pad(c.faint("─".repeat(inner))),
+      ...(actions.length
+        ? wrap(
+            [
+              actions
+                .map((a) =>
+                  a.title === this.action
+                    ? selectedText(`${G.cursor} ${a.title}`)
+                    : c.soft(`[${a.title}]`),
+                )
+                .join("  "),
+            ],
+            inner,
+          ).map(pad)
+        : []),
       ...wrap([this.busy ? "Applying…" : hint], inner).map((line) => pad(c.faint(line))),
     ];
     const room = Math.max(1, height - head.length - footer.length);
@@ -979,11 +1040,11 @@ export class SetupView implements Component {
       Math.min(this.index - Math.floor(visible / 2), rows.length - visible),
     );
     const list = rows.slice(start, start + visible).flatMap((row, offset) => {
-      const selected = start + offset === this.index;
+      const selected = start + offset === this.index && !this.action;
       if (home) {
         const title = `${selected ? G.cursor : " "} ${row.title}`;
         return [
-          truncateToWidth(selected ? c.bold(c.ink(title)) : c.soft(title), listWidth, "…", true),
+          truncateToWidth(selected ? selectedText(title) : c.soft(title), listWidth, "…", true),
           truncateToWidth(c.soft(`  ${row.value ?? ""}`), listWidth, "…", true),
           c.faint("─".repeat(listWidth)),
         ];
@@ -992,7 +1053,7 @@ export class SetupView implements Component {
       const title = truncateToWidth(row.title, titleWidth, "…", true);
       const value = row.value ? ` ${row.value}` : "";
       const line = `${selected ? G.cursor : " "} ${title}${value}`;
-      return truncateToWidth(selected ? c.bold(c.ink(line)) : c.soft(line), listWidth, "…", true);
+      return truncateToWidth(selected ? selectedText(line) : c.soft(line), listWidth, "…", true);
     });
     if (rows.length === 0 && m.kind !== "text")
       list.push(c.soft("No matching settings. Esc clears the search."));
@@ -1006,7 +1067,9 @@ export class SetupView implements Component {
     const clippedDetails = (available: number) => {
       const lines = details.slice(0, available);
       if (activeDef && details.length > available && available > 0)
-        lines[available - 1] = c.faint("… I: full details");
+        lines[available - 1] = c.faint(
+          actions.some((a) => a.title === "Details") ? "… [Details] shows full text" : "…",
+        );
       return lines;
     };
     if (wide) {

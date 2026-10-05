@@ -6,6 +6,7 @@ import type { Message } from "../src/messages.js";
 
 export function fmtTok(n: number | undefined): string {
   if (n === undefined) return "—";
+  if (n >= 1000000) return `${(n / 1000000).toFixed(n < 10000000 ? 1 : 0)}M`;
   if (n < 1000) return String(n);
   return `${(n / 1000).toFixed(n < 10000 ? 1 : 0)}k`;
 }
@@ -42,7 +43,8 @@ export function roleLabel(m: Message): string {
 }
 
 export function pctOf(part: number, total: number): string {
-  return total > 0 ? `${Math.round((part / total) * 100)}%` : "0%";
+  const pct = total > 0 ? (part / total) * 100 : 0;
+  return pct > 0 && pct < 1 ? "<1%" : `${Math.round(pct)}%`;
 }
 
 /** API 只报告总量,比例尺不代表具体消息或文本位置。缺失不是零命中。 */

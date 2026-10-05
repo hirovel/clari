@@ -48,18 +48,18 @@ function fakeDeps(overrides: Partial<LoginDeps> = {}) {
 }
 
 describe("LoginDialog", () => {
-  it("供应商列表 → 贴 key(遮罩只露尾四位)→ 验证 → 选模型;d 同时设缺省", async () => {
+  it("供应商列表 → 贴 key(遮罩只露尾四位)→ 验证 → 选模型和使用范围", async () => {
     const { deps, calls } = fakeDeps();
     const dlg = new LoginDialog(deps);
     let out = plain(dlg.render());
     expect(out).toContain("Set up a provider");
-    expect(out).toContain("▸ 1. deepseek");
+    expect(out).toContain("› 1. deepseek");
     expect(out).toContain("no key");
     expect(out).toContain("anthropic");
     expect(out).toContain("key: env");
     // 数字键直接跳到该行;再按回到第 1 项
     dlg.handleInput("2");
-    expect(plain(dlg.render())).toContain("▸ 2. anthropic");
+    expect(plain(dlg.render())).toContain("› 2. anthropic");
     dlg.handleInput("1");
     dlg.handleInput("\r");
     out = plain(dlg.render());
@@ -87,6 +87,11 @@ describe("LoginDialog", () => {
     dlg.handleInput("\x1b[B"); // 到 flash
     dlg.handleInput("\x1b[B"); // lite 不可选,跳回 pro
     dlg.handleInput("d");
+    expect(calls.some((call) => call.startsWith("use:"))).toBe(false);
+    dlg.handleInput("\r");
+    expect(plain(dlg.render())).toContain("Use and save as default");
+    dlg.handleInput("\x1b[B");
+    dlg.handleInput("\r");
     expect(calls.at(-2)).toBe("use:deepseek/deepseek-v4-pro:true");
     expect(calls.at(-1)).toBe("done");
     const models = Array.from({ length: 35 }, (_, i) => `local-model-${i + 1}`);
@@ -126,6 +131,7 @@ describe("LoginDialog", () => {
     expect(plain(modelLines)).toContain("Selected 31/35");
     expect(modelLines.length).toBeLessThanOrEqual(16);
     expect(modelLines.every((line) => visibleWidth(line) <= 40)).toBe(true);
+    many.handleInput("\r");
     many.handleInput("\r");
     expect(plain(many.render(40))).toContain("Model switch failed");
     for (let i = 0; i < 50; i++) {
@@ -300,6 +306,7 @@ describe("没有 key 的界面", () => {
     for (let i = 0; i < 20 && !plain(app.dialogLines()).includes("key saved"); i++) await tick();
     failSwitch = true;
     app.dialogInput("\r");
+    app.dialogInput("\r");
     expect(plain(app.dialogLines())).toContain("Model switch failed");
     failSwitch = false;
     app.dialogInput("\r");
@@ -318,6 +325,10 @@ describe("没有 key 的界面", () => {
     term.feed("\r");
     await tick();
     term.feed("d");
+    expect(app.dialogLines().length).toBeGreaterThan(0);
+    term.feed("\r");
+    term.feed("\x1b[B");
+    term.feed("\r");
     expect(app.dialogLines()).toEqual([]);
     expect(app.agent.provider.model).toBe("deepseek-v4-pro");
     expect(doc(app)).toContain("default could not be saved");
@@ -339,6 +350,7 @@ describe("没有 key 的界面", () => {
     term.feed("\x13");
     expect(plain(app.dialogLines())).toContain("not verified");
     expect(calls.at(-1)).toBe("set:deepseek:local-unverified");
+    term.feed("\r");
     term.feed("\r");
     expect(app.dialogLines()).toEqual([]);
     app.stop();

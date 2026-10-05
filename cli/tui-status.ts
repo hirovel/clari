@@ -12,7 +12,7 @@ import { fmtCostApprox } from "../src/cost.js";
 import type { AgentEvent } from "../src/events.js";
 import { DEFAULT_STATUS_WIDGETS, type StatusStyle, type StatusWidget } from "../src/status-bar.js";
 import { shortcutLines } from "./cards.js";
-import { fmtTok } from "./inspector.js";
+import { fmtTok } from "./inspector-format.js";
 import { renderStatusLayout } from "./status-layout.js";
 import { c, G } from "./theme.js";
 import type { TuiContext } from "./tui-context.js";
@@ -125,7 +125,7 @@ export class RuntimeStatus implements Component {
     const children = ctx.children.views.filter((v) => v.running).length;
     const selected =
       view.selectedStep !== undefined
-        ? `step ${view.selectedStep + 1}/${ctx.steps.length}`
+        ? `request ${view.selectedStep + 1}/${ctx.steps.length}`
         : ctx.scroll && !ctx.scroll.isFollowingEnd
           ? "Reading history"
           : "";
@@ -213,20 +213,62 @@ export class RuntimeStatus implements Component {
       : gaps
         ? `${gaps} recording gap(s) · Ctrl+R details`
         : undefined;
-    return [
+    const important = [
       ...first.map((line) => ` ${line}`),
       ...(saving ? wrapTextWithAnsi(c.zhu(saving), inner).map((line) => ` ${line}`) : []),
-      ...renderStatusLayout(style, widgets, values, width),
-      ...(ctx.deps.showCostEstimate
-        ? wrapTextWithAnsi(
-            c.faint(
-              total.cost !== undefined
-                ? `cost est. ${fmtCostApprox(total.cost)}`
-                : `cost est. unavailable (${total.costStatus})`,
-            ),
-            inner,
-          ).map((line) => ` ${line}`)
-        : []),
+    ];
+    const cost = ctx.deps.showCostEstimate
+      ? wrapTextWithAnsi(
+          c.faint(
+            total.cost !== undefined
+              ? `cost est. ${fmtCostApprox(total.cost)}`
+              : `cost est. unavailable (${total.costStatus})`,
+          ),
+          inner,
+        ).map((line) => ` ${line}`)
+      : [];
+    // 备用屏给标题两行、正文至少两行,其余留给当前编辑器和操作提示。
+    // 主屏回滚文档和设置预览不受此预算影响;不修改用户的小组件选择。
+    const budget =
+      ctx.scroll && !preview
+        ? Math.max(
+            1,
+            ctx.deps.terminal.rows -
+              ctx.editor.render(width).length -
+              inputHintLines(ctx, width).length -
+              4,
+          )
+        : Number.POSITIVE_INFINITY;
+    // 严重故障优先保留恢复入口,不让普通 Ready 行挤掉保存失败。
+    const required =
+      saving && important.length > budget
+        ? [
+            ` ${c.zhu(
+              truncateToWidth(
+                unsaved
+                  ? `${unsaved.recording?.full ? "Buffer full" : "Not saved"} · Ctrl+S retry`
+                  : "Recording gaps · Ctrl+R details",
+                inner,
+              ),
+            )}`,
+            ...first.map((line) => ` ${line}`),
+          ].slice(0, budget)
+        : important.slice(0, budget);
+    const remaining = Math.max(0, budget - required.length);
+    if (!remaining && !saving && widgets.some((id) => values[id as StatusWidget])) {
+      const last = required.length - 1;
+      required[last] = truncateToWidth(`${required[last]}${c.faint(" · status shortened")}`, width);
+    }
+    const extra =
+      cost.length <= remaining
+        ? cost
+        : remaining > 0
+          ? [` ${c.faint(truncateToWidth("Cost not shown: short window", inner))}`]
+          : [];
+    return [
+      ...required,
+      ...renderStatusLayout(style, widgets, values, width, remaining - extra.length),
+      ...extra,
     ];
   }
 }
@@ -236,39 +278,54 @@ export class InputHints implements Component {
   constructor(private readonly context: () => TuiContext) {}
   invalidate(): void {}
   render(width: number): string[] {
-    const ctx = this.context();
-    const text = ctx.editor.getExpandedText();
-    const history =
-      ctx.view.selectedStep !== undefined || (ctx.scroll && !ctx.scroll.isFollowingEnd);
-    let parts: string[];
-    if (ctx.editor.isShowingAutocomplete()) parts = ["↑↓ choose", "Tab complete", "Esc dismiss"];
-    else if (history && !text && !ctx.draftImages.length)
-      parts = [
-        "Esc return live",
-        !text && ctx.view.selectedStep !== undefined ? "Enter fold/unfold" : "",
-        ctx.steps.length ? "PgUp/PgDn steps" : "PgUp/PgDn page",
-      ];
-    else if (text.startsWith("/")) parts = ["Enter run command", "Ctrl+K palette"];
-    else if (ctx.agent.running) {
-      const boundary = ctx.slots.state.steering === "turn" ? "after turn" : "next step";
-      parts = ["Esc interrupt", `Enter ${boundary}`, "Alt+Enter follow-up"];
-    } else
-      parts = [
-        "Enter send",
-        ctx.agent.queued || ctx.deps.inputs?.error ? "/session inputs" : "Ctrl+K palette",
-        "Ctrl+R requests",
-        "/help",
-      ];
-    const attachments = ctx.inputReading
-      ? "Preparing paste…"
-      : ctx.draftImages.length
-        ? `${ctx.draftImages.length} image(s) attached · Alt+I inspect/remove · Enter sends`
-        : "";
-    return [
-      ...(attachments ? [` ${c.jin(truncateToWidth(attachments, Math.max(1, width - 2)))}`] : []),
-      ` ${c.faint(fitParts(parts, Math.max(1, width - 2)))}`,
-    ];
+    return inputHintLines(this.context(), width);
   }
+}
+
+/** 状态栏与提示使用同一份实际行数,不另存高度。 */
+function inputHintLines(ctx: TuiContext, width: number): string[] {
+  const text = ctx.editor.getExpandedText();
+  const history = ctx.view.selectedStep !== undefined || (ctx.scroll && !ctx.scroll.isFollowingEnd);
+  const step = ctx.steps[ctx.view.selectedStep ?? -1];
+  const boundary = ctx.slots.state.steering === "turn" ? "after turn" : "next step";
+  const send = text.startsWith("/")
+    ? "Enter command"
+    : ctx.agent.running
+      ? `Enter ${boundary}`
+      : "Enter send";
+  let parts: string[];
+  if (ctx.editor.isShowingAutocomplete()) parts = ["↑↓ choose", "Tab complete", "Esc dismiss"];
+  else if (history)
+    parts = [
+      text || ctx.draftImages.length
+        ? send
+        : step
+          ? `Enter ${step.folded ? "expand" : "collapse"}`
+          : "",
+      "Esc return live",
+      "PgUp/PgDn page",
+      ...(step ? ["Ctrl+R received"] : []),
+      ...(ctx.steps.length ? ["Shift+PgUp/PgDn request"] : []),
+    ];
+  else if (text.startsWith("/")) parts = [send, "Ctrl+K palette"];
+  else if (ctx.agent.running) {
+    parts = ["Esc interrupt", send, "Alt+Enter follow-up"];
+  } else
+    parts = [
+      send,
+      ctx.agent.queued || ctx.deps.inputs?.error ? "/session inputs" : "Ctrl+K palette",
+      "Ctrl+R requests",
+      "/help",
+    ];
+  const attachments = ctx.inputReading
+    ? "Preparing paste…"
+    : ctx.draftImages.length
+      ? `${ctx.draftImages.length} image(s) attached · Alt+I inspect/remove · Enter sends`
+      : "";
+  return [
+    ...(attachments ? [` ${c.jin(truncateToWidth(attachments, Math.max(1, width - 2)))}`] : []),
+    ` ${c.faint(fitParts(parts, Math.max(1, width - 2)))}`,
+  ];
 }
 
 /** 帮助占用独立焦点,不把反复查看的说明追加到工作记录。 */

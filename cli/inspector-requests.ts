@@ -25,7 +25,7 @@ import {
   roleLabel,
 } from "./inspector-format.js";
 import type { RequestRecording } from "./session-records.js";
-import { c } from "./theme.js";
+import { c, G, selectedText } from "./theme.js";
 
 type RequestEvent = Extract<AgentEvent, { type: "request" }>;
 type AssistantEvent = Extract<AgentEvent, { type: "assistant/message" }>;
@@ -40,6 +40,8 @@ export type RequestRecord = {
   index: number;
   request: RequestEvent;
   response?: AssistantEvent;
+  /** 本次回复后产生的工具结果;未执行的调用也有结果,不依赖原文附件。 */
+  results: Extract<AgentEvent, { type: "tool/result" }>[];
   error?: RequestErrorEvent;
   /** 摘要请求(reason=compaction)的结果:随后落盘的压缩事件。 */
   compaction?: CompactionEvent;
@@ -58,7 +60,14 @@ export function collectRequests(events: readonly AgentEvent[]): RequestRecord[] 
     if (!e) continue;
     switch (e.type) {
       case "request":
-        current = { n: out.length + 1, index: i, request: e, retries: [], before: pending };
+        current = {
+          n: out.length + 1,
+          index: i,
+          request: e,
+          results: [],
+          retries: [],
+          before: pending,
+        };
         pending = [];
         out.push(current);
         break;
@@ -70,6 +79,9 @@ export function collectRequests(events: readonly AgentEvent[]): RequestRecord[] 
         break;
       case "assistant/message":
         if (current && !current.response && !current.error) current.response = e;
+        break;
+      case "tool/result":
+        current?.results.push(e);
         break;
       case "compaction":
         // 既是摘要请求的结果,也是下一请求之前发生的决定。
@@ -146,14 +158,14 @@ function listParts(rec: RequestRecord): { head: string; tail: string } {
 export function listRow(rec: RequestRecord, selected: boolean): string {
   const { head, tail } = listParts(rec);
   const body = `${head}  ${tail}`;
-  return `${selected ? c.zhu("▸") : " "} ${selected ? c.bold(c.ink(body)) : c.soft(body)}`;
+  return `${selected ? selectedText(G.cursor) : " "} ${selected ? selectedText(body) : c.soft(body)}`;
 }
 
 /** 窄屏的第二行专门留给结果,避免缓存、输出和停止原因被右侧截断。 */
 export function narrowListRows(rec: RequestRecord, selected: boolean): string[] {
   const { head, tail } = listParts(rec);
-  const tone = selected ? (text: string) => c.bold(c.ink(text)) : c.soft;
-  return [`${selected ? c.zhu("▸") : " "} ${tone(head)}`, `  ${tone(tail)}`];
+  const tone = selected ? selectedText : c.soft;
+  return [`${selected ? selectedText(G.cursor) : " "} ${tone(head)}`, `  ${tone(tail)}`];
 }
 
 // ---------- 请求详情的七个分区 ----------
@@ -168,9 +180,8 @@ export function exchangeLines(
 ): string[] {
   const next = events.findIndex((e, i) => i > rec.index && e.type === "request");
   const after = events.slice(rec.index + 1, next < 0 ? events.length : next);
-  const results = after.filter((e) => e.type === "tool/result");
   const unknown =
-    results.filter((e) => e.outcome === "unknown").length +
+    rec.results.filter((e) => e.outcome === "unknown").length +
     after.filter((e) => e.type === "tool/unresolved").length;
   const keep = unchangedPrefix(previous, messages);
   return [
@@ -187,7 +198,7 @@ export function exchangeLines(
       `Response: ${rec.error ? "request failed" : rec.response ? `${rec.response.stopReason} · ${rec.response.toolCalls.length} tool calls` : rec.compaction ? "compaction result recorded" : "no result recorded yet"}`,
     ),
     c.soft(
-      `After response: ${results.length} tool results · ${unknown} unknown · ${next < 0 ? "no next request recorded" : `next input is #${rec.n + 1}`}`,
+      `After response: ${rec.results.length} tool results · ${unknown} unknown · ${next < 0 ? "no next request recorded" : `next input is #${rec.n + 1}`}`,
     ),
     ...cacheUsageLines(rec.response?.usage ?? rec.compaction?.usage).map(c.soft),
     c.faint(
@@ -577,7 +588,10 @@ export function wireLines(
  * 某次请求实际发出的消息。正常步 = 请求之前全部事件的投影;
  * 策略自己发的请求(压缩摘要)记了 body:前缀投影 + 策略追加的尾部消息,同样逐字节可重建。
  */
-export function messagesFor(events: readonly AgentEvent[], rec: RequestRecord): Message[] {
+export function messagesFor(
+  events: readonly AgentEvent[],
+  rec: Pick<RequestRecord, "index" | "request">,
+): Message[] {
   const b = rec.request.body;
   if (b) return [...deriveMessages(events.slice(0, b.prefixEvents)), ...(b.tail as Message[])];
   return deriveMessages(events.slice(0, rec.index));
@@ -639,8 +653,8 @@ export function eventRow(events: readonly AgentEvent[], i: number, selected: boo
     flag = "  covered by summary";
   const size = JSON.stringify(e).length;
   const body = `${`#${i}`.padEnd(5)} ${clock(e.at)}  ${e.type.padEnd(18)} ${String(size).padStart(7)} chars  ${visibility(e)}${flag}`;
-  const mark = selected ? c.zhu("▸") : " ";
-  const tone = selected ? c.bold(c.ink(body)) : isProjected(e) ? c.soft(body) : c.faint(body);
+  const mark = selected ? selectedText(G.cursor) : " ";
+  const tone = selected ? selectedText(body) : isProjected(e) ? c.soft(body) : c.faint(body);
   return `${mark} ${tone}`;
 }
 

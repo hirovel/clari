@@ -182,9 +182,10 @@ describe("屏幕:完整 turn、卡片、折叠、diff、错误、打断", () => 
       },
     });
     const term = new VirtualTerminal(100, 40);
+    const log = new EventLog();
     const app = createTuiApp({
       terminal: term,
-      log: new EventLog(),
+      log,
       provider: scripted([
         {
           text: "",
@@ -270,6 +271,29 @@ describe("屏幕:完整 turn、卡片、折叠、diff、错误、打断", () => 
     await app.submit("two");
     expect(text(app)).toContain("last cache 0%");
 
+    const unknown = Array.from({ length: 25 }, (_, i) => `Unknown detail ${i + 1}`).join("\n");
+    log.append({
+      type: "tool/result",
+      at: now(),
+      callId: "unknown-call",
+      name: "remote-change",
+      content: unknown,
+      isError: true,
+      outcome: "unknown",
+      durationMs: 1500,
+    });
+    expect(text(app)).toContain("result unknown");
+    expect(text(app)).toContain("Unknown detail 20");
+    expect(text(app)).not.toContain("Unknown detail 25");
+    expect(text(app)).toContain("… +5 lines · Ctrl+O");
+    term.feed("\x0f");
+    expect(text(app)).toContain("Unknown detail 25");
+    expect(text(app)).toContain("result unknown");
+    expect(text(app)).toContain("/session recovery");
+    term.feed("\x0f");
+    expect(text(app)).not.toContain("Unknown detail 25");
+    expect(log.events.at(-1)).toMatchObject({ content: unknown, outcome: "unknown" });
+
     app.stop();
   });
 
@@ -340,7 +364,7 @@ describe("屏幕:完整 turn、卡片、折叠、diff、错误、打断", () => 
     const running = app.submit("长任务");
     await new Promise((r) => setImmediate(r));
     expect(text(app)).toContain("Waiting for model");
-    term.feed("\x1b[5~");
+    term.feed("\x1b[5;2~");
     expect(text(app)).toContain("Esc return live");
     term.feed("\x1b");
     expect(app.agent.running).toBe(true);
@@ -510,13 +534,13 @@ describe("变化说明与缓存说明", () => {
       threshold: 1000,
     };
     const note = (input: Parameters<typeof changeNote>[0]) => plain(changeNote(input) ?? "");
-    // 编辑与压缩同时在:✎ 起头,写明改了哪条、压缩了几条、重算几条、缓存上限。
+    // 编辑与压缩同时在:写明编辑和摘要,相同文本估算不冒充缓存上限。
     const changed = note({ n: 2, request, messages: cur, previous: prev, provenance });
     expect(changed.startsWith("✎ ")).toBe(true);
     expect(changed).toContain("1 edited (#6)");
     expect(changed).toContain("compacted · 1 summary");
-    expect(changed).toContain("→ 3 recomputed");
-    expect(changed).toMatch(/cache ≤\S+ of \S+/);
+    expect(changed).toContain("→ 3 after prefix");
+    expect(changed).toMatch(/unchanged ≈\S+ tok/);
     // 第一次请求、正常追加:不印。
     expect(changeNote({ n: 1, request, messages: cur })).toBeUndefined();
     expect(
@@ -551,8 +575,8 @@ describe("变化说明与缓存说明", () => {
     const low = plain(
       cacheNote({ inputTokens: 4000, outputTokens: 5, cacheReadTokens: 400 }, 3000) ?? "",
     );
-    expect(low.startsWith("≈ cache 10%")).toBe(true);
-    expect(low).toContain("expected ≤");
+    expect(low.startsWith("≈ cache hit 10%")).toBe(true);
+    expect(low).toContain("unchanged text ≈3.0k tok");
     expect(
       cacheNote({ inputTokens: 4000, outputTokens: 5, cacheReadTokens: 3000 }, 3000),
     ).toBeUndefined();

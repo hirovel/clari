@@ -1,12 +1,13 @@
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
-import { fmtMs, fmtTok, RequestInspector } from "../cli/inspector.js";
-import { cacheUsageLines } from "../cli/inspector-format.js";
+import { RequestInspector } from "../cli/inspector.js";
+import { cacheUsageLines, fmtMs, fmtTok } from "../cli/inspector-format.js";
 import { messagesFor } from "../cli/inspector-requests.js";
 import type { RequestRecording } from "../cli/session-records.js";
 import type { AgentEvent } from "../src/events.js";
 import { EventLog } from "../src/log.js";
 import { runTurn } from "../src/loop.js";
+import { deriveMessages } from "../src/messages.js";
 import type { AssistantTurn, Provider, ToolDef } from "../src/provider.js";
 import { defineTool } from "../src/tools.js";
 import { stripAnsi } from "./helpers/virtual-terminal.js";
@@ -141,18 +142,33 @@ describe("请求检视器", () => {
     expect(doc).toContain("#2");
     expect(doc).toContain("4 msgs");
     expect(doc).toContain("end");
-    expect(doc).toContain("▸ #2"); // 打开时选中最新一条
+    expect(doc).toContain("› #2"); // 打开时选中最新一条
     const narrow = text(60);
     expect(insp.render(60)).toHaveLength(30);
     expect(narrow).toContain("cache 800");
     expect(narrow).toContain("+30");
     expect(narrow).toContain("tool");
+    insp.handleInput("\x1b[H");
+    text(60); // 窄屏每个请求占两行,分页使用实际可见的条目数。
+    insp.handleInput("\x1b[6~");
+    expect(text(60)).toContain("› #2");
+    insp.handleInput("\x1b[5~");
+    expect(text(60)).toContain("› #1");
+    for (const summary of ["first summary", "second summary"])
+      log.append({ type: "compaction", at: "t", summary, coversFrom: 1, coversUpTo: 2 });
+    insp.showCompactions();
+    insp.handleInput("\x1b[H");
+    text(60);
+    insp.handleInput("\x1b[6~");
+    expect(text(60)).toMatch(/› #2\s/);
+    insp.handleInput("\x1b[5~");
+    expect(text(60)).toMatch(/› #1\s/);
   });
 
   it("详情六分区:概要 / 决策 / 发送(折叠可切) / 工具定义 / 线路 JSON / 接收", async () => {
     const { log, provider } = await session();
     const { insp, text } = build(log, provider, 40);
-    insp.handleInput("g"); // 选到 #1
+    insp.handleInput("\x1b[H"); // 选到 #1
     insp.handleInput("\r");
     let doc = text();
     expect(insp.isDetail).toBe(true);
@@ -190,7 +206,9 @@ describe("请求检视器", () => {
     insp.handleInput("\r");
     expect(text()).toContain("[−] 2. user");
     expect(text()).toContain("[−] 1. system");
-    insp.handleInput("f"); // 普通字符不能触发展开、编辑或发送。
+    const unchanged = text();
+    for (const key of ["f", "j", "k", "g", "G", "q", "s", "h", "l"]) insp.handleInput(key);
+    expect(text()).toBe(unchanged);
     expect(text()).toContain("[−] 2. user");
 
     insp.handleInput("4");
@@ -211,7 +229,7 @@ describe("请求检视器", () => {
     doc = text();
     expect(doc).toContain("[6 received]");
     expect(doc).toContain("先看看");
-    expect(doc).toContain("Call · echo");
+    expect(doc).toContain("Arguments");
     expect(doc).toContain("HTTP attempt 1");
     expect(doc).not.toContain("data: [DONE]");
     insp.handleInput("\x1b[B");
@@ -219,14 +237,36 @@ describe("请求检视器", () => {
     expect(text()).toContain('"text": "hi"');
     insp.handleInput("\x1b[B");
     insp.handleInput("\r");
+    expect(text()).toContain("Result for model");
+    expect(text()).toContain("echo:hi");
+    insp.handleInput("\x1b[B");
+    insp.handleInput("\r");
     expect(text()).toContain("data: [DONE]");
     expect(text()).toContain("用户想读内容");
+
+    // 短窗口必须给选中目标和实际操作留位置,不能由固定统计挤出屏幕。
+    for (const [width, height] of [
+      [60, 12],
+      [20, 8],
+    ]) {
+      const small = build(log, provider, height);
+      small.insp.showRequest(1, 3);
+      small.insp.handleInput("\r");
+      const lines = small.insp.render(width as number);
+      const screen = lines.map(stripAnsi).join("\n").replace(/\s+/g, " ");
+      expect(lines.length).toBeLessThanOrEqual(height as number);
+      expect(screen).toContain("Request #1");
+      expect(screen).toContain("Selected");
+      expect(screen).toContain("Enter collapse");
+      expect(screen).toContain("Esc back");
+      expect(screen).toContain("[−] 1. system");
+    }
   });
 
   it("按键:方向切分区、[ ] 切请求、滚动有位置提示、Esc 逐级返回并关闭", async () => {
     const { log, provider } = await session();
     const { insp, text, closed } = build(log, provider, 12);
-    insp.handleInput("g");
+    insp.handleInput("\x1b[H");
     insp.handleInput("\r");
     insp.handleInput("\x1b[C"); // →
     expect(text()).toContain("[2 decisions]");
@@ -238,7 +278,7 @@ describe("请求检视器", () => {
     expect(before).toMatch(/lines 1-\d+ of \d+/);
     insp.handleInput("\x1b[B"); // ↓
     expect(text(160)).toMatch(/lines 2-\d+ of \d+/);
-    insp.handleInput("G");
+    insp.handleInput("\x1b[F");
     expect(text(160)).not.toMatch(/lines 2-/);
     insp.handleInput("\x1b");
     expect(insp.isDetail).toBe(false);
@@ -249,7 +289,7 @@ describe("请求检视器", () => {
   it("第 7 分区 写入:本次请求之后追加的事件原样 JSON", async () => {
     const { log, provider } = await session();
     const { insp, text } = build(log, provider, 60);
-    insp.handleInput("g");
+    insp.handleInput("\x1b[H");
     insp.handleInput("\r");
     insp.handleInput("7");
     const doc = text();
@@ -283,7 +323,7 @@ describe("请求检视器", () => {
     expect(doc).not.toContain("session/start");
     expect(doc).toContain("request");
     insp.handleInput("1");
-    insp.handleInput("g");
+    insp.handleInput("\x1b[H");
     insp.handleInput("\r");
     doc = text();
     expect(insp.currentMode).toBe("event");
@@ -410,6 +450,46 @@ describe("请求检视器", () => {
     const page = live.render(60).map(stripAnsi).join("\n");
     expect(page).toContain("Selected · HTTP attempt 1");
     expect(page).not.toContain("data: chunk-0\n");
+    // 调用、结果与原文在当前 HTTP 块之前加入,选择仍指向正在阅读的块。
+    events.push({
+      type: "assistant/message",
+      at: "t",
+      text: "checking",
+      stopReason: "tool",
+      toolCalls: [{ id: "waiting", name: "echo", args: { text: "waiting" } }],
+    });
+    trace.outputs = [
+      {
+        callId: "waiting",
+        name: "echo",
+        original: "partial output",
+        state: "unfinished",
+        source: "original output",
+      },
+    ];
+    expect(render()).toContain("Selected · HTTP attempt 1");
+    expect(render()).toContain("Enter collapse");
+    events.push({
+      type: "tool/result",
+      at: "t",
+      callId: "waiting",
+      name: "echo",
+      content: "External outcome unknown",
+      isError: true,
+      outcome: "unknown",
+    });
+    const expectedEvents = JSON.stringify(events);
+    const expectedMessages = JSON.stringify(deriveMessages(events));
+    expect(render()).toContain("Selected · HTTP attempt 1");
+    expect(render()).toContain("Enter collapse");
+    live.handleInput("\x1b[5~");
+    render();
+    live.handleInput("\x1b[6~");
+    render();
+    live.handleInput("\r"); // 仍折叠 HTTP 正文,不误折叠新加入的结果。
+    expect(render()).not.toContain("data: chunk-99");
+    expect(JSON.stringify(events)).toBe(expectedEvents);
+    expect(JSON.stringify(deriveMessages(events))).toBe(expectedMessages);
     // 发送页不能把读取失败隐藏在重建标签背后。
     trace.error = "Missing or unreadable recording: fixture input";
     live.handleInput("3");

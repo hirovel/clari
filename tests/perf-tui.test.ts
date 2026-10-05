@@ -126,8 +126,8 @@ describe("界面回放", () => {
     const lines = (app as ReturnType<typeof createTuiApp>).lines(120).join("\n");
     expect(lines).toContain("resumed: 2102 events");
     // 最新三步显示请求边界,其余 697 步各折成一行账目。
-    expect(lines.match(/Request #/g)?.length).toBe(3);
-    expect(stripAnsi(lines).match(/≡ #/g)?.length).toBe(697);
+    expect(stripAnsi(lines).match(/── Request #/g)?.length).toBe(3);
+    expect(stripAnsi(lines).match(/≡ Request #/g)?.length).toBe(697);
     (app as ReturnType<typeof createTuiApp>).stop();
   });
 });

@@ -1,12 +1,12 @@
 // 子 agent 视图与压缩对照。
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
+import { RequestInspector } from "../cli/inspector.js";
 import {
   collectCompactions,
   compactionLines,
   compactionRow,
-  RequestInspector,
-} from "../cli/inspector.js";
+} from "../cli/inspector-compactions.js";
 import { childEventLines, createTuiApp } from "../cli/tui-app.js";
 import type { AgentEvent } from "../src/events.js";
 import { EventLog } from "../src/log.js";
@@ -114,12 +114,12 @@ describe("子 agent 视图", () => {
     // 检视器:s 切到子会话,请求列表与事件视图作用在子的数组上
     app.inspector.open();
     let insp = app.inspector.lines(110).map(stripAnsi).join("\n");
-    expect(insp).toContain("▸ main");
+    expect(insp).toContain("› main");
     expect(insp).toContain("sub #1 统计 echo 两次");
     expect(insp).toContain("2 requests");
-    app.inspector.key("s");
+    app.inspector.key("\x1b[C");
     insp = app.inspector.lines(110).map(stripAnsi).join("\n");
-    expect(insp).toContain("▸ sub #1");
+    expect(insp).toContain("› sub #1");
     expect(insp).toContain("2 requests");
     app.inspector.key("\r");
     app.inspector.key("5");
@@ -129,7 +129,7 @@ describe("子 agent 视图", () => {
     app.inspector.key("\t");
     insp = app.inspector.lines(110).map(stripAnsi).join("\n");
     expect(insp).toContain("Events");
-    expect(insp).toContain("▸ sub #1");
+    expect(insp).toContain("› sub #1");
     const parentCount = log.events.length;
     const child = children[0]?.log;
     if (!child) throw new Error("missing child");
@@ -143,14 +143,14 @@ describe("子 agent 视图", () => {
     insp = app.inspector.lines(110).map(stripAnsi).join("\n");
     expect(insp).toContain("View full message");
     expect(insp).not.toContain("Edit content");
-    expect(insp).not.toContain("Retry last step");
-    expect(insp).not.toContain("Fork here");
+    expect(insp).not.toContain("Retry latest reply");
+    expect(insp).not.toContain("Fork new session here");
     app.inspector.key("\r");
     expect(app.inspector.lines(110).map(stripAnsi).join("\n")).toContain("子完成:one");
     expect(app.dialogLines()).toEqual([]);
     // 子system只能查看全文,不能打开父提示词的开关或工具选单。
     app.inspector.key("\x1b");
-    app.inspector.key("g");
+    app.inspector.key("\x1b[H");
     app.inspector.key("\r");
     app.inspector.key("2");
     app.inspector.key("\r");
@@ -159,7 +159,7 @@ describe("子 agent 视图", () => {
     expect(app.dialogLines()).toEqual([]);
     app.inspector.close();
     app.inspector.openComposition();
-    expect(app.inspector.lines(110).map(stripAnsi).join("\n")).toContain("▸ main");
+    expect(app.inspector.lines(110).map(stripAnsi).join("\n")).toContain("› main");
     app.inspector.key("\r");
     expect(app.inspector.lines(110).map(stripAnsi).join("\n")).toContain("Edit content");
     app.stop();
@@ -316,8 +316,8 @@ describe("压缩对照", () => {
     let doc = insp.render(120).map(stripAnsi).join("\n");
     expect(doc).toContain("Compactions");
     expect(doc).toContain("2 compactions");
-    expect(doc).toContain("▸ #2");
-    insp.handleInput("g");
+    expect(doc).toContain("› #2");
+    insp.handleInput("\x1b[H");
     insp.handleInput("\r");
     doc = insp.render(120).map(stripAnsi).join("\n");
     expect(insp.currentMode).toBe("compaction");
