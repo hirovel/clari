@@ -1,5 +1,5 @@
 import type { AgentEvent, Usage } from "./events.js";
-import { deriveMessages, type Message } from "./messages.js";
+import { deriveMessages, type Message, userShellText } from "./messages.js";
 
 /**
  * 上下文构成投影:当前模型可见内容按类别的 token 分布。
@@ -52,6 +52,8 @@ export function eventTokens(e: AgentEvent): number {
       return estimateTokens(e.system);
     case "user/message":
       return estimateTokens(e.text);
+    case "user/shell":
+      return e.excludeFromContext ? 0 : estimateTokens(userShellText(e));
     case "assistant/message":
       return estimateTokens(e.text) + toolCallTokens(e.toolCalls);
     case "tool/result":

@@ -1,6 +1,6 @@
 // 会话文件:目录、新建、恢复、分叉,以及列表与清理。
 // 会话目录里每个 .jsonl 是一份事件数组,旁边可能有 .trace.jsonl(原始流)与 .mcp/(MCP 图片结果)。
-// 列表只读首尾几个事件;清理按开始时间或保留条数,连同旁车文件一起删,不加 --yes 只打印计划。
+// 列表从各会话文件概括;清理按开始时间或保留条数,连同旁车文件一起删,不加 --yes 只打印计划。
 import { randomUUID } from "node:crypto";
 import { existsSync, lstatSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -66,7 +66,7 @@ export function summarizeSession(file: string): SessionSummary {
       startedAt = startedAt ?? e.at;
       model = e.model ?? model;
     } else if (e.type === "session/model") model = e.model ?? model;
-    else if (e.type === "user/message") {
+    else if (e.type === "user/message" || e.type === "user/shell") {
       userMessages += 1;
       lastUser = (e.text ?? "").split("\n")[0]?.trim() || lastUser;
     } else if (e.type === "request") requests += 1;

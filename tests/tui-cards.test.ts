@@ -40,11 +40,12 @@ const echo = defineTool({
 function boot(
   provider: Provider,
   settings?: ModelSettings,
-): { app: TuiApp; term: VirtualTerminal } {
+): { app: TuiApp; term: VirtualTerminal; log: EventLog } {
   const term = new VirtualTerminal(100, 40);
+  const log = new EventLog();
   const app = createTuiApp({
     terminal: term,
-    log: new EventLog(),
+    log,
     provider,
     tools: [echo],
     compaction: { strategy: async () => null, window: 100000, reserveTokens: 32000 },
@@ -54,7 +55,7 @@ function boot(
     systemPrompt: "sys",
     onExit: () => {},
   });
-  return { app, term };
+  return { app, term, log };
 }
 
 const text = (app: TuiApp) => app.lines(100).map(stripAnsi).join("\n");
@@ -271,7 +272,10 @@ describe("屏幕:完整 turn、卡片、折叠、diff、错误、打断", () => 
     await app.submit("two");
     expect(text(app)).toContain("last cache 0%");
 
-    const unknown = Array.from({ length: 25 }, (_, i) => `Unknown detail ${i + 1}`).join("\n");
+    const control = "\x1b]52;c;dGVzdA==\x07\x1b[2J\x1b[H";
+    const unknown = Array.from({ length: 25 }, (_, i) => `Unknown detail ${i + 1}`)
+      .join("\n")
+      .replace("Unknown detail 1\n", `Unknown detail 1${control}\n`);
     log.append({
       type: "tool/result",
       at: now(),
@@ -284,10 +288,12 @@ describe("屏幕:完整 turn、卡片、折叠、diff、错误、打断", () => 
     });
     expect(text(app)).toContain("result unknown");
     expect(text(app)).toContain("Unknown detail 20");
+    expect(app.lines(100).join("\n")).not.toContain(control);
     expect(text(app)).not.toContain("Unknown detail 25");
     expect(text(app)).toContain("… +5 lines · Ctrl+O");
     term.feed("\x0f");
     expect(text(app)).toContain("Unknown detail 25");
+    expect(app.lines(100).join("\n")).not.toContain(control);
     expect(text(app)).toContain("result unknown");
     expect(text(app)).toContain("/session recovery");
     term.feed("\x0f");
@@ -298,7 +304,11 @@ describe("屏幕:完整 turn、卡片、折叠、diff、错误、打断", () => 
   });
 
   it("edit 调用显示行级 diff,write 显示前几行与总行数", async () => {
-    const { app } = boot(
+    const control = "\x1b]52;c;dGVzdA==\x07\x1b[2J\x1b[H";
+    const writeContent = Array.from({ length: 20 }, (_, i) => `L${i}`)
+      .join("\n")
+      .replace("L0\n", `L0${control}\n`);
+    const { app, log } = boot(
       scripted([
         {
           text: "",
@@ -313,13 +323,18 @@ describe("屏幕:完整 turn、卡片、折叠、diff、错误、打断", () => 
               name: "write",
               args: {
                 path: "b.txt",
-                content: Array.from({ length: 20 }, (_, i) => `L${i}`).join("\n"),
+                content: writeContent,
               },
             },
+            { id: "c3", name: "bash", args: { command: `echo before${control}after` } },
           ],
           stopReason: "tool",
         },
-        { text: "done", toolCalls: [], stopReason: "end" },
+        {
+          text: `Reply before${control}after\r\nProgress 10%\rProgress 100%`,
+          toolCalls: [],
+          stopReason: "end",
+        },
       ]),
     );
     await app.submit("改");
@@ -329,25 +344,71 @@ describe("屏幕:完整 turn、卡片、折叠、diff、错误、打断", () => 
     expect(doc).toContain("+ L0");
     expect(doc).toContain("… 20 lines total");
     expect(doc).not.toContain("+ L19");
+    expect(doc).toContain("Reply beforeafter");
+    expect(doc).toContain("Progress 10%");
+    expect(doc).toContain("Progress 100%");
+    expect(doc).not.toContain("Progress 10%Progress 100%");
+    expect(app.lines(100).join("\n")).not.toContain(control);
+    const assistant = log.events.find((event) => event.type === "assistant/message");
+    if (assistant?.type !== "assistant/message") throw new Error("Missing assistant message");
+    expect(assistant.toolCalls.find((call) => call.id === "c2")?.args).toEqual({
+      path: "b.txt",
+      content: writeContent,
+    });
+    expect(assistant.toolCalls.find((call) => call.id === "c3")?.args).toEqual({
+      command: `echo before${control}after`,
+    });
+    expect(log.events.filter((event) => event.type === "assistant/message").at(-1)?.text).toContain(
+      control,
+    );
     app.stop();
   });
 
   it("请求失败保留错误和恢复入口,执行结束后仍可继续输入", async () => {
+    let attempt = 0;
     const provider: Provider = {
       model: "fake-model",
-      async complete() {
-        throw new Error("网络断了");
+      async complete(_messages, _tools, opts) {
+        if (attempt++ === 0) {
+          opts?.onReasoning?.("FAILED_THINKING\n");
+          opts?.onReasoning?.("FAILED_TAIL");
+          opts?.onDelta?.("FAILED_REPLY ");
+          opts?.onDelta?.("LAST_FRAGMENT");
+          throw new Error("网络断了");
+        }
+        opts?.onReasoning?.("NEW_THINKING");
+        opts?.onDelta?.("NEW_REPLY");
+        return { text: "NEW_REPLY", reasoning: "NEW_THINKING", toolCalls: [], stopReason: "end" };
       },
     };
-    const { app } = boot(provider);
-    await app.submit("x");
-    const doc = text(app);
-    expect(doc).toContain("✗ request #1 failed");
-    expect(doc).toContain("网络断了");
-    expect(doc).toContain("Request failed");
-    expect(doc).toContain("/inspect raw");
-    expect(app.agent.running).toBe(false);
-    app.stop();
+    const { app, term, log } = boot(provider);
+    try {
+      await app.submit("x");
+      let shown = text(app);
+      expect(shown).toContain("✗ request #1 failed");
+      expect(shown).toContain("网络断了");
+      expect(shown).toContain("Request failed");
+      expect(shown).toContain("/inspect raw");
+      expect(shown).toContain("FAILED_REPLY LAST_FRAGMENT");
+      expect(shown).toContain("Partial response");
+      expect(app.agent.running).toBe(false);
+      term.feed("\x14");
+      expect(text(app)).toContain("FAILED_TAIL");
+      await app.submit("continue after failure");
+      shown = text(app);
+      expect(shown.indexOf("FAILED_REPLY LAST_FRAGMENT")).toBeGreaterThan(-1);
+      expect(shown.indexOf("FAILED_REPLY LAST_FRAGMENT")).toBeLessThan(
+        shown.indexOf("continue after failure"),
+      );
+      expect(shown).toContain("FAILED_TAIL");
+      expect(shown).toContain("NEW_REPLY");
+      expect(shown).toContain("NEW_THINKING");
+      expect(log.events.filter((event) => event.type === "assistant/message")).toMatchObject([
+        { text: "NEW_REPLY", reasoning: "NEW_THINKING" },
+      ]);
+    } finally {
+      app.stop();
+    }
   });
 
   it("Esc 通过终端输入通道打断运行中的 turn", async () => {
@@ -380,7 +441,7 @@ describe("屏幕:完整 turn、卡片、折叠、diff、错误、打断", () => 
 });
 
 describe("少见事件与流式思考的渲染", () => {
-  it("恢复日志与新事件正常呈现,停止界面后不再消费日志", () => {
+  it("恢复日志与新事件正常呈现,停止界面后不再消费日志或迟到增量", async () => {
     const log = new EventLog();
     log.append({ type: "session/start", at: "", model: "m", system: "s" });
     log.append({ type: "session/recovered", at: "", droppedBytes: 12, preview: "{" });
@@ -430,8 +491,25 @@ describe("少见事件与流式思考的渲染", () => {
     const starting = bootB(scriptedB([]), {}, fresh);
     expect(doc(starting.app)).not.toContain("resumed:");
     starting.app.stop();
-    const { app } = bootB(
-      scriptedB([]),
+    let release!: () => void;
+    let started!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const wait = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { app, term } = bootB(
+      {
+        model: "m",
+        async complete(_messages, _tools, opts) {
+          started();
+          await wait;
+          opts?.onReasoning?.("late thinking after stop");
+          opts?.onDelta?.("late reply after stop");
+          return { text: "late reply after stop", toolCalls: [], stopReason: "end" };
+        },
+      },
       {
         info: { model: "m", providerName: "p", sessionFile: "s", resumed: true },
       },
@@ -448,13 +526,28 @@ describe("少见事件与流式思考的渲染", () => {
     expect(d).toContain("resumed: 9 events");
     log.append({ type: "user/message", at: "", text: "live before stop" });
     expect(doc(app)).toContain("live before stop");
+    const pending = app.submit("run before stop");
+    await ready;
     app.stop();
-    const stopped = doc(app);
+    const writes = term.raw.length;
+    const titles = term.titles.length;
     log.append({ type: "user/message", at: "", text: "late after stop" });
-    expect(doc(app)).toBe(stopped);
+    expect(doc(app)).not.toContain("late after stop");
+    release();
+    await pending;
+    expect(doc(app)).not.toContain("late after stop");
+    expect(doc(app)).not.toContain("late thinking after stop");
+    expect(doc(app)).not.toContain("late reply after stop");
+    expect(term.titles).toHaveLength(titles);
+    expect(term.raw).toHaveLength(writes);
+    expect(log.events.at(-1)).toMatchObject({
+      type: "assistant/message",
+      text: "late reply after stop",
+    });
   });
 
   it("网络请求的重试按发生顺序显示在最终错误之前", () => {
+    const control = "\x1b]52;c;dGVzdA==\x07\x1b[2J\x1b[H";
     const log = new EventLog();
     log.append({ type: "session/start", at: "", model: "m", system: "s" });
     log.append({ type: "user/message", at: "", text: "hi" });
@@ -467,35 +560,90 @@ describe("少见事件与流式思考的渲染", () => {
       estimatedTokens: 10,
       reason: "turn",
     });
-    log.append({ type: "retry", at: "", attempt: 1, delayMs: 500, error: "fetch failed" });
-    log.append({ type: "request/error", at: "", error: "fetch failed", kind: "network" });
+    log.append({
+      type: "retry",
+      at: "",
+      attempt: 1,
+      delayMs: 500,
+      error: `fetch failed${control}`,
+    });
+    log.append({ type: "request/error", at: "", error: `fetch failed${control}`, kind: "network" });
+    log.append({
+      type: "ext/event",
+      at: "",
+      source: "skills",
+      kind: "load-error",
+      payload: { message: `Skill load failed${control}` },
+    });
     const { app } = bootB(scriptedB([]), {}, log);
     const failed = doc(app);
     expect(failed.indexOf("retry 1:")).toBeLessThan(failed.indexOf("request #1 failed"));
+    expect(failed).toContain("Skill load failed");
+    expect(app.lines(120).join("\n")).not.toContain("\x1b]52;");
+    expect(app.lines(120).join("\n")).not.toContain("\x1b[2J");
     app.stop();
   });
 
   it("流式思考:定稿带思考时保留节点并可 Ctrl+T 展开;定稿无思考时撤掉节点;task 调用留槽", async () => {
-    const { app, term } = bootB(
-      scriptedB([
-        {
-          text: "",
+    let step = 0;
+    let continueStep!: () => void;
+    let firstStarted!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+    const paused = new Promise<void>((resolve) => {
+      continueStep = resolve;
+    });
+    const { app, term, log } = bootB({
+      model: "m",
+      async complete(_messages, _tools, opts) {
+        if (step++ > 0) {
+          opts?.onReasoning?.("discarded thinking\n");
+          opts?.onReasoning?.("discarded tail");
+          return { text: "final", toolCalls: [], stopReason: "end", reasoning: "" };
+        }
+        opts?.onReasoning?.("thinking\n");
+        opts?.onReasoning?.("hard about it");
+        opts?.onDelta?.("reply ");
+        opts?.onDelta?.("in progress");
+        firstStarted();
+        await paused;
+        opts?.onReasoning?.("\nFINAL_REASONING");
+        opts?.onDelta?.("LATE_DRAFT");
+        return {
+          text: "first reply",
           toolCalls: [{ id: "t1", name: "task", args: { task: "sub job" } }],
           stopReason: "tool",
-          reasoning: "thinking hard about it",
+          reasoning: "thinking\nhard about it\nFINAL_REASONING",
           reasoningKind: "full",
-        },
-        { text: "final", toolCalls: [], stopReason: "end", reasoning: "" },
-      ]),
-    );
-    await app.submit("go");
+        };
+      },
+    });
+    const running = app.submit("go");
+    await ready;
+    expect(doc(app)).toContain("thinking");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(doc(app)).toContain("reply in progress");
+    term.feed("\x14");
+    expect(doc(app)).toContain("hard about it");
+    continueStep();
+    await running;
     let d = doc(app);
     expect(d).toContain("thinking");
     expect(d).toContain("» task");
     term.feed("\x14");
+    term.feed("\x14");
     d = doc(app);
-    expect(d).toContain("thinking hard about it");
+    expect(d).toContain("hard about it");
+    expect(d).toContain("FINAL_REASONING");
+    expect(d).toContain("first reply");
     expect(d).toContain("final");
+    expect(d).not.toContain("LATE_DRAFT");
+    expect(d).not.toContain("discarded thinking");
+    expect(log.events.find((event) => event.type === "assistant/message")).toMatchObject({
+      reasoning: "thinking\nhard about it\nFINAL_REASONING",
+      text: "first reply",
+    });
     app.stop();
   });
 });

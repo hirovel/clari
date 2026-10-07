@@ -14,9 +14,10 @@ export function expandFileRefs(
 ): { text: string; attachments: Attachment[] } {
   const attachments: Attachment[] = [];
   const blocks: string[] = [];
-  const re = /(^|\s)@([^\s@"'`<>]+)/g;
+  // 引号明确界定含空格的路径,不从后续自然语言猜测文件名。
+  const re = /(^|\s)@(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([^\s@"'`<>]+))/g;
   for (const m of text.matchAll(re)) {
-    const ref = m[2] as string;
+    const ref = (m[2] ?? m[3] ?? m[4]) as string;
     const path = resolve(cwd, ref);
     if (attachments.some((a) => a.path === path && !a.skipped)) continue;
     let size: number | undefined;
@@ -49,8 +50,21 @@ export function expandFileRefs(
         attachments.push({ ref, path, bytes: size, skipped: "binary file, not attached" });
         continue;
       }
+      let content: string;
+      try {
+        // 不能把损坏或其他编码的字节悄悄替换为 U+FFFD;有效 UTF-8 保留 BOM。
+        content = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+      } catch {
+        attachments.push({ ref, path, bytes: size, skipped: "not valid UTF-8 text, not attached" });
+        continue;
+      }
       attachments.push({ ref, path, bytes: size });
-      blocks.push(`<file name="${ref}">\n${bytes.toString("utf8")}\n</file>`);
+      const name = ref
+        .replaceAll("&", "&amp;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;");
+      blocks.push(`<file name="${name}">\n${content}\n</file>`);
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (size === undefined && (code === "ENOENT" || code === "ENOTDIR")) continue;

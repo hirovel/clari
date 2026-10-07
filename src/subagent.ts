@@ -15,6 +15,7 @@ import {
 } from "./loop.js";
 import { deriveMessages } from "./messages.js";
 import type { Provider } from "./provider.js";
+import { errorMessage } from "./providers/errors.js";
 import { recordUnresolvedCalls } from "./recovery.js";
 import {
   composeDescription,
@@ -519,7 +520,7 @@ export function createTaskTool(opts: TaskToolOptions): TaskTool {
           } catch (cleanupError) {
             throw new AggregateError(
               [error, cleanupError],
-              `Sub-agent failed and cleanup failed: ${(error as Error).message}; ${(cleanupError as Error).message}`,
+              `Sub-agent failed and cleanup failed: ${errorMessage(error)}; ${errorMessage(cleanupError)}`,
             );
           }
           throw error;
@@ -527,7 +528,7 @@ export function createTaskTool(opts: TaskToolOptions): TaskTool {
         await resources.dispose();
       } catch (err) {
         record.running = false;
-        info.state = { status: "partial", reason: (err as Error).message };
+        info.state = { status: "partial", reason: errorMessage(err) };
         throw err;
       }
       record.running = false;

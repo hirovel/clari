@@ -107,6 +107,12 @@ export function eventSummary(
       };
     case "user/message":
       return { sign: G.you, text: firstLine(e.text) || "(empty)", tok: eventTokens(e) };
+    case "user/shell":
+      return {
+        sign: G.you,
+        text: `User shell · ${e.excludeFromContext ? "Local only" : "Included in next context"} · ${e.status}: ${firstLine(e.command)}`,
+        tok: e.excludeFromContext ? undefined : eventTokens(e),
+      };
     case "assistant/message": {
       const calls = e.toolCalls.map((t) => t.name).join(" ");
       const parts: string[] = [];
@@ -202,11 +208,13 @@ export function eventSummary(
             ? estimateTokens(t.text)
             : t?.type === "user/message"
               ? estimateTokens(t.text)
-              : t?.type === "tool/result"
-                ? estimateTokens(t.content)
-                : t?.type === "session/start"
-                  ? estimateTokens(t.system)
-                  : 0;
+              : t?.type === "user/shell"
+                ? eventTokens(t)
+                : t?.type === "tool/result"
+                  ? estimateTokens(t.content)
+                  : t?.type === "session/start"
+                    ? estimateTokens(t.system)
+                    : 0;
       return {
         sign: G.edited,
         text: `#${e.target}.${e.field} · ${before} → ${estimateTokens(e.value)} tok${e.note ? ` · ${e.note}` : ""}`,

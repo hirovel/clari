@@ -7,13 +7,49 @@ import { closeSync, existsSync, mkdtempSync, openSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
-import { defineTool, described } from "../../src/tools.js";
+import type { ToolContext } from "../../src/tools.js";
+import { defineTool, described, ToolOutcomeUnknownError } from "../../src/tools.js";
 import { stopProcessTree } from "../process-tree.js";
 import { keepTail, type TruncationPolicy } from "./truncate.js";
 
 /** 缺省超时与模型可见的输出尾部预算。完整原文流式写入 Recording。 */
 export const DEFAULT_TIMEOUT_S = 120;
 const PREVIEW_BYTES = 50 * 1024;
+
+/** 用户命令从显式目录开始,不读取或改变模型工具实例的工作目录。 */
+export async function executeUserShell(
+  command: string,
+  cwd: string,
+  ctx: ToolContext,
+  onPreview?: (text: string) => void,
+): Promise<{ content: string; isError: boolean; status: string }> {
+  const shell = findBash();
+  if (!shell) throw new Error("bash not found. Install Git for Windows or set CLARI_SHELL.");
+  const result = await run(shell, command, ctx.signal, {
+    cwd,
+    timeoutMs: DEFAULT_TIMEOUT_S * 1000,
+    closeInput: true,
+    ...(onPreview && { onPreview }),
+    ...(ctx.output && { onData: (data: Buffer) => ctx.output?.write(data) }),
+  });
+  const output = applyTruncation(result.output, keepTail(), {
+    path: ctx.output?.path ?? result.outputPath,
+    omitted: result.omitted,
+    bytes: result.bytes,
+    missingFrom: ctx.output?.ref.missingFrom,
+    exitCode: result.exitCode,
+  });
+  const status = result.aborted
+    ? "Interrupted"
+    : result.timedOut
+      ? `Timed out after ${DEFAULT_TIMEOUT_S}s`
+      : `Exit code: ${result.exitCode}`;
+  return {
+    content: `${output || "(no output)"}\n[${status}]`,
+    isError: result.aborted || result.timedOut || result.exitCode !== 0,
+    status,
+  };
+}
 
 export function createBashTool(
   opts: {
@@ -162,7 +198,13 @@ function run(
   shell: string,
   command: string,
   signal: AbortSignal,
-  limits: { timeoutMs: number; cwd: string; onData?: (data: Buffer) => void },
+  limits: {
+    timeoutMs: number;
+    cwd: string;
+    onData?: (data: Buffer) => void;
+    onPreview?: (text: string) => void;
+    closeInput?: boolean;
+  },
 ): Promise<RunResult> {
   if (signal.aborted) return Promise.reject(new Error("command interrupted before starting"));
   return new Promise((resolvePromise, rejectPromise) => {
@@ -172,6 +214,7 @@ function run(
       windowsHide: true,
       detached: process.platform !== "win32",
     });
+    if (limits.closeInput) child.stdin.end();
     let tail = Buffer.alloc(0);
     let bytes = 0;
     let omitted = false;
@@ -186,21 +229,31 @@ function run(
     const killTree = () => {
       if (killed) return;
       killed = true;
+      let stopDetail: string | undefined;
       try {
         stopProcessTree(child, process.platform !== "win32");
       } catch (error) {
-        const reason = aborted
-          ? "command interrupted"
-          : timedOut
-            ? `command did not finish within ${limits.timeoutMs / 1000} s`
-            : "command stop requested";
-        killError = new Error(
-          `${reason}; ${(error as Error).message}. Output so far:\n${tail.toString("utf8").slice(-4000)}`,
-        );
-        child.stdout.destroy();
-        child.stderr.destroy();
-        rejectPromise(killError);
+        stopDetail = (error as Error).message;
       }
+      // Windows 的后代可持有继承管道;taskkill 返回后不再等待这些句柄。
+      // 退出码未观察到,不能把命令或整棵进程树伪报为已停止。
+      if (stopDetail === undefined && process.platform !== "win32") return;
+      const reason = aborted
+        ? "command interrupted"
+        : timedOut
+          ? `command did not finish within ${limits.timeoutMs / 1000} s`
+          : (captureError?.message ?? "command stop requested");
+      killError = new ToolOutcomeUnknownError(
+        `${reason}; ${stopDetail ?? "taskkill completed; local wait ended; descendant termination not verified"}. Output so far:\n${tail.toString("utf8").slice(-4000)}`,
+      );
+      cleanup();
+      child.stdout.removeListener("data", onData);
+      child.stderr.removeListener("data", onData);
+      child.stdin.destroy();
+      child.stdout.destroy();
+      child.stderr.destroy();
+      child.unref();
+      rejectPromise(killError);
     };
     const onData = (d: Buffer) => {
       if (captureError) return;
@@ -218,6 +271,12 @@ function run(
         omitted ||= combined.length > PREVIEW_BYTES;
         tail = combined.subarray(Math.max(0, combined.length - PREVIEW_BYTES));
         bytes += d.length;
+        if (limits.onPreview) {
+          let start = 0;
+          while (start < tail.length && ((tail[start] as number) & 0xc0) === 0x80) start++;
+          // 实时预览可以不含尾部尚未收齐的 UTF-8 字符;原始捕获始终先收到完整字节。
+          limits.onPreview(new TextDecoder().decode(tail.subarray(start), { stream: true }));
+        }
       } catch (error) {
         captureError = new Error(
           `command output could not be captured: ${(error as Error).message}`,

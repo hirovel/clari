@@ -117,10 +117,16 @@ export type ToolOutput = {
   readonly bytes: number;
 };
 export function toolOutput(log: EventLog, callId: string, name: string): ToolOutput | undefined {
+  const output = openOutput(log, `${name} original output`);
+  if (output) recordEvent(log, "tool/output", { callId, output: output.ref });
+  return output;
+}
+
+/** 输出捕获与所属事件分开,用户命令不应被请求检视器当成模型工具结果。 */
+export function openOutput(log: EventLog, label: string): ToolOutput | undefined {
   const store = log.recording;
   if (!store) return undefined;
-  const output = store.open(`${name} original output`);
-  recordEvent(log, "tool/output", { callId, output: output.ref });
+  const output = store.open(label);
   let written = false;
   return {
     ref: output.ref,

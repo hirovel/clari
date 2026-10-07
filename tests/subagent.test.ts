@@ -9,6 +9,7 @@ import { EventLog } from "../src/log.js";
 import { runTurn } from "../src/loop.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
 import {
+  type ChildInfo,
   createTaskTool,
   fork,
   inProcessRunner,
@@ -273,7 +274,7 @@ describe("createTaskTool", () => {
     );
   });
 
-  it("子被打断 → partial → 以错误结果回喂且附已有输出", async () => {
+  it("子失败或打断保留 partial 原因与续聊入口;执行和清理同时失败保留两者", async () => {
     const parent = parentLog();
     const ac = new AbortController();
     const childProvider: Provider = {
@@ -290,5 +291,50 @@ describe("createTaskTool", () => {
     await new Promise((r) => setImmediate(r));
     ac.abort();
     await expect(p).rejects.toThrow("做了一半");
+
+    // 自定义 runner 可拒绝任意值;失败原文与资源清理不能被二次异常覆盖。
+    for (const failure of ["runner rejected", null]) {
+      let child: ChildInfo | undefined;
+      let released = 0;
+      let fail = true;
+      let failCleanup = false;
+      const custom = createTaskTool({
+        parent: parentLog(),
+        provider: scripted([]),
+        tools: async () => ({
+          tools: [],
+          dispose: async () => {
+            released++;
+            if (failCleanup) throw "cleanup rejected";
+          },
+        }),
+        onChild: (info) => {
+          child = info;
+        },
+        runner: async (request) => {
+          request.onLog?.(request.log as EventLog);
+          if (fail) throw failure;
+          return { text: "continued", status: "completed" };
+        },
+      });
+      const ctx = { signal: new AbortController().signal };
+      await expect(custom.execute({ task: "fail" }, ctx)).rejects.toBe(failure);
+      expect(child?.state).toEqual({ status: "partial", reason: String(failure) });
+      expect(released).toBe(1);
+      fail = false;
+      expect(await custom.execute({ task: "continue", resume: "sub-1" }, ctx)).toContain(
+        "continued",
+      );
+      expect(child?.state.status).toBe("completed");
+      expect(released).toBe(2);
+      fail = true;
+      failCleanup = true;
+      const combined = custom.execute({ task: "fail again", resume: "sub-1" }, ctx);
+      await expect(combined).rejects.toThrow(
+        `Sub-agent failed and cleanup failed: ${String(failure)}; cleanup rejected`,
+      );
+      expect(child?.state.reason).toContain("cleanup rejected");
+      expect(released).toBe(3);
+    }
   });
 });

@@ -2,6 +2,7 @@
 // 原文永远留在数组里。/edit /drop /compare /restore /rewind /retry /edits /fork,以及上下文面板的动作菜单。
 import { now } from "../src/events.js";
 import { contextFields, type EditField, editState } from "../src/messages.js";
+import { errorMessage } from "../src/providers/errors.js";
 import { forkSession, SESSIONS_DIR } from "./bootstrap.js";
 import type { CompositionRow, ContextAction } from "./inspector-composition.js";
 import { sectionStates, systemWithSections } from "./prompt-sections.js";
@@ -90,7 +91,11 @@ export function dropCommand(ctx: TuiContext, arg: string): string {
   const target = Number(m[1]);
   const e = log.events[target];
   if (!e) return c.zhu(`no event #${target}`);
-  if (e.type !== "user/message" && e.type !== "assistant/message") {
+  if (
+    e.type !== "user/message" &&
+    e.type !== "assistant/message" &&
+    !(e.type === "user/shell" && !e.excludeFromContext)
+  ) {
     return c.zhu(
       `only user or assistant messages can be dropped (with their tool results); #${target} is ${e.type}`,
     );
@@ -169,7 +174,9 @@ export function rewindCommand(ctx: TuiContext, arg: string): string {
     .filter(
       ({ e, i }) =>
         i > target &&
-        (e.type === "user/message" || e.type === "assistant/message") &&
+        (e.type === "user/message" ||
+          e.type === "assistant/message" ||
+          (e.type === "user/shell" && !e.excludeFromContext)) &&
         !dropped.has(i),
     );
   if (victims.length === 0) return c.faint(`nothing after event #${target} to drop`);
@@ -199,7 +206,7 @@ export async function retryStep(ctx: TuiContext): Promise<void> {
     const outcome = await pending;
     if (typeof outcome === "object") ctx.note(c.soft(`· loop stopped: ${outcome.stopped}`));
   } catch (err) {
-    ctx.note(c.zhu(`✗ ${(err as Error).message}`));
+    ctx.note(c.zhu(`✗ ${errorMessage(err)}`));
   } finally {
     ctx.hideLoader();
     ctx.updateStatus();

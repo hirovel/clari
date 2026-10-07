@@ -83,6 +83,17 @@ describe("Palette 组件", () => {
     expect(plain(resized)).toContain("Esc close");
     many.handleInput("\r");
     expect(chosen).toBe(30);
+    // 完整文件名优先于较短字段的零散模糊命中,不能恢复错误会话。
+    const paths = new Palette(
+      [
+        { kind: "session", label: "a b", run: () => ran.push("scattered") },
+        { kind: "session", label: "Long prefix ab", run: () => ran.push("exact") },
+      ],
+      () => {},
+    );
+    paths.handleInput("ab");
+    paths.handleInput("\r");
+    expect(ran.at(-1)).toBe("exact");
   });
 });
 

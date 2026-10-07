@@ -1,5 +1,6 @@
 // TUI 入口只解析参数并启动会话控制器;资源与切换不再散落在全局闭包中。
 import { ProcessTerminal } from "@earendil-works/pi-tui";
+import { errorMessage } from "../src/providers/errors.js";
 import { bootstrap, DEFAULT_CONFIG_PATH, parseCommonArgs, USAGE } from "./bootstrap.js";
 import { startTuiSession } from "./tui-session.js";
 import { checkForUpdate, UPDATE_COMMAND } from "./update-check.js";
@@ -93,6 +94,6 @@ try {
     });
   }
 } catch (error) {
-  console.error((error as Error).message);
+  console.error(errorMessage(error));
   process.exit(2);
 }

@@ -4,9 +4,11 @@ import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BodyBrowser } from "../cli/body-browser.js";
-import { receivedBlocks } from "../cli/inspector-bodies.js";
-import { collectRequests } from "../cli/inspector-requests.js";
+import { resultLines } from "../cli/cards.js";
+import { inputBlocks, receivedBlocks } from "../cli/inspector-bodies.js";
+import { collectRequests, eventLines, toolLines, wireLines } from "../cli/inspector-requests.js";
 import { readRequestRecording } from "../cli/session-records.js";
+import { ReplyMarkdown } from "../cli/tui-render.js";
 import { clearToolResults, keepRecentTokens, llmSummarize } from "../src/compaction.js";
 import type { AgentEvent } from "../src/events.js";
 import { exchangeRecorder } from "../src/exchange.js";
@@ -240,6 +242,62 @@ describe("请求层记录", () => {
     const unknownBlock = unknown.find((block) => block.id === "model-unmatched");
     expect(unknownBlock?.title).toContain("outcome unknown");
     expect(unknownBlock?.lines()).toEqual(["Check external state"]);
+    // 文件预览来自请求参数,失败与未知不能冒充已修改;展开不改原文或模型输入。
+    const calls = [
+      {
+        id: "edit-ok",
+        name: "edit",
+        args: {
+          path,
+          oldText: Array.from({ length: 70 }, (_, i) => `old-${i}`).join("\n"),
+          newText: Array.from({ length: 70 }, (_, i) => `new-${i}`).join("\n"),
+          replaceAll: true,
+        },
+      },
+      { id: "write-failed", name: "write", args: { path, content: "" } },
+      { id: "edit-unknown", name: "edit", args: { path, oldText: "a", newText: "b" } },
+      { id: "edit-missing", name: "edit", args: { path, oldText: "x", newText: "y" } },
+    ];
+    const fileRecord = {
+      ...first,
+      response: { ...first.response, toolCalls: calls },
+      results: calls.slice(0, 3).map((call, i) => ({
+        type: "tool/result" as const,
+        at: "t",
+        callId: call.id,
+        name: call.name,
+        content: i === 1 ? "Permission denied" : "Recorded result",
+        isError: i === 1,
+        ...(i === 2 && { outcome: "unknown" as const }),
+      })),
+    };
+    const before = JSON.stringify(fileRecord);
+    const messagesBefore = JSON.stringify(deriveMessages(log.events));
+    const fileBlocks = receivedBlocks(fileRecord);
+    const previews = fileBlocks.filter((block) => block.id.startsWith("change-"));
+    expect(previews.map((block) => block.title)).toEqual([
+      "Requested replacement · success",
+      "Submitted file content · error",
+      "Requested replacement · outcome unknown",
+      "Requested replacement · result not recorded",
+    ]);
+    expect(previews[0]?.meta).toContain("all occurrences requested");
+    expect(previews[1]?.meta).toContain("Previous file content not recorded");
+    expect(previews[0]?.lines().map(stripAnsi).join("\n")).toContain("+ new-69");
+    expect(previews[1]?.lines().map(stripAnsi)).toEqual(["+ "]);
+    const fileBrowser = new BodyBrowser();
+    fileBrowser.set("files", fileBlocks);
+    fileBrowser.handleInput("\x1b[B");
+    fileBrowser.handleInput("\r");
+    expect(fileBrowser.render(60).lines.map(stripAnsi).join("\n")).toContain("+ new-69");
+    expect(
+      fileBlocks
+        .find((block) => block.id === "call-edit-ok")
+        ?.lines()
+        .join("\n"),
+    ).toBe(JSON.stringify(calls[0]?.args, null, 2));
+    expect(JSON.stringify(fileRecord)).toBe(before);
+    expect(JSON.stringify(deriveMessages(log.events))).toBe(messagesBefore);
   });
 
   it("未配置压缩时 request 不带阈值", async () => {
@@ -514,6 +572,11 @@ describe("wire 层与实际发送一致", () => {
   afterEach(() => vi.unstubAllGlobals());
 
   it("openaiCompat.wire() 与 fetch 收到的正文逐字节相同;onRaw 收到每一行", async () => {
+    // 显示确实会清理协议,但原文和三种协议实际发出的消息不能继承显示处理。
+    const controls = "中文\t\x1b[31mred\x1b[0m\r\nprogress\rnext\x1b[2J\u009b31m · literal \\u001b";
+    const userInput = `user: ${controls}`;
+    const assistantInput = `assistant: ${controls}`;
+    const toolInput = `tool: ${controls}`;
     let sentBody = "";
     vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
       sentBody = String(init.body);
@@ -533,11 +596,52 @@ describe("wire 层与实际发送一致", () => {
       model: "m",
       reasoningField: "reasoning_content",
     });
-    const messages = deriveMessages([
+    const events: AgentEvent[] = [
       { type: "session/start", at: "t", model: "m", system: "sys" },
-      { type: "user/message", at: "t", text: "hello", images: [testImage] },
-    ]);
-    const tools = [{ name: "echo", description: "d", parameters: { type: "object" } }];
+      { type: "user/message", at: "t", text: userInput, images: [testImage] },
+      {
+        type: "assistant/message",
+        at: "t",
+        text: assistantInput,
+        toolCalls: [{ id: "history-call", name: "echo", args: { text: userInput } }],
+        stopReason: "tool",
+      },
+      {
+        type: "tool/result",
+        at: "t",
+        name: "echo",
+        callId: "history-call",
+        content: toolInput,
+        isError: false,
+      },
+    ];
+    const messages = deriveMessages(events);
+    const originalMessages = JSON.stringify(messages);
+    const display = new ReplyMarkdown(assistantInput).render(80).join("\n");
+    expect(display).not.toContain("\x1b[2J");
+    resultLines(
+      { name: "echo", content: toolInput, isError: false },
+      { folded: false, head: 10, view: "all" },
+    );
+    const inspected = inputBlocks(messages)
+      .flatMap((block) => block.lines())
+      .join("\n");
+    expect(inspected).toContain("\\u009b31m");
+    expect(inspected).toContain("\\u000d");
+    expect(inspected).not.toContain("\u009b");
+    expect(JSON.stringify(messages)).toBe(originalMessages);
+    const tools = [{ name: "echo", description: controls, parameters: { type: "object" } }];
+    const body = JSON.stringify(p.wire?.(messages, tools));
+    for (const lines of [
+      wireLines(p, messages, tools),
+      wireLines(p, messages, tools, undefined, { bodies: [body], outputs: [] }),
+      toolLines(tools),
+      toolLines(tools, undefined, { bodies: [body], outputs: [] }),
+      eventLines(events, 2),
+    ]) {
+      expect(lines.join("\n")).toContain("\\u009b31m");
+      expect(lines.join("\n")).not.toContain("\u009b");
+    }
     const raw: string[] = [];
     const captured: string[] = [];
     const turn = await p.complete(messages, tools, {
@@ -547,6 +651,9 @@ describe("wire 层与实际发送一致", () => {
     expect(turn.text).toBe("hi");
     expect(JSON.parse(sentBody)).toEqual(p.wire?.(messages, tools));
     expect(sentBody).toBe(JSON.stringify(p.wire?.(messages, tools)));
+    expect(JSON.parse(sentBody).messages[1].content[0].text).toBe(userInput);
+    expect(JSON.parse(sentBody).messages[2].content).toBe(assistantInput);
+    expect(JSON.parse(sentBody).messages[3].content).toBe(toolInput);
     expect(raw).toHaveLength(3);
     expect(raw[2]).toBe("data: [DONE]");
     expect(captured).toEqual([sentBody]);
@@ -596,6 +703,10 @@ describe("wire 层与实际发送一致", () => {
         expect(saved?.input).toEqual({ messages, tools });
         expect(saved?.bodies).toEqual(sent);
         const wire = JSON.parse(sent[1] ?? "{}");
+        // 协议结构可以不同,每一条正文的字符必须保持原样,不能用 UI 文本替换。
+        for (const text of [userInput, assistantInput, toolInput])
+          expect(JSON.stringify(wire)).toContain(JSON.stringify(text));
+        expect(JSON.stringify(messages)).toBe(originalMessages);
         if (create === anthropic)
           expect(wire.messages[0].content).toContainEqual(
             expect.objectContaining({

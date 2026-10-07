@@ -2,6 +2,7 @@
 import { describe, expect, it } from "vitest";
 import { RequestInspector } from "../cli/inspector.js";
 import { compositionLines, compositionRows } from "../cli/inspector-composition.js";
+import { legalizeCut } from "../src/compaction.js";
 import type { AgentEvent } from "../src/events.js";
 import { EventLog } from "../src/log.js";
 import { runTurn } from "../src/loop.js";
@@ -47,6 +48,28 @@ describe("composeContext", () => {
     recordUnresolvedCalls(log);
     recordUnresolvedCalls(log);
     expect(log.events.filter((e) => e.type === "tool/unresolved")).toHaveLength(1);
+    const shell = new EventLog();
+    for (const excluded of [false, true])
+      shell.append({
+        type: "ext/event",
+        at: "",
+        source: "shell",
+        kind: "start",
+        payload: {
+          id: String(excluded),
+          command: `echo ${excluded}`,
+          cwd: "/project",
+          excludeFromContext: excluded,
+        },
+      });
+    recordUnresolvedCalls(shell, "exit");
+    expect(shell.events.filter((e) => e.type === "user/shell")).toHaveLength(0);
+    recordUnresolvedCalls(shell);
+    recordUnresolvedCalls(shell);
+    expect(shell.events.filter((e) => e.type === "user/shell")).toHaveLength(2);
+    expect(deriveMessages(shell.events)).toHaveLength(1);
+    expect(deriveMessages(shell.events)[0]?.content).toContain("execution outcome is unknown");
+    expect(legalizeCut(shell.events, 2)).toBe(2);
     expect(composeContext(log.events, 4)).toEqual(before);
     log.append({ type: "user/message", at: "", text: "Check the actual state and continue." });
     const recovered = composeContext(log.events);

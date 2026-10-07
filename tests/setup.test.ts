@@ -822,6 +822,23 @@ describe("setup data and persistence", () => {
       expect(host.app()).toBe(view);
       expect(view.draft()).toBe("keep this draft");
       expect(view.agent.running).toBe(false);
+      const rejectedExtension = join(dir, "rejected-extension.mjs");
+      writeFileSync(
+        rejectedExtension,
+        'export default () => { throw "initialization rejected"; };',
+      );
+      config.defaults = { ...config.defaults, extensions: [rejectedExtension] };
+      const rejectedSwitch = host.switchSession({ kind: "new", source: "defaults" });
+      try {
+        await vi.waitFor(() =>
+          expect(view.dialogLines().join("\n")).toContain("initialization rejected"),
+        );
+      } finally {
+        view.dialogInput("\x1b");
+        await rejectedSwitch;
+      }
+      expect(host.app()).toBe(view);
+      expect(view.draft()).toBe("keep this draft");
       config.defaults = { ...config.defaults, extensions: [], planReminder: 5 };
       const legacyFile = join(dir, "legacy.jsonl");
       const legacy = new EventLog(legacyFile);

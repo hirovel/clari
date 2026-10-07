@@ -12,6 +12,7 @@ import {
 import type { Provider } from "../src/provider.js";
 import { firstLine, fmtTok, indent, messageTokens, roleLabel } from "./inspector-format.js";
 import { c, G, selectedText } from "./theme.js";
+import { visibleSourceText } from "./tui-format.js";
 
 // ---------- 组装视图:模型下一步会看到的每条消息从哪来、经过了什么、落在线路的第几条 ----------
 
@@ -45,10 +46,11 @@ export function compositionRows(
 export function compositionRow(r: CompositionRow, selected: boolean): string {
   const m = r.message;
   const tok = messageTokens(m);
-  const brief =
+  const brief = visibleSourceText(
     m.role === "assistant" && !m.content && m.toolCalls.length > 0
       ? `» ${m.toolCalls.map((t) => t.name).join(" ")}`
-      : firstLine(m.content);
+      : firstLine(m.content),
+  );
   const wire = r.wire === undefined ? "  ?" : r.wire < 0 ? "top" : String(r.wire).padStart(3);
   const stages = r.stages.length > 0 ? r.stages.join(" ") : "";
   const body = `${String(r.i).padStart(3)}  ${`#${r.event}`.padEnd(5)} ${wire}  ${roleLabel(m).padEnd(14)} ${String(tok).padStart(6)}  ${stages.padEnd(22)} ${truncateToWidth(brief, 60, "…")}`;
@@ -71,16 +73,24 @@ export function compositionLines(events: readonly AgentEvent[], r: CompositionRo
   ];
   if (m.role === "assistant" && m.reasoning) {
     lines.push(c.bold(c.soft(`reasoning (${m.reasoningKind ?? "?"})`)));
-    lines.push(...indent(m.reasoning).map((l) => c.faint(c.italic(l))));
+    lines.push(...indent(visibleSourceText(m.reasoning)).map((l) => c.faint(c.italic(l))));
     lines.push("");
   }
   lines.push(c.bold(c.soft("content")));
-  lines.push(...(m.content ? indent(m.content).map((l) => c.ink(l)) : [c.faint("    (empty)")]));
+  lines.push(
+    ...(m.content
+      ? indent(visibleSourceText(m.content)).map((l) => c.ink(l))
+      : [c.faint("    (empty)")]),
+  );
   if (m.role === "assistant" && m.toolCalls.length > 0) {
     lines.push("");
     lines.push(c.bold(c.soft(`tool calls ${m.toolCalls.length}`)));
     for (const tc of m.toolCalls)
-      lines.push(c.soft(`    » ${tc.name} ${JSON.stringify(tc.args)}  ${c.faint(tc.id)}`));
+      lines.push(
+        c.soft(
+          `    » ${visibleSourceText(tc.name)} ${visibleSourceText(JSON.stringify(tc.args))}  ${c.faint(visibleSourceText(tc.id))}`,
+        ),
+      );
   }
   if (m.role === "assistant" && m.opaque !== undefined) {
     lines.push("");
@@ -147,7 +157,11 @@ export function actionsFor(
       hint: "recorded as another edit; nothing is deleted",
     });
   }
-  if (src?.type === "user/message" || src?.type === "assistant/message")
+  if (
+    src?.type === "user/message" ||
+    src?.type === "assistant/message" ||
+    (src?.type === "user/shell" && !src.excludeFromContext)
+  )
     out.push({
       action: "drop",
       label: "Exclude from input",
@@ -159,7 +173,9 @@ export function actionsFor(
       (e, i) =>
         i > r.event &&
         !state.dropped.has(i) &&
-        (e.type === "user/message" || e.type === "assistant/message"),
+        (e.type === "user/message" ||
+          e.type === "assistant/message" ||
+          (e.type === "user/shell" && !e.excludeFromContext)),
     )
   )
     out.push({

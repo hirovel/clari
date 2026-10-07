@@ -377,7 +377,7 @@ describe("面板动作菜单", () => {
     // 失败和纯图片不修改文本;更换面板后晚到结果不能进入新面板或草稿。
     await app.command("/edit 1 content");
     clipboard = async () => {
-      throw new Error("fixture unavailable");
+      throw "fixture unavailable";
     };
     terminal.feed("\x1bv");
     await tick();

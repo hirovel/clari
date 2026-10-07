@@ -61,11 +61,22 @@ export function legalizeCut(events: readonly AgentEvent[], cut: number): number 
       break;
     }
   }
-  if (!first || first.type === "user/message" || first.type === "assistant/message") return c;
+  if (
+    !first ||
+    first.type === "user/message" ||
+    first.type === "user/shell" ||
+    first.type === "assistant/message"
+  )
+    return c;
   while (c > 1) {
     c--;
     const e = events[c];
-    if (e?.type === "user/message" || e?.type === "assistant/message") break;
+    if (
+      e?.type === "user/message" ||
+      e?.type === "assistant/message" ||
+      (e?.type === "user/shell" && !e.excludeFromContext)
+    )
+      break;
   }
   return c;
 }
@@ -214,7 +225,9 @@ export function llmSummarize(
       input.preservation ?? keepRecentTokens(Math.min(20000, Math.floor(input.window / 4)));
     const cut = legalizeCut(events, preservation(events));
 
-    const firstUser = events.findIndex((e) => e.type === "user/message");
+    const firstUser = events.findIndex(
+      (e) => e.type === "user/message" || (e.type === "user/shell" && !e.excludeFromContext),
+    );
     const from = exemptFirstUserMessage && firstUser >= 0 ? firstUser + 1 : 1;
     if (cut <= from + 1) return null; // 可覆盖区太小
     if (cut <= state.coversUpTo) return null; // 相比上次压缩无进展

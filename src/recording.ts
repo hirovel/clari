@@ -324,9 +324,11 @@ export class Recording {
       const keys =
         event.source === "recording"
           ? ["input", "sent", "received", "output"]
-          : event.source === "mcp" && event.kind === "rpc"
-            ? ["bodyRef"]
-            : [];
+          : event.source === "shell" && event.kind === "start"
+            ? ["output"]
+            : event.source === "mcp" && event.kind === "rpc"
+              ? ["bodyRef"]
+              : [];
       for (const key of keys) {
         const ref = event.payload[key] as ContentRef | undefined;
         if (ref) refs.set(ref.file, ref);

@@ -83,6 +83,7 @@ import {
   toggleReasoning,
 } from "./tui-render.js";
 import { captureSessionSetup } from "./tui-settings.js";
+import { shellDraft, shellInput, toggleShellScope } from "./tui-shell.js";
 import { approveImpl, initialApproval, initialSlotState } from "./tui-slots.js";
 import { InputHints, RuntimeStatus } from "./tui-status.js";
 import { clearStepSelection, FOLD_STEPS, selectStep, toggleSelectedStep } from "./tui-steps.js";
@@ -274,7 +275,9 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     new CombinedAutocompleteProvider(
       [
         ...COMMANDS,
-        ...templates.map((t) => ({ name: t.name, description: `template: ${t.description}` })),
+        ...templates
+          .filter((t) => !COMMANDS.some((command) => command.name === t.name))
+          .map((t) => ({ name: t.name, description: `template: ${t.description}` })),
       ],
       process.cwd(),
     ),
@@ -329,8 +332,12 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     ...(deps.facts && { facts: deps.facts }),
     ...(deps.planReminder !== undefined && { planReminder: deps.planReminder }),
     slots: { ...deps.slots },
-    onDelta: (d) => streamDelta(ctx, d),
-    onReasoning: (d) => streamReasoning(ctx, d),
+    onDelta: (d) => {
+      if (!stopped) streamDelta(ctx, d);
+    },
+    onReasoning: (d) => {
+      if (!stopped) streamReasoning(ctx, d);
+    },
   });
 
   // ---------- 检视器 ----------
@@ -426,6 +433,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       pulse: [],
       sealFrame: 0,
       showReasoning: false,
+      shellAsText: false,
       childMode: "tail",
       firstRun: undefined,
       streaming: undefined,
@@ -574,6 +582,8 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     persistSetup: () => deps.onSetupChange?.(captureSessionSetup(ctx)),
     stop() {
       stopped = true;
+      if (ctx.view.streamTimer) clearTimeout(ctx.view.streamTimer);
+      ctx.view.streamTimer = undefined;
       closeQuitPrompt();
       deps.inputs?.flush();
       deps.inputs?.detach();
@@ -604,6 +614,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
   let wasRunning = false;
   /** 通知和标题跟随执行状态;固定状态区自己按实际宽度投影。 */
   function updateStatus(): void {
+    if (stopped) return;
     // 运行中的审批可能新开覆盖层;确认仍应位于顶层,防止看到审批却操作了退出。
     if (quitPrompt && !quitPrompt.overlay.isFocused()) quitPrompt.overlay.focus();
     ctx.persistSetup();
@@ -657,7 +668,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       system: deps.systemPrompt ?? "",
     });
   }
-  if (!log.events.some((e) => e.type === "user/message")) {
+  if (!log.events.some((e) => e.type === "user/message" || e.type === "user/shell")) {
     // 首屏一行占位;没 key 时连这一行也不要,屏幕上只有头部与登录对话框。
     if (deps.info.providerName !== "none") {
       ctx.view.firstRun = new Text(firstRunLines().join("\n"), 1, 0);
@@ -679,7 +690,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
     if (!text && !ctx.draftImages.length) return;
     editor.addToHistory(text);
     if (text.startsWith("/")) {
-      editor.setText("");
+      if (!/^\/shell(?:\s|$)/.test(text)) editor.setText("");
       void command(ctx, text);
     } else void submit(ctx, text);
   };
@@ -691,7 +702,10 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       ),
     ),
   );
-  editor.onChange = () => deps.inputs?.setDraft(editor.getExpandedText(), ctx.draftImages);
+  editor.onChange = () => {
+    if (!editor.getExpandedText()) ctx.view.shellAsText = false;
+    deps.inputs?.setDraft(editor.getExpandedText(), ctx.draftImages);
+  };
 
   function closeQuitPrompt(): void {
     quitPrompt?.overlay.hide();
@@ -877,6 +891,30 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       return { consume: true };
     }
     if (ctx.inspector.overlay || approval.overlay || ctx.dialog.overlay) return undefined; // 检视器、审批提示或对话框打开时,其余按键归它们
+    // 明确作为聊天的前缀文字不经过编辑器的提交前清空,否则 onChange 会重置选择。
+    if (
+      matchesKey(data, Key.enter) &&
+      !editor.isShowingAutocomplete() &&
+      ctx.view.shellAsText &&
+      shellInput(editor.getExpandedText())
+    ) {
+      editor.onSubmit?.(editor.getExpandedText());
+      return { consume: true };
+    }
+    if (matchesKey(data, "shift+tab") && shellDraft(ctx)) {
+      toggleShellScope(ctx);
+      return { consume: true };
+    }
+    if (
+      matchesKey(data, Key.escape) &&
+      !agent.running &&
+      !editor.isShowingAutocomplete() &&
+      shellDraft(ctx)
+    ) {
+      ctx.view.shellAsText = true;
+      tui.requestRender();
+      return { consume: true };
+    }
     if (matchesKey(data, Key.alt("enter"))) {
       if (ctx.inputReading) {
         ctx.note(c.soft("Preparing paste; send after it appears."));
@@ -887,7 +925,7 @@ export function createTuiApp(deps: TuiAppDeps): TuiApp {
       if (!text && !ctx.draftImages.length) return { consume: true };
       editor.addToHistory(text);
       if (text.startsWith("/")) {
-        editor.setText("");
+        if (!/^\/shell(?:\s|$)/.test(text)) editor.setText("");
         void command(ctx, text);
       } else void submit(ctx, text, { deliverAs: "followUp" });
       return { consume: true };

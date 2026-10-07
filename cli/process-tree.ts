@@ -1,11 +1,13 @@
 import { type ChildProcess, spawnSync } from "node:child_process";
+import { join } from "node:path";
 
-/** 停止进程及后代;失败必须向调用方暴露,不能假称已清理。 */
+/** 请求停止进程树;成功返回不代表已验证全部后代退出。失败必须向调用方暴露。 */
 export function stopProcessTree(child: ChildProcess, group = false): void {
   const pid = child.pid;
   if (pid === undefined) throw new Error("process has no PID; its children may still be running");
   if (process.platform === "win32") {
-    const result = spawnSync("taskkill", ["/F", "/T", "/PID", String(pid)], {
+    const taskkill = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe");
+    const result = spawnSync(taskkill, ["/F", "/T", "/PID", String(pid)], {
       encoding: "utf8",
       windowsHide: true,
       timeout: 5000,

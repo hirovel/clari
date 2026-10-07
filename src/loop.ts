@@ -13,7 +13,7 @@ import type { EventLog } from "./log.js";
 import { deriveMessages, type Message } from "./messages.js";
 import { DEFAULT_PLAN_REMINDER, planOpen, planState, planText, stepsSincePlan } from "./plan.js";
 import type { AssistantTurn, EffortLevel, Provider, ToolDef } from "./provider.js";
-import { isContextOverflow } from "./providers/errors.js";
+import { errorMessage, isContextOverflow } from "./providers/errors.js";
 import { RECORDING_FULL } from "./recording.js";
 import { type Tool, ToolOutcomeUnknownError, validateArgs } from "./tools.js";
 
@@ -506,8 +506,9 @@ async function runOne(
     }
     return finish({ content, isError: false, durationMs: Date.now() - startedAt });
   } catch (err) {
+    const content = errorMessage(err);
     if (output && !output.written) {
-      output.write((err as Error).message);
+      output.write(content);
       recordEvent(log, "tool/output-source", {
         callId: p.call.id,
         source: "error text",
@@ -516,7 +517,7 @@ async function runOne(
     }
     //:执行失败也是结果。打断导致的失败同样如实记录。
     return finish({
-      content: (err as Error).message,
+      content,
       isError: true,
       durationMs: Date.now() - startedAt,
       ...((err instanceof ToolOutcomeUnknownError || signal.reason === RECORDING_FULL) && {

@@ -40,6 +40,21 @@ export type AgentEvent =
       sections?: { name: string; source?: string; chars: number }[];
     }
   | { type: "user/message"; at: string; text: string; inputId?: string; images?: ImageInput[] }
+  /** 用户直接执行的命令;不冒充模型工具调用。content 保留命令结果,投影时与命令一起组成用户消息。 */
+  | {
+      type: "user/shell";
+      at: string;
+      id: string;
+      command: string;
+      cwd: string;
+      content: string;
+      excludeFromContext: boolean;
+      isError: boolean;
+      status: string;
+      /** 本地停止失败或恢复缺少结果证据,不能声称进程已停止。 */
+      outcome?: "unknown";
+      durationMs?: number;
+    }
   | {
       type: "assistant/message";
       at: string;

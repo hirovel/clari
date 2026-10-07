@@ -172,13 +172,13 @@ export function hintFor(
     case "not_found":
       return `Model ${ctx.model ?? ""} was not found. Open /model to choose an available model or query ${p}.`;
     case "rate_limit":
-      return "Rate limited. Retries with backoff already ran; wait a moment and send again, or switch model.";
+      return "Rate limited. Wait a moment and send again, or switch model.";
     case "overflow":
       return "Context is too long. Open Ctrl+E to inspect or exclude messages; /compact can try another summary, or choose a larger model.";
     case "bad_request":
       return "The provider rejected the request body. Open Ctrl+R → wire JSON for this request and compare with the provider's docs; extraBody and effort are the usual suspects.";
     case "server":
-      return "Provider-side failure. Retries already ran; try again in a minute or switch model.";
+      return "Provider-side failure. Try again later or switch model.";
     case "network":
       return "Network failure reaching the provider. Check connectivity, proxy, and baseUrl in the config.";
     case "stream":

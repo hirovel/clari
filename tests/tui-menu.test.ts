@@ -1,6 +1,9 @@
 // 命令的选单:次级选项不打字,选。每个命令无参数时弹选单,选中即落地;Esc 回去;
 // 打字形态仍然认;帮助只列十四个命令;未知命令给去处。/tools 的开关真的改随请求发出的工具集。
 
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
@@ -59,7 +62,7 @@ function boot(over: Partial<TuiAppDeps> = {}, seen: ToolDef[][] = []) {
 }
 
 describe("命令选单", () => {
-  it("帮助只列十四个命令,按组;未知命令说去哪找", async () => {
+  it("帮助列出内置命令,按组;未知命令说去哪找", async () => {
     const { app, doc } = boot();
     expect(COMMANDS.map((c) => c.name)).toEqual([
       "help",
@@ -74,6 +77,7 @@ describe("命令选单", () => {
       "memory",
       "compact",
       "copy",
+      "shell",
       "stop",
       "quit",
     ]);
@@ -242,7 +246,7 @@ describe("命令选单", () => {
     app.stop();
   });
 
-  it("/session 选单:new 走入口的换会话;没有入口时说明;fork 复制前缀", async () => {
+  it("/session 选单:new 与历史来源正确;搜索能恢复第15项以外的会话,取消保留草稿", async () => {
     const targets: SessionTarget[] = [];
     const { app, menu } = boot({ switchSession: (t) => targets.push(t) });
     await app.command("/session");
@@ -261,6 +265,63 @@ describe("命令选单", () => {
     expect(bare.doc()).toContain("switching sessions is not available here");
     bare.app.stop();
     app.stop();
+    const dir = mkdtempSync(join(tmpdir(), "clari-session-search-"));
+    const narrow = new VirtualTerminal(60, 18);
+    const restored: SessionTarget[] = [];
+    const older = join(dir, "00-old session.jsonl");
+    for (let i = 0; i < 24; i++) {
+      const file = i === 0 ? older : join(dir, `${String(i).padStart(2, "0")}.jsonl`);
+      writeFileSync(
+        file,
+        `${[
+          { type: "session/start", at: "2026-10-01T10:00:00Z", model: "p/m", system: "sys" },
+          {
+            type: "user/message",
+            at: "t",
+            text: i < 2 ? "修复 checkout 404 🙂" : `Recent work ${i}`,
+          },
+        ]
+          .map((event) => JSON.stringify(event))
+          .join("\n")}\n`,
+      );
+    }
+    const next = boot({
+      terminal: narrow,
+      sessionsDir: dir,
+      switchSession: (target) => restored.push(target),
+    });
+    try {
+      next.app.setDraft("Keep my draft");
+      await next.app.command("/session resume");
+      narrow.feed("\x1b[200~checkout 404\x1b[201~");
+      const found = next.app.dialogLines();
+      expect(found.map(stripAnsi).join("\n")).toContain("修复 checkout 404 🙂");
+      expect(found.length).toBeLessThanOrEqual(18);
+      expect(found.every((line) => visibleWidth(line) <= 60)).toBe(true);
+      expect(restored).toEqual([]);
+      // 摘要相同也必须按路径选对文件,数字是搜索文字而非快捷操作。
+      for (const _char of "checkout 404") narrow.feed("\x7f");
+      narrow.feed("00-old session");
+      expect(next.menu()).toContain("› 00-old session");
+      narrow.feed("\r");
+      await tick();
+      expect(next.menu()).toContain("Session setup");
+      narrow.feed("\r");
+      await tick();
+      expect(restored).toEqual([{ kind: "resume", file: older, source: "history" }]);
+      expect(next.app.draft()).toBe("Keep my draft");
+      await next.app.command("/session resume");
+      narrow.feed("absent query");
+      expect(next.menu()).toContain("no match");
+      narrow.feed("\x7f");
+      narrow.feed("\x1b");
+      expect(next.app.dialogLines()).toEqual([]);
+      expect(restored).toHaveLength(1);
+      expect(next.app.draft()).toBe("Keep my draft");
+    } finally {
+      next.app.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("/edit 选单:retry 与 list;/copy 无代码块时直接复制;/memory 关着时选单不弹", async () => {

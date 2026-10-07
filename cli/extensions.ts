@@ -3,6 +3,7 @@ import { pathToFileURL } from "node:url";
 import type { AgentEvent } from "../src/events.js";
 import type { EventLog } from "../src/log.js";
 import type { TurnDeps } from "../src/loop.js";
+import { errorMessage } from "../src/providers/errors.js";
 import type { Tool } from "../src/tools.js";
 
 /** 扩展模块的返回形态:要加的工具、要换的槽实现、要订阅事件的回调。都可选。 */
@@ -61,7 +62,7 @@ export async function loadExtensions(
     } catch (cleanupError) {
       throw new AggregateError(
         [error, cleanupError],
-        `Extension initialization failed: ${(error as Error).message}`,
+        `Extension initialization failed: ${errorMessage(error)}`,
       );
     }
     throw error;

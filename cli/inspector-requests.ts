@@ -26,6 +26,7 @@ import {
 } from "./inspector-format.js";
 import type { RequestRecording } from "./session-records.js";
 import { c, G, selectedText } from "./theme.js";
+import { visibleSourceText } from "./tui-format.js";
 
 type RequestEvent = Extract<AgentEvent, { type: "request" }>;
 type AssistantEvent = Extract<AgentEvent, { type: "assistant/message" }>;
@@ -425,11 +426,12 @@ export function messageBodyLines(
   sections?: PromptSectionMeta[],
 ): string[] {
   const lines: string[] = [];
+  const content = visibleSourceText(m.content);
   if (m.role === "user" && m.images?.length)
     lines.push(
       ...m.images.map((image, i) =>
         c.soft(
-          `Image ${i + 1}: ${image.name ?? image.mimeType} · ${Math.floor((image.data.length * 3) / 4)} bytes · full data in HTTP JSON`,
+          `Image ${i + 1}: ${visibleSourceText(image.name ?? image.mimeType)} · ${Math.floor((image.data.length * 3) / 4)} bytes · full data in HTTP JSON`,
         ),
       ),
     );
@@ -440,12 +442,13 @@ export function messageBodyLines(
     for (const s of sections) {
       lines.push(
         c.faint(
-          `    ├ ${s.name}  ${Math.ceil(s.chars / 4)} tok · ${pctOf(s.chars, chars)}${s.source ? `  ${s.source}` : ""}`,
+          `    ├ ${visibleSourceText(s.name)}  ${Math.ceil(s.chars / 4)} tok · ${pctOf(s.chars, chars)}${s.source ? `  ${visibleSourceText(s.source)}` : ""}`,
         ),
       );
     }
   }
   if (m.role === "assistant" && m.reasoning) {
+    const reasoning = visibleSourceText(m.reasoning);
     lines.push(
       c.soft(
         m.reasoningKind === "summary"
@@ -455,28 +458,28 @@ export function messageBodyLines(
     );
     lines.push(
       ...(folded
-        ? [c.faint(`    thinking ${firstLine(m.reasoning)}`)]
-        : indent(m.reasoning).map((l) => c.faint(c.italic(l)))),
+        ? [c.faint(`    thinking ${firstLine(reasoning)}`)]
+        : indent(reasoning).map((l) => c.faint(c.italic(l)))),
     );
   }
   if (m.role === "assistant" && m.opaque !== undefined) {
     const value = JSON.stringify(m.opaque, null, 2);
     lines.push(c.soft(`    Provider data · ${value.length} chars`));
-    if (!folded) lines.push(...indent(value).map((l) => c.faint(l)));
+    if (!folded) lines.push(...indent(visibleSourceText(value)).map((l) => c.faint(l)));
   }
   if (m.content) {
     lines.push(
       ...(folded
-        ? [c.ink(`    ${truncateToWidth(firstLine(m.content), 120, "…")}`)]
-        : indent(m.content).map((l) => c.ink(l))),
+        ? [c.ink(`    ${truncateToWidth(firstLine(content), 120, "…")}`)]
+        : indent(content).map((l) => c.ink(l))),
     );
   }
   if (m.role === "assistant") {
     for (const tc of m.toolCalls) {
-      const args = JSON.stringify(tc.args);
+      const args = visibleSourceText(JSON.stringify(tc.args));
       lines.push(
         c.soft(
-          `    » ${tc.name} ${folded ? truncateToWidth(args, 100, "…") : args}  ${c.faint(tc.id)}`,
+          `    » ${visibleSourceText(tc.name)} ${folded ? truncateToWidth(args, 100, "…") : args}  ${c.faint(visibleSourceText(tc.id))}`,
         ),
       );
     }
@@ -495,7 +498,7 @@ export function toolLines(
         const payload = JSON.parse(body) as { tools?: unknown };
         return [
           c.bold(c.ink(`Captured tools · HTTP attempt ${i + 1}`)),
-          ...JSON.stringify(payload.tools ?? null, null, 2)
+          ...visibleSourceText(JSON.stringify(payload.tools ?? null, null, 2))
             .split("\n")
             .map((l) => c.ink(l)),
           c.faint("Provider format; complete body in 5 wire JSON."),
@@ -508,20 +511,28 @@ export function toolLines(
   if (names.length === 0) return [c.faint("No tool names recorded for this request.")];
   const missing = names.filter((name) => !defs.some((d) => d.name === name));
   const lines: string[] = [
-    c.soft(`Recorded tool names: ${names.join(", ")}`),
+    c.soft(`Recorded tool names: ${visibleSourceText(names.join(", "))}`),
     recording?.input
       ? c.soft("Definitions saved with this request's adapter input.")
       : c.jin("Historical definitions were not captured. Current definitions below may differ."),
-    ...(missing.length ? [c.zhu(`Unavailable definitions: ${missing.join(", ")}`)] : []),
+    ...(missing.length
+      ? [c.zhu(`Unavailable definitions: ${visibleSourceText(missing.join(", "))}`)]
+      : []),
     c.faint(
       `${defs.length} current tool definitions, estimated ${defs.reduce((n, d) => n + estimateTokens(JSON.stringify(d)), 0)} tok.`,
     ),
     "",
   ];
   for (const d of defs) {
-    lines.push(`${c.ink(d.name)}  ${c.soft(`${estimateTokens(JSON.stringify(d))} tok`)}`);
-    lines.push(...indent(d.description || "(no description)").map((l) => c.ink(l)));
-    lines.push(...indent(JSON.stringify(d.parameters, null, 2)).map((l) => c.faint(l)));
+    lines.push(
+      `${c.ink(visibleSourceText(d.name))}  ${c.soft(`${estimateTokens(JSON.stringify(d))} tok`)}`,
+    );
+    lines.push(
+      ...indent(visibleSourceText(d.description || "(no description)")).map((l) => c.ink(l)),
+    );
+    lines.push(
+      ...indent(visibleSourceText(JSON.stringify(d.parameters, null, 2))).map((l) => c.faint(l)),
+    );
     lines.push("");
   }
   return lines;
@@ -550,7 +561,9 @@ export function wireLines(
         return [
           "",
           c.bold(c.ink(`HTTP attempt ${i + 1} · ${body.length} chars · formatted for viewing`)),
-          ...json.split("\n").map((l) => c.ink(l)),
+          ...visibleSourceText(json)
+            .split("\n")
+            .map((l) => c.ink(l)),
         ];
       }),
     ];
@@ -578,7 +591,9 @@ export function wireLines(
       "Uses available provider settings and current tool definitions; historical values may differ.",
     ),
     "",
-    ...json.split("\n").map((l) => c.ink(l)),
+    ...visibleSourceText(json)
+      .split("\n")
+      .map((l) => c.ink(l)),
   ];
 }
 
@@ -606,7 +621,7 @@ function visibility(e: AgentEvent): string {
 }
 
 function jsonLines(e: AgentEvent, pad: string): string[] {
-  return JSON.stringify(e, null, 2)
+  return visibleSourceText(JSON.stringify(e, null, 2))
     .split("\n")
     .map((l) => pad + l);
 }

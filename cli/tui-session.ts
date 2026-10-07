@@ -5,6 +5,7 @@ import type { Preset } from "../src/config.js";
 import { now } from "../src/events.js";
 import type { EventLog } from "../src/log.js";
 import { deriveMessages } from "../src/messages.js";
+import { errorMessage } from "../src/providers/errors.js";
 import { recordUnresolvedCalls } from "../src/recovery.js";
 import { applyPreset, type CommonArgs, parseCommonArgs, settingsFromArgs } from "./args.js";
 import {
@@ -185,7 +186,7 @@ export async function startTuiSession(options: {
       sessionsDir: dir,
       switchSession: (target) => {
         void switchSession(target).catch((error) =>
-          current.view.note(`Session switch failed: ${(error as Error).message}`),
+          current.view.note(`Session switch failed: ${errorMessage(error)}`),
         );
       },
       onExit: () => {
@@ -195,7 +196,7 @@ export async function startTuiSession(options: {
           .then(exit)
           .catch((error) => {
             exitRequested = false;
-            current.view.note(`Could not close: ${(error as Error).message}`);
+            current.view.note(`Could not close: ${errorMessage(error)}`);
           });
       },
     });
@@ -409,7 +410,7 @@ export async function startTuiSession(options: {
           await old.runtime
             ?.dispose()
             .catch((error) =>
-              current.view.note(`Previous session cleanup failed: ${(error as Error).message}`),
+              current.view.note(`Previous session cleanup failed: ${errorMessage(error)}`),
             );
           for (const log of [old.session.log, ...old.view.children().map((child) => child.log)]) {
             releaseSessionLog(log);
@@ -421,7 +422,7 @@ export async function startTuiSession(options: {
           let picked: string | undefined;
           do {
             picked = await old.view.choose("Session preparation failed", [
-              { label: "View error", note: (error as Error).message },
+              { label: "View error", note: errorMessage(error) },
               { label: "Retry", note: "try the selected setup again" },
               { label: "Adjust setup", note: "repair or replace unavailable components" },
               ...(session
@@ -431,7 +432,7 @@ export async function startTuiSession(options: {
             ]);
             if (!picked || picked === "Cancel") return;
             if (picked === "View error")
-              await old.view.showText("Preparation error", (error as Error).message);
+              await old.view.showText("Preparation error", errorMessage(error));
             if (picked === "View history" && session)
               await old.view.showText(
                 "Session history · read only",
@@ -498,7 +499,7 @@ export async function startTuiSession(options: {
               );
           }
         } catch (error) {
-          state.error = (error as Error).message;
+          state.error = errorMessage(error);
           view.setExitState(state);
           return;
         }
@@ -574,7 +575,7 @@ export async function startTuiSession(options: {
         view.stop();
         for (const log of logs()) log.recording?.dispose();
       } catch (error) {
-        state.error = (error as Error).message;
+        state.error = errorMessage(error);
         view.setExitState(state);
         await forceDone;
       }
@@ -597,7 +598,7 @@ export async function startTuiSession(options: {
   if (session.resumed) {
     current = { session, args: options.args, view: makeView(session, options.args) };
     void switchSession({ kind: "resume", file: session.sessionFile }).catch((error) =>
-      current.view.note((error as Error).message),
+      current.view.note(errorMessage(error)),
     );
   } else {
     const failStartup = async (error: unknown, runtime?: Runtime): Promise<never> => {

@@ -272,7 +272,7 @@ describe("bash 工具的其它边界", () => {
     expect(await tool.execute({ command: "echo unlimited", timeout: 0 }, ctx())).toBe("unlimited");
   }, 20000);
 
-  it("打断:signal 中止 → 杀进程,错误里带已产出的输出", async () => {
+  it("打断:请求停止不依赖 PATH,及时结束本地等待并保留已产出的输出", async () => {
     const tool = createBashTool();
     const already = new AbortController();
     already.abort();
@@ -282,10 +282,22 @@ describe("bash 工具的其它边界", () => {
     const ac = new AbortController();
     const started = Date.now();
     const pending = tool.execute({ command: "echo started; sleep 5; echo late" }, ctx(ac.signal));
-    setTimeout(() => ac.abort(), 300);
-    await expect(pending).rejects.toThrow(
-      /(command interrupted|could not stop process tree)[\s\S]*started/,
+    setTimeout(() => {
+      const originalPath = process.env.PATH;
+      try {
+        if (process.platform === "win32") process.env.PATH = "";
+        ac.abort();
+      } finally {
+        if (originalPath === undefined) delete process.env.PATH;
+        else process.env.PATH = originalPath;
+      }
+    }, 300);
+    const failure = await pending.then(
+      () => undefined,
+      (error: Error) => error,
     );
+    expect(failure?.message).toMatch(/command interrupted[\s\S]*started/);
+    expect(failure?.message).not.toContain("could not stop process tree");
     expect(Date.now() - started).toBeLessThan(3000);
   }, 20000);
 });

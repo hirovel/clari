@@ -38,6 +38,17 @@ export function unresolvedCalls(
   return [...pending.values()];
 }
 
+/** 用户命令的未完成记录,从原有开始/结果配对派生。 */
+export function pendingUserShells(events: readonly AgentEvent[]) {
+  const shells = new Map<string, Extract<AgentEvent, { type: "ext/event" }>>();
+  for (const event of events) {
+    if (event.type === "ext/event" && event.source === "shell" && event.kind === "start")
+      shells.set(String(event.payload.id), event);
+    else if (event.type === "user/shell") shells.delete(event.id);
+  }
+  return shells;
+}
+
 /** 显式恢复或强制退出时记录事实,不触发模型或工具;已有说明不重复追加。 */
 export function recordUnresolvedCalls(log: EventLog, reason: "restore" | "exit" = "restore"): void {
   for (const { event, call, recovery, result } of unresolvedCalls(log.events)) {
@@ -49,6 +60,26 @@ export function recordUnresolvedCalls(log: EventLog, reason: "restore" | "exit" 
       callId: call.id,
       name: call.name,
       content: `No result was recorded for this tool call ${reason === "exit" ? "when force exit was requested" : "before the session was restored"}. Its execution outcome is unknown; it may have produced side effects. No automatic retry was performed. Check the actual state before deciding whether to retry or continue, using the existing tool permissions.`,
+    });
+  }
+  // 强制退出保留开始记录,恢复时才补未知结果;退出保存期间晚到的真实结果不会重复投影。
+  if (reason === "exit") return;
+  // 用户命令同样不能因恢复而重跑;开始记录与最终结果在同一数组内配对。
+  for (const [id, event] of pendingUserShells(log.events)) {
+    const output = event.payload.output as { file?: string } | undefined;
+    const path =
+      output?.file && log.recording ? `${log.recording.directory}/${output.file}` : undefined;
+    log.append({
+      type: "user/shell",
+      at: now(),
+      id,
+      command: String(event.payload.command),
+      cwd: String(event.payload.cwd),
+      excludeFromContext: event.payload.excludeFromContext === true,
+      content: `No result was recorded for this user command before the session was restored. Its execution outcome is unknown; it may have produced side effects or may still be running. No automatic retry was performed.${path ? `\nCaptured partial output: ${path}` : ""}`,
+      isError: true,
+      status: "Result unknown",
+      outcome: "unknown",
     });
   }
 }

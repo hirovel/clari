@@ -225,6 +225,33 @@ describe("/slots 与切换命令", () => {
       });
       expect(restoredApp.setup().values.compaction).toBe("clear");
       expect(restoredApp.setup().values.preservation).toBe("tokens 3000");
+      const broken = join(dir, "broken.mjs");
+      writeFileSync(
+        broken,
+        'let calls = 0; export default async () => { if (++calls === 1) throw null; throw "second compaction rejected"; };',
+      );
+      await app.command(`/set compaction ${broken}`);
+      const beforeFailure = log.events.length;
+      await app.command("/compact");
+      expect(text()).toContain("✗ null");
+      expect(log.events.slice(beforeFailure).some((event) => event.type === "compaction")).toBe(
+        false,
+      );
+      expect(app.agent.running).toBe(false);
+      // 上一轮请求的错误不能被误认成本次压缩已经展示过的错误。
+      app.agent.setProvider({
+        model: "m",
+        async complete() {
+          throw new Error("old request failed");
+        },
+      });
+      await app.submit("produce a failed request");
+      expect(log.events.at(-1)?.type).toBe("request/error");
+      await app.command("/compact");
+      expect(text()).toContain("second compaction rejected");
+      expect(app.agent.running).toBe(false);
+      await app.command("/set compaction clear");
+      expect(app.setup().values.compaction).toBe("clear");
     } finally {
       restoredApp?.stop();
       app.stop();

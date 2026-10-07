@@ -11,6 +11,7 @@ import type { Message } from "../src/messages.js";
 import { fmtMs, fmtTok } from "./inspector-format.js";
 import { fmtWindow } from "./registry.js";
 import { c, G } from "./theme.js";
+import { plainDisplayText } from "./tui-format.js";
 
 type RequestEvent = Extract<AgentEvent, { type: "request" }>;
 type Usage = NonNullable<Extract<AgentEvent, { type: "assistant/message" }>["usage"]>;
@@ -107,7 +108,7 @@ export function messageMarks(
 
 /** 用户消息:› 起头,正文加粗;续行缩到 › 之后。 */
 export function userLine(text: string): string {
-  return `${c.zhu(G.you)} ${c.bold(c.ink(text))}`;
+  return `${c.zhu(G.you)} ${c.bold(c.ink(plainDisplayText(text)))}`;
 }
 
 export type ChangeInput = {
@@ -224,7 +225,7 @@ export function thinkingLines(
   expanded: boolean,
   width = 80,
 ): string[] {
-  const body = text.trim();
+  const body = plainDisplayText(text).trim();
   const all = body ? body.split("\n") : [];
   const sign = c.faint(G.note);
   if (!expanded) {
@@ -243,7 +244,7 @@ export function thinkingLines(
 
 /** 调用行:» 朱色(工具是朱的),名字加粗,参数次要色。 */
 export function callLine(name: string, args: string): string {
-  return `${c.zhu(G.call)} ${c.bold(c.ink(name))}  ${c.soft(args)}`;
+  return `${c.zhu(G.call)} ${c.bold(c.ink(plainDisplayText(name)))}  ${c.soft(args)}`;
 }
 
 /** 缺省的结果可见度:模型读过的原文不必再看(read/edit/write/glob/grep 只报行数),命令看尾部,其余看头部。 */
@@ -278,7 +279,7 @@ export function resultLines(
   const abnormal = r.isError || unknown;
   // 静成功、响失败:✓ 是次要色,只有 ✗ 用朱。
   const mark = unknown ? c.jin("?") : r.isError ? c.zhu(G.err) : c.soft(G.ok);
-  const trimmed = r.content.trim();
+  const trimmed = plainDisplayText(r.content).trim();
   const all = trimmed ? trimmed.split("\n") : [];
   const meta = [
     ...(unknown ? ["result unknown"] : []),
@@ -287,7 +288,7 @@ export function resultLines(
     ...(r.isError && !unknown ? ["error"] : []),
   ];
   const lines = [
-    `${c.faint(G.body)} ${mark} ${c.soft(r.name)}${(unknown ? c.jin : c.faint)(`  ${meta.join(" · ")}`)}`,
+    `${c.faint(G.body)} ${mark} ${c.soft(plainDisplayText(r.name))}${(unknown ? c.jin : c.faint)(`  ${meta.join(" · ")}`)}`,
     ...(unknown
       ? [`  ${c.jin("/session recovery")} ${c.soft("· reason and original arguments")}`]
       : []),
@@ -327,7 +328,7 @@ export function errorCardLines(
   const status = e.status !== undefined ? ` · HTTP ${e.status}` : "";
   return [
     `${c.zhu(G.err)} ${c.bold(c.zhu(`request #${ctx.n} failed`))}  ${c.soft(`${kind}${status}`)}`,
-    `  ${c.ink(e.provider ?? firstLine(e.error, 120))}`,
+    `  ${c.ink(plainDisplayText(e.provider ?? firstLine(e.error, 120)))}`,
     `  ${c.soft("next")}  ${c.ink(ctx.hint)}`,
     `  ${c.faint(
       e.body

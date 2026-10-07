@@ -38,7 +38,7 @@ import {
   retryStep,
   rewindCommand,
 } from "./tui-edit.js";
-import { pct } from "./tui-format.js";
+import { pct, plainDisplayText } from "./tui-format.js";
 import { LoginDialog, modelUseRows, type PickRow, SAVE_MODEL_DEFAULT } from "./tui-login.js";
 import { choose, confirm, title, valueRows } from "./tui-menu.js";
 import { Palette, type PaletteItem } from "./tui-palette.js";
@@ -49,6 +49,7 @@ import {
   parseTyped,
   switchModel,
 } from "./tui-settings.js";
+import { enterShell, runUserShell, SHELL_HELP, shellDraft } from "./tui-shell.js";
 import { slotCommand, slotsList } from "./tui-slots.js";
 import { openShortcutHelp } from "./tui-status.js";
 import { installedVersion, UPDATE_COMMAND } from "./update-check.js";
@@ -95,6 +96,10 @@ export const COMMANDS: Command[] = [
   { name: "memory", description: "Cross-session memory: show, forget one, clear", picks: true },
   { name: "compact", description: "Compact the context now; words after it are instructions" },
   { name: "copy", description: "Copy the last reply or one of its code blocks", picks: true },
+  {
+    name: "shell",
+    description: "Prepare a shell command; choose whether its output enters context",
+  },
   { name: "stop", description: "Interrupt the running turn (Esc does the same)" },
   { name: "quit", description: "Quit (Ctrl+C asks first)" },
 ];
@@ -115,14 +120,23 @@ export async function submit(
     ctx.note(c.zhu(ctx.deps.readOnlyReason));
     return;
   }
-  if (ctx.model.info.providerName === "none") {
-    ctx.note(c.zhu("no provider yet: add an API key first"));
-    openLogin(ctx, {});
-    return;
-  }
   if (agent.storagePaused) {
     ctx.note(c.zhu("Recording buffer full. Fix saving and retry; your draft is still here."));
     ctx.updateStatus();
+    return;
+  }
+  const shell = shellDraft(ctx, raw);
+  if (shell) {
+    await runUserShell(ctx, shell);
+    return;
+  }
+  if (agent.localRunning) {
+    ctx.note(c.soft("User shell is running. Wait or press Esc first; your draft is kept."));
+    return;
+  }
+  if (ctx.model.info.providerName === "none") {
+    ctx.note(c.zhu("no provider yet: add an API key first"));
+    openLogin(ctx, {});
     return;
   }
   // @路径 展开成消息里的 <file> 块:附上的就是发出的,落盘上屏都完整。
@@ -180,15 +194,16 @@ async function runInput(
   label = "thinking",
 ): Promise<void> {
   ctx.showLoader(label);
+  const startIndex = ctx.log.events.length;
   try {
     // prompt() 同步执行到首个 await 时已把 running 置位;此处刷新状态栏才能显示"运行中"。
     const pending = start();
     ctx.updateStatus();
     await pending;
   } catch (err) {
-    // 请求层的失败已由 request/error 事件画成错误行;这里只兜住循环之外的异常。
-    if (ctx.log.events.at(-1)?.type !== "request/error")
-      ctx.note(c.zhu(`✗ ${(err as Error).message}`));
+    // 只去重本次操作新增的请求错误;旧请求失败不能压制当前策略的异常。
+    if (ctx.log.events.length === startIndex || ctx.log.events.at(-1)?.type !== "request/error")
+      ctx.note(c.zhu(`✗ ${errorMessage(err)}`));
   } finally {
     ctx.hideLoader();
     ctx.updateStatus();
@@ -205,6 +220,8 @@ function helpText(ctx: TuiContext): string {
     c.soft("Commands") + c.faint("  a command with choices opens a list; ↑↓ Enter Esc"),
     ...COMMANDS.map((x) => row(`/${x.name}`, x.description)),
     row("/help update", "installed version and manual update instructions"),
+    c.soft("User shell"),
+    c.soft(SHELL_HELP),
     ...(ctx.templates.length > 0 ? [c.soft("Templates")] : []),
     ...ctx.templates.map((t) => row(`/${t.name}`, t.description)),
     ...(ctx.skills.length > 0 ? [c.soft("Skills")] : []),
@@ -282,6 +299,9 @@ function skillsList(ctx: TuiContext): string {
           : "manual invocation",
       ...(s.allowedTools.length ? [`allowed-tools: ${s.allowedTools.join(" ")}`] : []),
       ...(s.argumentHint ? [`args: ${s.argumentHint}`] : []),
+      ...(COMMANDS.some((command) => command.name === s.name)
+        ? ["manual /name unavailable: reserved built-in command; read the skill path instead"]
+        : []),
     ].join(" · ");
     return `  ${c.ink(`/${s.name}`.padEnd(16))} ${c.ink(s.description || "(no description)")}\n${" ".repeat(19)}${c.faint(`${s.path} · description ~${desc} tok · body ~${body} tok · ${flags}`)}`;
   });
@@ -894,7 +914,7 @@ function useModel(ctx: TuiContext, name: string, setDefault: boolean): boolean {
   try {
     switchModel(ctx, name);
   } catch (err) {
-    ctx.note(c.zhu(`✗ ${(err as Error).message}`));
+    ctx.note(c.zhu(`✗ ${errorMessage(err)}`));
     return false;
   }
   if (setDefault) saveDefaultModel(ctx);
@@ -909,7 +929,7 @@ function saveDefaultModel(ctx: TuiContext): void {
     ctx.note(c.soft(`· default model set to ${name}`));
   } catch (err) {
     ctx.note(
-      c.zhu(`✗ default could not be saved: ${(err as Error).message}`) +
+      c.zhu(`✗ default could not be saved: ${errorMessage(err)}`) +
         c.soft(`\nCurrent model remains ${name}.\n`) +
         c.zhu("Default not saved · /model default"),
     );
@@ -1210,7 +1230,7 @@ async function sessionCommand(ctx: TuiContext, arg: string, selectSource = false
             label: "fork",
             note: "copy this session up to the last message into a new file and continue there",
           },
-          { label: "resume", note: "pick a recent session file" },
+          { label: "resume", note: "search saved sessions by task, model or path" },
           { label: "list", note: "recent session files" },
           { label: "inputs", note: `${ctx.agent.queued} pending · continue, edit or remove` },
           { label: "recovery", note: "tool calls with unknown outcomes" },
@@ -1258,7 +1278,7 @@ async function sessionCommand(ctx: TuiContext, arg: string, selectSource = false
           if (ctx.agent.running)
             void ctx.agent
               .continuePending()
-              .catch((error: unknown) => ctx.note(c.zhu(`✗ ${(error as Error).message}`)));
+              .catch((error: unknown) => ctx.note(c.zhu(`✗ ${errorMessage(error)}`)));
           else void runInput(ctx, () => ctx.agent.continuePending());
         }),
       );
@@ -1293,33 +1313,43 @@ async function sessionCommand(ctx: TuiContext, arg: string, selectSource = false
     }
     case "resume": {
       if (!need() || running()) return;
-      if (restArg) {
+      const resume = async (file: string) => {
         const selected = await source(true);
         if (selectSource && !selected) return;
-        sw?.({ kind: "resume", file: restArg, ...(selected && { source: selected }) });
+        sw?.({ kind: "resume", file, ...(selected && { source: selected }) });
+      };
+      if (restArg) {
+        await resume(restArg);
         return;
       }
       const dir = ctx.deps.sessionsDir ?? SESSIONS_DIR;
-      const list = listSessions(dir)
-        .filter((s) => s.file !== ctx.deps.info.sessionFile)
-        .slice(0, 15);
+      const list = listSessions(dir).filter((s) => s.file !== ctx.deps.info.sessionFile);
       if (list.length === 0) {
         ctx.note(c.faint(`No other sessions in ${dir}/.`));
         return;
       }
-      const rows = sessionRows(list).map((line, i) => ({ label: list[i]?.file ?? "", note: line }));
-      const picked = await choose(
-        ctx,
-        title("Resume", "recent sessions, newest first"),
-        rows,
-        "↑↓ choose · Enter choose setup · Esc back",
+      selectSource = true;
+      const items: PaletteItem[] = list.map((session) => ({
+        kind: "session",
+        label: plainDisplayText(session.lastUser ?? "No user message")
+          .replace(/\s+/g, " ")
+          .trim(),
+        note: plainDisplayText(
+          `${session.startedAt.slice(0, 16).replace("T", " ")} · ${session.model ?? "Unknown model"} · ${session.requests} requests${session.fork ? " · fork" : ""}\n${session.file}`,
+        ),
+        // 回调捕获真实路径;相同任务摘要也不会恢复到另一个文件。
+        run: () =>
+          void resume(session.file).catch((error) => ctx.note(c.zhu(`✗ ${errorMessage(error)}`))),
+      }));
+      ctx.dialog.open(
+        new Palette(
+          items,
+          () => ctx.dialog.close(),
+          () => ctx.tui.requestRender(),
+          () => ctx.deps.terminal.rows,
+          { heading: `Resume · ${list.length} sessions · type to filter`, action: "choose setup" },
+        ),
       );
-      if (picked) {
-        selectSource = true;
-        const selected = await source(true);
-        if (selectSource && !selected) return;
-        sw?.({ kind: "resume", file: picked.row.label, ...(selected && { source: selected }) });
-      }
       return;
     }
     case "list":
@@ -1510,7 +1540,7 @@ export function openPalette(ctx: TuiContext): void {
         ctx.editor.setText(text);
         ctx.tui.requestRender();
       } catch (error) {
-        ctx.note(c.zhu(`✗ ${(error as Error).message}`));
+        ctx.note(c.zhu(`✗ ${errorMessage(error)}`));
       }
     };
     for (const cmd of COMMANDS) {
@@ -1553,6 +1583,7 @@ export function openPalette(ctx: TuiContext): void {
       });
     }
     for (const sk of ctx.skills) {
+      if (COMMANDS.some((command) => command.name === sk.name)) continue;
       items.push({
         kind: "skill",
         label: `/${sk.name}`,
@@ -1561,6 +1592,7 @@ export function openPalette(ctx: TuiContext): void {
       });
     }
     for (const t of ctx.templates) {
+      if (COMMANDS.some((command) => command.name === t.name)) continue;
       items.push({
         kind: "template",
         label: `/${t.name}`,
@@ -1576,7 +1608,7 @@ export function openPalette(ctx: TuiContext): void {
     );
     ctx.dialog.open(palette);
   } catch (error) {
-    ctx.note(c.zhu(`✗ ${(error as Error).message}`));
+    ctx.note(c.zhu(`✗ ${errorMessage(error)}`));
   }
 }
 
@@ -1628,7 +1660,7 @@ export async function command(ctx: TuiContext, text: string): Promise<void> {
   });
   const flow = dispatch(ctx, text)
     .finally(() => ctx.persistSetup())
-    .catch((err: unknown) => ctx.note(c.zhu(`✗ ${(err as Error).message}`)));
+    .catch((err: unknown) => ctx.note(c.zhu(`✗ ${errorMessage(err)}`)));
   try {
     await Promise.race([flow, opened]);
   } finally {
@@ -1701,6 +1733,9 @@ async function dispatch(ctx: TuiContext, text: string): Promise<void> {
       break;
     case "copy":
       await copyCommand(ctx, arg);
+      break;
+    case "shell":
+      await enterShell(ctx, arg);
       break;
     default:
       await userDefined(ctx, cmd, arg);

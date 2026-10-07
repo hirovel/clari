@@ -1,4 +1,4 @@
-// 长会话回放的性能(重构块 4):三处从二次方降下来的地方各守一条。
+// 界面运行与长会话回放的性能:防止每段增量或每次恢复重复处理累计全文。
 // ① 原样投影按事件对象缓存 → 两次投影里同一事件给同一个消息对象;upTo 参数不复制前缀。
 // ② 会话累计用量增量累加,与一次性扫描结果一致。
 // ③ 界面回放 2000+ 事件的会话在秒级以内(原先 2 秒起,9000 事件 48 秒)。
@@ -99,7 +99,48 @@ describe("用量累计", () => {
   });
 });
 
-describe("界面回放", () => {
+describe("界面运行与回放", () => {
+  it("5000 段思考增量的接收回调在 100ms 内,最终原文与展开内容完整", async () => {
+    const reasoning = `${"Reasoning 中文 0123456789.\n".repeat(5000)}FINAL_THINKING`;
+    let took = 0;
+    const provider: Provider = {
+      model: "m",
+      async complete(_messages, _tools, opts) {
+        took = ms(() => {
+          for (let i = 0; i < 5000; i++) opts?.onReasoning?.("Reasoning 中文 0123456789.\n");
+          opts?.onReasoning?.("FINAL_THINKING");
+        });
+        opts?.onDelta?.("FINAL_REPLY");
+        return { text: "FINAL_REPLY", reasoning, toolCalls: [], stopReason: "end" };
+      },
+    };
+    const log = new EventLog();
+    const app = createTuiApp({
+      terminal: new VirtualTerminal(80, 30),
+      log,
+      provider,
+      tools: [],
+      compaction: { strategy: async () => null, window: 1000000, reserveTokens: 1000 },
+      reserveTokens: 1000,
+      info: { model: "m", providerName: "p", sessionFile: "s" },
+      onExit: () => {},
+    });
+    try {
+      await app.submit("measure");
+      expect(took).toBeLessThan(100 * slack);
+      expect(log.events.find((event) => event.type === "assistant/message")).toMatchObject({
+        reasoning,
+        text: "FINAL_REPLY",
+      });
+      app.toggleReasoning();
+      const lines = stripAnsi(app.lines(80).join("\n"));
+      expect(lines).toContain("FINAL_THINKING");
+      expect(lines).toContain("FINAL_REPLY");
+    } finally {
+      app.stop();
+    }
+  });
+
   it("2102 条事件的会话回放在 1.5 秒内,画面完整(最新三步展开、旧步各一行账目)", () => {
     const log = bigSession(700);
     const provider: Provider = {

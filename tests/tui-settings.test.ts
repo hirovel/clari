@@ -370,34 +370,40 @@ describe("Agent setup", () => {
   });
 
   it("持久化失败有恢复说明,保留编辑状态,不关闭工作台", async () => {
-    const { app, menu, doc } = boot({
-      settings: {
-        listModels: () => [],
-        switchModel: () => {
-          throw new Error("unused");
+    for (const failure of [new Error("disk full"), "save rejected", null]) {
+      const reason = failure instanceof Error ? failure.message : String(failure);
+      const { app, menu, doc } = boot({
+        settings: {
+          listModels: () => [],
+          switchModel: () => {
+            throw new Error("unused");
+          },
+          setKey: () => {},
+          setDefault: () => {},
+          saveSetting: () => {
+            throw failure;
+          },
         },
-        setKey: () => {},
-        setDefault: () => {},
-        saveSetting: () => {
-          throw new Error("disk full");
-        },
-      },
-    });
-    await app.command("/settings fold");
-    app.dialogInput(TAB);
-    app.dialogInput(ENTER);
-    app.dialogInput("2");
-    app.dialogInput(ENTER);
-    await tick();
-    expect(menu()).toContain("disk full");
-    expect(menu()).toContain("Fold tool output");
-    expect(menu()).toContain("Enter apply");
-    app.dialogInput(ESC);
-    await app.command("/settings execution parallel");
-    expect(app.agent.slots.execution).toBe("parallel");
-    expect(app.setup().values.execution).toBe("parallel");
-    expect(doc()).toContain("changed for this session, but was not saved: disk full");
-    app.stop();
+      });
+      try {
+        await app.command("/settings fold");
+        app.dialogInput(TAB);
+        app.dialogInput(ENTER);
+        app.dialogInput("2");
+        app.dialogInput(ENTER);
+        await tick();
+        expect(menu()).toContain(reason);
+        expect(menu()).toContain("Fold tool output");
+        expect(menu()).toContain("Enter apply");
+        app.dialogInput(ESC);
+        await app.command("/settings execution parallel");
+        expect(app.agent.slots.execution).toBe("parallel");
+        expect(app.setup().values.execution).toBe("parallel");
+        expect(doc()).toContain(`changed for this session, but was not saved: ${reason}`);
+      } finally {
+        app.stop();
+      }
+    }
   });
 
   it("方案保存包含当前注册设置与模型,加载先预览再修改默认值", async () => {

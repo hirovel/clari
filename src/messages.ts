@@ -31,6 +31,11 @@ export type Message =
 
 export type EditField = Extract<AgentEvent, { type: "context/edit" }>["field"];
 
+/** 用户命令明确标来源;输出不是新的用户指令,也不是模型发起的工具调用。 */
+export function userShellText(event: Extract<AgentEvent, { type: "user/shell" }>): string {
+  return `The user ran a shell command.\nWorking directory: ${event.cwd}\nCommand:\n${event.command}\nOutput:\n${event.content}`;
+}
+
 /** 上下文字段的事实:主字段在前;只读思考仍可比较原文,但不能作为编辑入口。 */
 export function contextFields(
   event: AgentEvent | undefined,
@@ -56,6 +61,8 @@ export function contextFields(
       ];
     case "user/message":
       return [field("content", event.text)];
+    case "user/shell":
+      return event.excludeFromContext ? [] : [field("content", userShellText(event))];
     case "tool/result":
     case "tool/unresolved":
       return [field("content", event.content)];
@@ -269,6 +276,16 @@ export function composeContext(
           editedStages,
         );
         break;
+      case "user/shell":
+        if (e.excludeFromContext) break;
+        push(
+          edit?.content !== undefined
+            ? { role: "user", content: edit.content, edited: true }
+            : (verbatim.get(e) ?? remember(e, { role: "user", content: userShellText(e) })),
+          i,
+          ["user-shell", ...editedStages],
+        );
+        break;
       case "user/message":
         push(
           edit?.content !== undefined
@@ -357,6 +374,7 @@ export function isProjected(e: AgentEvent): boolean {
   return (
     e.type === "session/start" ||
     e.type === "user/message" ||
+    (e.type === "user/shell" && !e.excludeFromContext) ||
     e.type === "assistant/message" ||
     e.type === "tool/result" ||
     e.type === "tool/unresolved"

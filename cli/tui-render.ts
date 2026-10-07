@@ -33,7 +33,8 @@ import {
   type ResultRecord,
   type TuiContext,
 } from "./tui-context.js";
-import { formatArgs, toolCallDetail } from "./tui-format.js";
+import { formatArgs, plainDisplayText, toolCallDetail } from "./tui-format.js";
+import { shellScope } from "./tui-shell.js";
 import { autoFold, beginStep, refreshStep } from "./tui-steps.js";
 
 /** 散文的最大行宽(列):再宽的屏幕上一行也不超过它,读起来不累;代码与工具输出不受它管。 */
@@ -55,11 +56,11 @@ export class ReplyMarkdown implements Component {
   private readonly md: Markdown;
 
   constructor(text = "") {
-    this.md = new Markdown(text, 0, 0, markdownTheme, { color: c.ink });
+    this.md = new Markdown(plainDisplayText(text), 0, 0, markdownTheme, { color: c.ink });
   }
 
   setText(text: string): void {
-    this.md.setText(text);
+    this.md.setText(plainDisplayText(text));
   }
 
   invalidate(): void {
@@ -99,7 +100,7 @@ export function toggleReasoning(ctx: TuiContext): void {
   );
 }
 
-/** 流式增量的合帧间隔(毫秒):约 30 帧,Markdown 不再每个 delta 重解析一次。 */
+/** 回复与思考共用合帧间隔(毫秒):约 30 帧,不在每个增量到达时处理累计全文。 */
 const STREAM_FRAME_MS = 33;
 
 /** 把攒着的增量落到屏幕上。 */
@@ -108,6 +109,7 @@ function flushStream(ctx: TuiContext): void {
   if (v.streamTimer) clearTimeout(v.streamTimer);
   v.streamTimer = undefined;
   if (v.streaming) v.streaming.setText(v.streamBuffer);
+  if (v.reasoningView) v.reasoningView.setText(ctx.renderReasoning(v.reasoningBuffer));
   ctx.tui.requestRender();
 }
 
@@ -131,10 +133,12 @@ export function streamReasoning(ctx: TuiContext, d: string): void {
   if (!v.reasoningView) {
     v.reasoningView = new Block("");
     ctx.transcript.addChild(v.reasoningView);
+    v.reasoningBuffer = d;
+    flushStream(ctx);
+    return;
   }
   v.reasoningBuffer += d;
-  v.reasoningView.setText(ctx.renderReasoning(v.reasoningBuffer));
-  ctx.tui.requestRender();
+  if (!v.streamTimer) v.streamTimer = setTimeout(() => flushStream(ctx), STREAM_FRAME_MS);
 }
 
 // ---------- 子 agent 视图 ----------
@@ -201,14 +205,16 @@ export class ChildView {
     const mode = this.ctx.view.childMode;
     const elapsed = fmtMs((this.finishedAt ?? Date.now()) - this.startedAt);
     const stats = `${this.steps} steps · ${this.toolsUsed} tool calls · ${elapsed}${this.tokens ? ` · last input ${fmtTok(this.tokens)}` : ""}`;
-    const who = `${this.info.id}${this.info.type !== "default" ? ` ${this.info.type}` : ""}${this.info.resumed ? " resumed" : ""}`;
+    const who = plainDisplayText(
+      `${this.info.id}${this.info.type !== "default" ? ` ${this.info.type}` : ""}${this.info.resumed ? " resumed" : ""}`,
+    );
     const status = this.info.state.status;
     const head = this.running
       ? `${c.zhu("●")} ${c.soft(`${who} · running · ${stats}`)}`
       : status === "completed"
         ? `${c.soft(G.ok)} ${c.soft(`${who} · done · ${stats}`)}`
         : status === "stopped"
-          ? `${c.soft(G.note)} ${c.soft(`${who} · stopped (${this.info.state.reason ?? "termination policy"}) · resumable · ${stats}`)}`
+          ? `${c.soft(G.note)} ${c.soft(`${who} · stopped (${plainDisplayText(this.info.state.reason ?? "termination policy")}) · resumable · ${stats}`)}`
           : `${c.zhu("✗")} ${c.soft(`${who} · partial · ${stats}`)}`;
     this.progress.setText(GUIDE + head);
     let body: string;
@@ -216,7 +222,8 @@ export class ChildView {
       body = GUIDE + c.faint(`sub-session ${this.lines.length} lines · Ctrl+O to expand`);
     } else if (mode === "all") {
       body = this.lines.length > 0 ? this.lines.join("\n") : GUIDE + c.faint("(no output yet)");
-      if (this.info.log.path) body += `\n${GUIDE}${c.faint(`Log: ${this.info.log.path}`)}`;
+      if (this.info.log.path)
+        body += `\n${GUIDE}${c.faint(`Log: ${plainDisplayText(this.info.log.path)}`)}`;
     } else {
       const tail = this.lines.slice(-CHILD_TAIL);
       const more =
@@ -245,48 +252,61 @@ export function childEventLines(e: AgentEvent): string[] {
   switch (e.type) {
     case "user/message":
       return [
-        `${c.zhu(G.you)} ${c.ink([e.text, imageSummary(e.images)].filter(Boolean).join("\n"))}`,
+        `${c.zhu(G.you)} ${c.ink(plainDisplayText([e.text, imageSummary(e.images)].filter(Boolean).join("\n")))}`,
       ];
     case "assistant/message": {
       const lines: string[] = [];
       if (e.reasoning)
         lines.push(
-          ...e.reasoning
+          ...plainDisplayText(e.reasoning)
             .trim()
             .split("\n")
             .map((l) => c.faint(c.italic(l))),
         );
       if (e.text)
         lines.push(
-          ...e.text
+          ...plainDisplayText(e.text)
             .trim()
             .split("\n")
             .map((l) => c.ink(l)),
         );
       for (const tc of e.toolCalls) {
-        lines.push(`${c.zhu(G.call)} ${c.bold(c.ink(tc.name))}  ${c.soft(formatArgs(tc.args))}`);
+        lines.push(callLine(tc.name, formatArgs(tc.args)));
       }
       if (e.stopReason === "aborted") lines.push(c.faint("— interrupted —"));
       return lines;
     }
     case "tool/result": {
       const mark = e.outcome === "unknown" ? c.jin("?") : e.isError ? c.zhu(G.err) : c.soft(G.ok);
-      const body = e.content.trim().split("\n");
+      const body = plainDisplayText(e.content).trim().split("\n");
       const meta = [
         ...(body.length > 1 ? [`${body.length} lines`] : []),
         ...(e.durationMs !== undefined ? [fmtMs(e.durationMs)] : []),
       ];
       return [
-        `${mark} ${c.soft(e.name)}${meta.length ? c.faint(`  ${meta.join(" · ")}`) : ""}`,
+        `${mark} ${c.soft(plainDisplayText(e.name))}${meta.length ? c.faint(`  ${meta.join(" · ")}`) : ""}`,
         ...body.map((l) => (e.isError ? c.soft(`  ${l}`) : c.faint(`  ${l}`))),
       ];
     }
+    case "user/shell":
+      return [
+        c.soft(`User shell · ${shellScope(e.excludeFromContext)} · ${e.status}`),
+        c.soft(plainDisplayText(e.command)),
+        ...plainDisplayText(e.content)
+          .trim()
+          .split("\n")
+          .map((line) => c.faint(`  ${line}`)),
+      ];
     case "retry":
-      return [c.faint(`· retry ${e.attempt}: ${e.status ?? ""} ${e.error.split("\n")[0]}`)];
+      return [
+        c.faint(
+          `· retry ${e.attempt}: ${e.status ?? ""} ${plainDisplayText(e.error).split("\n")[0]}`,
+        ),
+      ];
     case "request/error":
-      return [c.zhu(`✗ request failed: ${e.error.split("\n")[0]}`)];
+      return [c.zhu(`✗ request failed: ${plainDisplayText(e.error).split("\n")[0]}`)];
     case "compaction":
-      return [c.jin(`≈ compacted${e.strategy ? ` (${e.strategy})` : ""}`)];
+      return [c.jin(`≈ compacted${e.strategy ? ` (${plainDisplayText(e.strategy)})` : ""}`)];
     default:
       return [];
   }
@@ -307,11 +327,17 @@ function renderUser(ctx: TuiContext, text: string): void {
   ctx.view.afterUser = true;
 }
 
-function renderAssistant(
+/** 成功与失败都结束同一段流式显示;失败只保留收到的文字,不合成会话事实。 */
+function finishStream(
   ctx: TuiContext,
-  e: Extract<AgentEvent, { type: "assistant/message" }>,
+  e: Pick<
+    Extract<AgentEvent, { type: "assistant/message" }>,
+    "text" | "reasoning" | "reasoningKind"
+  >,
 ): void {
-  const { view: v, transcript, req } = ctx;
+  const { view: v, transcript } = ctx;
+  if (v.streamTimer) clearTimeout(v.streamTimer);
+  v.streamTimer = undefined;
   if (v.reasoningView) {
     if (e.reasoning) {
       v.reasoningView.setText(ctx.renderReasoning(e.reasoning, e.reasoningKind));
@@ -333,8 +359,6 @@ function renderAssistant(
     transcript.addChild(node);
   }
   if (v.streaming) {
-    if (v.streamTimer) clearTimeout(v.streamTimer);
-    v.streamTimer = undefined;
     if (e.text) v.streaming.setText(e.text);
     else transcript.removeChild(v.streaming);
     v.streaming = undefined;
@@ -342,6 +366,14 @@ function renderAssistant(
   } else if (e.text) {
     transcript.addChild(new ReplyMarkdown(e.text));
   }
+}
+
+function renderAssistant(
+  ctx: TuiContext,
+  e: Extract<AgentEvent, { type: "assistant/message" }>,
+): void {
+  finishStream(ctx, e);
+  const { view: v, transcript, req } = ctx;
   v.lastUsage = e.usage;
   if (e.usage) {
     // 缓存命中明显低于预计才说一句;正常命中不出声。
@@ -384,11 +416,15 @@ function renderToolResult(ctx: TuiContext, e: Extract<AgentEvent, { type: "tool/
     ...(e.outcome && { outcome: e.outcome }),
     ...(e.durationMs !== undefined && { durationMs: e.durationMs }),
   };
+  addResult(ctx, rec);
+  const child = ctx.children.views.find((v) => v.info.callId === e.callId && v.running);
+  if (child) child.finish();
+}
+
+function addResult(ctx: TuiContext, rec: ResultRecord): void {
   const node = new Block(resultText(ctx, rec), { truncate: true });
   ctx.view.resultNodes.push({ node, ...rec });
   ctx.transcript.addChild(node);
-  const child = ctx.children.views.find((v) => v.info.callId === e.callId && v.running);
-  if (child) child.finish();
 }
 
 /**
@@ -454,6 +490,12 @@ function renderRequestError(
   ctx: TuiContext,
   e: Extract<AgentEvent, { type: "request/error" }>,
 ): void {
+  if (ctx.view.streaming || ctx.view.reasoningView) {
+    finishStream(ctx, { text: ctx.view.streamBuffer, reasoning: ctx.view.reasoningBuffer });
+    ctx.transcript.addChild(
+      new Block(c.jin("· Partial response · not added to model context · /inspect raw")),
+    );
+  }
   const { req, log } = ctx;
   const info = ctx.model.info;
   const request = log.events[req.lastIndex];
@@ -475,7 +517,7 @@ function renderCompaction(ctx: TuiContext, e: Extract<AgentEvent, { type: "compa
   const cost = e.usage
     ? `  summary request · ${fmtTok(e.usage.inputTokens)}→${fmtTok(e.usage.outputTokens)} tok · ${fmtMs(e.latencyMs)}`
     : "";
-  const who = e.strategy ? ` (${e.strategy})` : "";
+  const who = e.strategy ? ` (${plainDisplayText(e.strategy)})` : "";
   ctx.note(
     `${c.jin(`≈ compacted${who}: ${parts.join(", ")}`)}${c.faint(`${cost}  /compactions to compare original and summary`)}`,
   );
@@ -487,6 +529,17 @@ export function render(ctx: TuiContext, e: AgentEvent, index: number): void {
   switch (e.type) {
     case "user/message":
       renderUser(ctx, [e.text, imageSummary(e.images)].filter(Boolean).join("\n"));
+      break;
+    case "user/shell":
+      ctx.transcript = ctx.root;
+      ctx.view.afterUser = false;
+      addResult(ctx, {
+        name: `User shell · ${shellScope(e.excludeFromContext)}`,
+        content: e.content,
+        isError: e.isError,
+        ...(e.outcome && { outcome: e.outcome }),
+        ...(e.durationMs !== undefined && { durationMs: e.durationMs }),
+      });
       break;
     case "assistant/message":
       renderAssistant(ctx, e);
@@ -501,18 +554,23 @@ export function render(ctx: TuiContext, e: AgentEvent, index: number): void {
       ctx.transcript.addChild(
         new Block(
           c.faint(
-            `· retry ${e.attempt}: ${e.status ?? ""} ${e.error.split("\n")[0]}, next attempt in ${fmtMs(e.delayMs)}`,
+            `· retry ${e.attempt}: ${e.status ?? ""} ${plainDisplayText(e.error).split("\n")[0]}, next attempt in ${fmtMs(e.delayMs)}`,
           ),
         ),
       );
       ctx.tui.requestRender();
       break;
     case "decision":
-      if (e.slot === "termination") ctx.note(c.soft(`· stopped · ${e.reason} · send to continue`));
+      if (e.slot === "termination")
+        ctx.note(c.soft(`· stopped · ${plainDisplayText(e.reason)} · send to continue`));
       if (e.slot === "steering")
         ctx.note(c.faint(`· steering: injected ${e.injected} (${e.boundary} boundary)`));
       if (e.slot === "execution")
-        ctx.note(c.faint(`· parallel: ${e.parallel} calls at once: ${e.tools.join(", ")}`));
+        ctx.note(
+          c.faint(
+            `· parallel: ${e.parallel} calls at once: ${plainDisplayText(e.tools.join(", "))}`,
+          ),
+        );
       if (e.slot === "plan")
         ctx.note(
           c.faint(
@@ -520,7 +578,8 @@ export function render(ctx: TuiContext, e: AgentEvent, index: number): void {
           ),
         );
       if (e.slot === "facts") ctx.note(c.faint(`· ${e.note} changed; told the model`));
-      if (e.slot === "compaction") ctx.note(c.jin(`· ${compactionDecisionText(e)}`));
+      if (e.slot === "compaction")
+        ctx.note(c.jin(`· ${plainDisplayText(compactionDecisionText(e))}`));
       break;
     case "request/error":
       renderRequestError(ctx, e);
@@ -560,8 +619,16 @@ export function render(ctx: TuiContext, e: AgentEvent, index: number): void {
       );
       break;
     case "ext/event": {
+      if (e.source === "shell" && e.kind === "start") {
+        renderUser(
+          ctx,
+          `User shell · ${shellScope(e.payload.excludeFromContext === true)}\n${e.payload.excludeFromContext ? "!!" : "!"}${String(e.payload.command)}\nCwd: ${String(e.payload.cwd)}`,
+        );
+        ctx.view.afterUser = false;
+        break;
+      }
       const r = renderExtEvent(e);
-      if (r) ctx.note(c[r.tone](r.text));
+      if (r) ctx.note(c[r.tone](plainDisplayText(r.text)));
       break;
     }
     case "session/interrupt":
@@ -577,7 +644,7 @@ export function render(ctx: TuiContext, e: AgentEvent, index: number): void {
     case "tool/unresolved":
       ctx.note(
         c.jin(
-          `· ${e.name}: result unknown. Nothing was restarted. /session recovery shows details.`,
+          `· ${plainDisplayText(e.name)}: result unknown. Nothing was restarted. /session recovery shows details.`,
         ),
       );
       break;

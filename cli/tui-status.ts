@@ -16,6 +16,7 @@ import { fmtTok } from "./inspector-format.js";
 import { renderStatusLayout } from "./status-layout.js";
 import { c, G } from "./theme.js";
 import type { TuiContext } from "./tui-context.js";
+import { shellDraft, shellInput } from "./tui-shell.js";
 
 /** 按优先级取完整片段;次要信息放不下就留在检视器,不截出半个操作。 */
 function fitParts(parts: string[], width: number): string {
@@ -40,7 +41,7 @@ function capacityMeter(used: number, window: number): string {
 export class RuntimeStatus implements Component {
   private phase = "Ready";
   private work: string | undefined;
-  private outcome: "failed" | "interrupted" | undefined;
+  private outcome: "failed" | "local-failed" | "interrupted" | undefined;
   private pending = new Map<string, string>();
   private unknown = 0;
   constructor(private readonly context: () => TuiContext) {}
@@ -75,6 +76,10 @@ export class RuntimeStatus implements Component {
         this.pending.delete(e.callId);
         if (e.outcome === "unknown") this.unknown++;
         break;
+      case "user/shell":
+        if (e.outcome === "unknown") this.unknown++;
+        else if (e.isError && this.outcome !== "interrupted") this.outcome = "local-failed";
+        break;
       case "retry":
         this.phase = `Retry ${e.attempt} · waiting ${Math.ceil(e.delayMs / 1000)}s`;
         break;
@@ -101,8 +106,9 @@ export class RuntimeStatus implements Component {
     const busy = agent.running || this.work !== undefined;
     let label = "Ready";
     if (!busy && this.unknown)
-      label = `${this.outcome === "interrupted" ? "Interrupted · " : ""}${this.unknown} tool ${this.unknown === 1 ? "result" : "results"} unknown`;
+      label = `${this.outcome === "interrupted" ? "Interrupted · " : ""}${this.unknown} ${this.unknown === 1 ? "result" : "results"} unknown`;
     else if (this.outcome === "failed") label = "Request failed";
+    else if (this.outcome === "local-failed") label = "Shell failed";
     else if (this.outcome === "interrupted") label = agent.running ? "Interrupting" : "Interrupted";
     else if (ctx.approval.prompt) label = "Waiting for approval";
     else if (busy) {
@@ -115,7 +121,9 @@ export class RuntimeStatus implements Component {
             ? "Receiving thinking"
             : this.phase;
     }
-    const urgent = Boolean(this.outcome === "failed" || ctx.approval.prompt);
+    const urgent = Boolean(
+      this.outcome === "failed" || this.outcome === "local-failed" || ctx.approval.prompt,
+    );
     const mark = busy ? G.running : G.idle;
     const state = (urgent ? c.zhu : busy ? c.ink : c.soft)(`${mark} ${label}`);
     const elapsed =
@@ -285,16 +293,46 @@ export class InputHints implements Component {
 /** 状态栏与提示使用同一份实际行数,不另存高度。 */
 function inputHintLines(ctx: TuiContext, width: number): string[] {
   const text = ctx.editor.getExpandedText();
+  const shell = shellDraft(ctx, text);
   const history = ctx.view.selectedStep !== undefined || (ctx.scroll && !ctx.scroll.isFollowingEnd);
   const step = ctx.steps[ctx.view.selectedStep ?? -1];
   const boundary = ctx.slots.state.steering === "turn" ? "after turn" : "next step";
-  const send = text.startsWith("/")
-    ? "Enter command"
-    : ctx.agent.running
-      ? `Enter ${boundary}`
-      : "Enter send";
+  const send = ctx.agent.localRunning
+    ? "Wait or Esc first · draft kept"
+    : text.startsWith("/")
+      ? "Enter command"
+      : ctx.agent.running
+        ? `Enter ${boundary}`
+        : "Enter send";
   let parts: string[];
-  if (ctx.editor.isShowingAutocomplete()) parts = ["↑↓ choose", "Tab complete", "Esc dismiss"];
+  if (shell) {
+    const selected = (label: string, excluded: boolean) =>
+      shell.excludeFromContext === excluded ? c.jin(c.bold(`[${label}]`)) : c.soft(label);
+    // 按完整操作换行,窄屏不能把按键和作用拆开。
+    const actions = ctx.agent.running
+      ? ["Wait / Esc interrupt", "draft kept"]
+      : ["Enter run", "Shift+Tab scope", "Esc chat"];
+    const actionLines: string[] = [];
+    for (const action of actions) {
+      const previous = actionLines.at(-1);
+      const next = previous ? `${previous} · ${action}` : action;
+      if (previous && visibleWidth(next) <= Math.max(1, width - 2))
+        actionLines[actionLines.length - 1] = next;
+      else actionLines.push(action);
+    }
+    const lines = [
+      `${c.jin(c.bold("SHELL"))} ${c.faint("· No API request")}`,
+      `${selected("Include context", false)}  ${selected("Exclude context", true)}`,
+      ...actionLines,
+    ].flatMap((line) => wrapTextWithAnsi(line, Math.max(1, width - 2)).map((row) => ` ${row}`));
+    if (ctx.draftImages.length)
+      lines.push(
+        ` ${c.faint(truncateToWidth(`${ctx.draftImages.length} image(s) kept for chat · not sent to shell`, Math.max(1, width - 2)))}`,
+      );
+    return lines;
+  } else if (ctx.editor.isShowingAutocomplete())
+    parts = ["↑↓ choose", "Tab complete", "Esc dismiss"];
+  else if (ctx.agent.localRunning) parts = ["Esc interrupt shell", send];
   else if (history)
     parts = [
       text || ctx.draftImages.length
@@ -307,6 +345,7 @@ function inputHintLines(ctx: TuiContext, width: number): string[] {
       ...(step ? ["Ctrl+R received"] : []),
       ...(ctx.steps.length ? ["Shift+PgUp/PgDn request"] : []),
     ];
+  else if (ctx.view.shellAsText && shellInput(text)) parts = ["Chat text", send, "/shell to run"];
   else if (text.startsWith("/")) parts = [send, "Ctrl+K palette"];
   else if (ctx.agent.running) {
     parts = ["Esc interrupt", send, "Alt+Enter follow-up"];
@@ -320,7 +359,7 @@ function inputHintLines(ctx: TuiContext, width: number): string[] {
   const attachments = ctx.inputReading
     ? "Preparing paste…"
     : ctx.draftImages.length
-      ? `${ctx.draftImages.length} image(s) attached · Alt+I inspect/remove · Enter sends`
+      ? `${ctx.draftImages.length} image(s) ${shell ? "kept for chat · not sent to shell" : "attached · Alt+I inspect/remove · Enter sends"}`
       : "";
   return [
     ...(attachments ? [` ${c.jin(truncateToWidth(attachments, Math.max(1, width - 2)))}`] : []),

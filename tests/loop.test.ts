@@ -184,17 +184,38 @@ describe("runTurn", () => {
   });
 
   it("工具抛异常→isError 结果回喂,循环继续不炸", async () => {
-    const log = newLog();
-    const outcome = await runTurn({
-      log,
-      provider: scripted([
-        { text: "", toolCalls: [call("fail", {})], stopReason: "tool" },
-        { text: "看到错误了", toolCalls: [], stopReason: "end" },
-      ]),
-      tools: [failTool],
-    });
-    expect(outcome).toBe("idle");
-    expect(firstResult(log)).toMatchObject({ content: "工具内部错误", isError: true });
+    for (const failure of [new Error("工具内部错误"), "extension rejected", null]) {
+      const log = newLog();
+      const expected = failure instanceof Error ? failure.message : String(failure);
+      let requests = 0;
+      const outcome = await runTurn({
+        log,
+        provider: {
+          model: "fake",
+          async complete(messages) {
+            if (requests++ === 0)
+              return { text: "", toolCalls: [call("fail", {})], stopReason: "tool" };
+            expect(messages.at(-1)).toMatchObject({
+              role: "tool",
+              content: expected,
+              isError: true,
+            });
+            return { text: "看到错误了", toolCalls: [], stopReason: "end" };
+          },
+        },
+        tools: [
+          {
+            ...failTool,
+            async execute() {
+              throw failure;
+            },
+          },
+        ],
+      });
+      expect(outcome).toBe("idle");
+      expect(firstResult(log)).toMatchObject({ content: expected, isError: true });
+      expect(requests).toBe(2);
+    }
   });
 
   it("参数校验失败→错误文本含路径与原参数,不执行工具", async () => {

@@ -9,20 +9,13 @@ import {
   type RequestRecord,
 } from "./inspector-requests.js";
 import type { RecordedBody, RequestRecording } from "./session-records.js";
-
-function visible(text: string): string {
-  return text.replace(
-    // biome-ignore lint/suspicious/noControlCharactersInRegex: 原文控制字符是数据,不能交给终端执行。
-    /[\u0000-\u0008\u000b-\u001f\u007f]/g,
-    (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`,
-  );
-}
+import { toolCallDetail, visibleSourceText } from "./tui-format.js";
 
 function textBlock(id: string, title: string, text: string, meta = ""): BodyBlock {
-  let preview = firstLine(visible(text.slice(0, 512)));
+  let preview = firstLine(visibleSourceText(text.slice(0, 512)));
   if (text.length < 4096 && (text.startsWith("{") || text.startsWith("["))) {
     try {
-      preview = visible(JSON.stringify(JSON.parse(text)));
+      preview = visibleSourceText(JSON.stringify(JSON.parse(text)));
     } catch {
       /* 不是 JSON 时保留实际首行。 */
     }
@@ -33,7 +26,7 @@ function textBlock(id: string, title: string, text: string, meta = ""): BodyBloc
     meta: `${text.length} chars${meta ? ` · ${meta}` : ""}`,
     preview,
     version: text,
-    lines: () => visible(text).split("\n"),
+    lines: () => visibleSourceText(text).split("\n"),
   };
 }
 
@@ -55,7 +48,7 @@ function recordedBlock(
     meta: `${body.bytes === undefined ? "streaming bytes" : `${body.bytes} bytes`} · ${meta}`,
     preview: "Enter to read captured body",
     version: body,
-    lines: () => visible(body.read()).split("\n"),
+    lines: () => visibleSourceText(body.read()).split("\n"),
   };
 }
 
@@ -85,20 +78,10 @@ export function inputBlocks(
     title: `${i + 1}. ${roleLabel(message)}`,
     meta: `~${tokens[i]} text tok · ${pctOf(tokens[i] as number, total)}${message.role === "user" && message.images?.length ? ` · ${message.images.length} image(s), tokens unestimated` : ""}${previous ? (i < keep ? " · unchanged prefix" : " · after prefix") : ""}${message.edited ? " · edited" : ""}`,
     preview:
-      firstLine(visible(message.content.slice(0, 512))) ||
+      firstLine(visibleSourceText(message.content.slice(0, 512))) ||
       (message.role === "assistant" ? `${message.toolCalls.length} tool calls` : "(empty)"),
     // 共用消息格式器,不再维护另一套思考、opaque、工具参数的正文格式。
-    lines: () =>
-      messageBodyLines(
-        {
-          ...message,
-          content: visible(message.content),
-          ...(message.role === "assistant" &&
-            message.reasoning && { reasoning: visible(message.reasoning) }),
-        },
-        false,
-        sections,
-      ),
+    lines: () => messageBodyLines(message, false, sections),
   }));
 }
 
@@ -134,6 +117,14 @@ export function receivedBlocks(rec: RequestRecord, saved?: RequestRecording): Bo
   // 模型结果来自事件;附件仅补充原始输出,没有附件不能隐藏拒绝或校验错误。
   const outputs = new Map((saved?.outputs ?? []).map((output) => [output.callId, output]));
   const results = new Map(rec.results.map((result) => [result.callId, result]));
+  const outcome = (result: RequestRecord["results"][number] | undefined) =>
+    !result
+      ? "result not recorded"
+      : result.outcome === "unknown"
+        ? "outcome unknown"
+        : result.isError
+          ? "error"
+          : "success";
   const addOriginal = (
     output: NonNullable<RequestRecording["outputs"]>[number],
     group?: BodyBlock["group"],
@@ -157,14 +148,13 @@ export function receivedBlocks(rec: RequestRecord, saved?: RequestRecording): Bo
     }
     const result = results.get(callId);
     if (!result) return;
-    const outcome =
-      result.outcome === "unknown" ? "outcome unknown" : result.isError ? "error" : "success";
+    const state = outcome(result);
     blocks.push({
       ...textBlock(
         `model-${result.callId}`,
-        `${group ? "Result for model" : `${result.name} · model result`} · ${outcome}`,
+        `${group ? "Result for model" : `${result.name} · model result`} · ${state}`,
         result.content,
-        `${result.callId} · ${outcome} · available to later requests`,
+        `${result.callId} · ${state} · available to later requests`,
       ),
       ...(group && { group }),
     });
@@ -191,9 +181,13 @@ export function receivedBlocks(rec: RequestRecord, saved?: RequestRecording): Bo
         : target;
     const group = {
       id: call.id,
-      title: firstLine(visible(`${call.name}${displayTarget ? ` · ${displayTarget}` : ""}`)),
+      title: firstLine(
+        visibleSourceText(`${call.name}${displayTarget ? ` · ${displayTarget}` : ""}`),
+      ),
       ...(typeof args?.path === "string" && {
-        compactTitle: firstLine(visible(`${call.name} · ${args.path.split(/[\\/]/).at(-1)}`)),
+        compactTitle: firstLine(
+          visibleSourceText(`${call.name} · ${args.path.split(/[\\/]/).at(-1)}`),
+        ),
       }),
     };
     const block = textBlock(
@@ -209,6 +203,26 @@ export function receivedBlocks(rec: RequestRecord, saved?: RequestRecording): Bo
       group,
       preview: Object.keys(args ?? {}).join(" · ") || "(no arguments)",
     });
+    const edit =
+      call.name === "edit" &&
+      typeof args?.oldText === "string" &&
+      typeof args?.newText === "string";
+    const write = call.name === "write" && typeof args?.content === "string";
+    if (edit || write) {
+      const state = outcome(results.get(call.id));
+      blocks.push({
+        id: `change-${call.id}`,
+        group,
+        title: `${edit ? "Requested replacement" : "Submitted file content"} · ${state}`,
+        meta: edit
+          ? `Parameter preview${args?.replaceAll === true ? " · all occurrences requested" : ""} · not a full-file diff`
+          : "Previous file content not recorded · not a full-file diff",
+        preview: "Enter to inspect · complete parameters in Arguments",
+        version: call,
+        // 从已记录参数按需排版,不读当前文件,不把预览误作真实文件快照。
+        lines: () => toolCallDetail(call.name, call.args, "full").split("\n").filter(Boolean),
+      });
+    }
     addEvidence(call.id, group);
   }
   // 记录不完整时仍显示未匹配证据,不因缺少对应调用而删掉结果。

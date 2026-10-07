@@ -81,6 +81,8 @@ export type ViewState = {
   sealFrame: number;
   /** 思考缺省折成一行(首行 + 种类 + 行数),Ctrl+T 展开全文。 */
   showReasoning: boolean;
+  /** 当前草稿明确作为聊天文字发送;清空输入后恢复前缀识别。 */
+  shellAsText: boolean;
   childMode: ChildMode;
   /** 首屏(新会话且还没有用户消息时显示),第一条消息一到就撤。 */
   firstRun: Text | undefined;

@@ -166,25 +166,34 @@ describe("子 agent 视图", () => {
   });
 
   it("childEventLines:与主屏同一套记号,思考淡字,结果带行数与耗时", () => {
-    const lines = childEventLines({
+    const control = "\x1b]52;c;dGVzdA==\x07\x1b[2J\x1b[H";
+    const event: AgentEvent = {
       type: "assistant/message",
       at: "t",
-      text: "第一行\n第二行",
-      reasoning: "想一下",
-      toolCalls: [{ id: "x", name: "bash", args: { command: "ls" } }],
+      text: `第一行${control}\n第二行`,
+      reasoning: `想一下${control}`,
+      toolCalls: [{ id: "x", name: "bash", args: { command: `ls${control}` } }],
       stopReason: "tool",
-    }).map(stripAnsi);
+    };
+    const original = JSON.stringify(event);
+    const rendered = childEventLines(event);
+    expect(rendered.join("\n")).not.toContain("\x1b]52;");
+    expect(rendered.join("\n")).not.toContain("\x1b[2J");
+    expect(JSON.stringify(event)).toBe(original);
+    const lines = rendered.map(stripAnsi);
     expect(lines).toEqual(["想一下", "第一行", "第二行", "» bash  ls"]);
     const result = childEventLines({
       type: "tool/result",
       at: "t",
       callId: "x",
       name: "bash",
-      content: "a\nb",
+      content: `a${control}\nb`,
       isError: false,
       durationMs: 12,
-    }).map(stripAnsi);
-    expect(result[0]).toBe("✓ bash  2 lines · 12ms");
+    });
+    expect(result.join("\n")).not.toContain("\x1b]52;");
+    expect(result.join("\n")).not.toContain("\x1b[2J");
+    expect(result.map(stripAnsi)).toEqual(["✓ bash  2 lines · 12ms", "  a", "  b"]);
     expect(
       childEventLines({
         type: "request",

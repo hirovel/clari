@@ -6,6 +6,7 @@ import type { Preset, ResultView, SkillsConfig } from "../src/config.js";
 import { now } from "../src/events.js";
 import { DEFAULT_PLAN_REMINDER } from "../src/plan.js";
 import type { EffortLevel } from "../src/provider.js";
+import { errorMessage } from "../src/providers/errors.js";
 import {
   formatSetting,
   getSetting,
@@ -431,7 +432,7 @@ export async function changeSetting(
       } catch (err) {
         return {
           ok: false,
-          message: `${def.key} changed for this session, but was not saved: ${(err as Error).message}. Retry saving in Saved defaults.`,
+          message: `${def.key} changed for this session, but was not saved: ${errorMessage(err)}. Retry saving in Saved defaults.`,
         };
       }
     }
@@ -440,7 +441,7 @@ export async function changeSetting(
       message: `${def.key} → ${formatSetting(def, value)} · ${settingTiming(ctx, def, "session")}${scope === "both" ? (save ? " · saved to config" : " · not saved: no config here") : " · this session only"}`,
     };
   } catch (err) {
-    return { ok: false, message: (err as Error).message };
+    return { ok: false, message: errorMessage(err) };
   }
 }
 
@@ -452,7 +453,7 @@ export function parseTyped(arg: string): { def: SettingDef; value: unknown } | s
   try {
     return { def, value: parseSetting(def, rest) };
   } catch (err) {
-    return (err as Error).message;
+    return errorMessage(err);
   }
 }
 

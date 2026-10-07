@@ -12,7 +12,14 @@ import {
 import { c, G, selectedText } from "./theme.js";
 import { printableInput } from "./tui-format.js";
 
-export type PaletteKind = "command" | "model" | "skill" | "template" | "login" | "setting";
+export type PaletteKind =
+  | "command"
+  | "model"
+  | "skill"
+  | "template"
+  | "login"
+  | "setting"
+  | "session";
 
 export type PaletteItem = {
   kind: PaletteKind;
@@ -29,6 +36,7 @@ const KIND_TAG: Record<PaletteKind, string> = {
   template: "tmpl",
   login: "login",
   setting: "set",
+  session: "session",
 };
 
 /** 只限制可见行,不能删掉用户仍可浏览的匹配结果。 */
@@ -46,6 +54,7 @@ export class Palette implements Component {
     private readonly onClose: () => void,
     private readonly onChange: () => void = () => {},
     private readonly height: () => number = () => 24,
+    private readonly options: { heading?: string; action?: string } = {},
   ) {}
 
   invalidate(): void {}
@@ -53,7 +62,12 @@ export class Palette implements Component {
   /** 当前匹配的行,按质量排序,导航保留全部结果。 */
   matches(): PaletteItem[] {
     const q = this.query.trim();
-    return q ? fuzzyFilter(this.items, q, (i) => `${i.label} ${i.note ?? ""}`) : this.items;
+    if (!q) return this.items;
+    const text = (item: PaletteItem) => `${item.label} ${item.note ?? ""}`;
+    const normalized = q.toLowerCase();
+    const exact = (item: PaletteItem) => text(item).toLowerCase().includes(normalized);
+    // 连续命中的名称优先,避免路径与时间的零散字符盖过完整搜索文字。
+    return fuzzyFilter(this.items, q, text).sort((a, b) => Number(exact(b)) - Number(exact(a)));
   }
 
   render(width = 80): string[] {
@@ -64,10 +78,11 @@ export class Palette implements Component {
     const line = (text: string) => truncateToWidth(text, width);
     const wrap = (text: string) =>
       text.split("\n").flatMap((part) => wrapTextWithAnsi(part, inner));
-    const hint = "type to filter · ↑↓ choose · Enter run · Esc close";
-    const hints = wrap(height < 12 ? "↑↓ choose · Enter run · Esc close" : hint);
+    const action = `Enter ${this.options.action ?? "run"}`;
+    const hint = `type to filter · ↑↓ choose · ${action} · Esc close`;
+    const hints = wrap(height < 12 ? `↑↓ choose · ${action} · Esc close` : hint);
     if (height < 7 + hints.length)
-      return [line(selected?.label ?? "No match"), line("Enter run · Esc close")].slice(0, height);
+      return [line(selected?.label ?? "No match"), line(`${action} · Esc close`)].slice(0, height);
     const details = selected
       ? wrap([selected.label, selected.note].filter(Boolean).join("\n"))
       : [];
@@ -80,7 +95,7 @@ export class Palette implements Component {
     const visible = rows.slice(start, start + page);
     const labelWidth = Math.max(0, ...visible.map((row) => visibleWidth(row.label)));
     return [
-      line(c.bold(c.ink("Command palette"))),
+      line(c.bold(c.ink(this.options.heading ?? "Command palette"))),
       line(`  ${c.zhu("›")} ${c.ink(this.query)}${c.faint("▏")}`),
       ...visible.map((r, offset) => {
         const i = start + offset;
@@ -92,7 +107,11 @@ export class Palette implements Component {
         );
       }),
       ...(rows.length === 0 ? [line(c.faint("  no match"))] : []),
-      line(c.faint(`Selected ${rows.length ? this.index + 1 : 0}/${rows.length}`)),
+      line(
+        c.faint(
+          `Selected ${rows.length ? this.index + 1 : 0}/${rows.length}${this.query ? ` · ${this.items.length} total` : ""}`,
+        ),
+      ),
       "",
       ...details
         .slice(this.detailOffset, this.detailOffset + this.detailPage)

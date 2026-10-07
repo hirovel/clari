@@ -4,6 +4,7 @@ import { now } from "../src/events.js";
 import type { EventLog } from "../src/log.js";
 import { maxSteps, queueToTurnEnd, type TurnDeps } from "../src/loop.js";
 import type { Provider } from "../src/provider.js";
+import { errorMessage } from "../src/providers/errors.js";
 import { type ChildInfo, type ChildTools, createTaskTool } from "../src/subagent.js";
 import type { Tool } from "../src/tools.js";
 import type { CommonArgs } from "./args.js";
@@ -161,7 +162,7 @@ export async function prepareSessionRuntime(options: {
       } catch (cleanupError) {
         throw new AggregateError(
           [error, cleanupError],
-          `Session initialization failed: ${(error as Error).message}`,
+          `Session initialization failed: ${errorMessage(error)}`,
         );
       }
       throw error;
@@ -266,7 +267,7 @@ export async function prepareSessionRuntime(options: {
     } catch (cleanupError) {
       throw new AggregateError(
         [error, cleanupError],
-        `Session initialization failed: ${(error as Error).message}`,
+        `Session initialization failed: ${errorMessage(error)}`,
       );
     }
     throw error;

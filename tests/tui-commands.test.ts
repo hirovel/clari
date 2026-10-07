@@ -8,14 +8,18 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ClipboardInput } from "../cli/clipboard-input.js";
 import type { ModelSettings } from "../cli/model-settings.js";
 import { SessionInputs } from "../cli/session-inputs.js";
+import { forkSession } from "../cli/sessions.js";
 import { appendMemory } from "../cli/tools/memory.js";
 import { createTuiApp, type TuiApp, type TuiAppDeps } from "../cli/tui-app.js";
 import { ApprovalPrompt } from "../cli/tui-slots.js";
 import { llmSummarize } from "../src/compaction.js";
 import { DEFAULT_CONFIG_PATH } from "../src/config.js";
 import { EventLog } from "../src/log.js";
+import type { Message } from "../src/messages.js";
 import { deriveMessages } from "../src/messages.js";
 import type { AssistantTurn, Provider } from "../src/provider.js";
+import { openaiCompat } from "../src/providers/openai-chat.js";
+import { Recording } from "../src/recording.js";
 import { defineTool } from "../src/tools.js";
 import { testImage } from "./helpers/image.js";
 import { stripAnsi, VirtualTerminal } from "./helpers/virtual-terminal.js";
@@ -117,6 +121,211 @@ function bootB(provider: Provider, over: Partial<TuiAppDeps> = {}, log = new Eve
 }
 
 describe("命令:帮助、设置、检视器入口、强度、模型、审批", () => {
+  it("用户终端入口:真实命令无 API,范围进入实际请求,忙时保留输入,取消与恢复不重跑", async () => {
+    tmp = mkdtempSync(join(tmpdir(), "clari-user-shell-"));
+    const file = join(tmp, "shell.jsonl");
+    const log = new EventLog(file);
+    const sent: string[] = [];
+    let release: (() => void) | undefined;
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      sent.push(String(init?.body));
+      if (sent.length === 1)
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      return new Response(
+        'data: {"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+        { status: 200 },
+      );
+    });
+    const provider = openaiCompat({
+      model: "m",
+      baseUrl: "http://fixture",
+      apiKey: "fixture-auth",
+    });
+    const { app, term } = bootB(
+      provider,
+      { readClipboard: async () => ({ image: testImage }) },
+      log,
+    );
+    try {
+      app.setDraft("!");
+      await app.submit("!");
+      expect(app.draft()).toBe("!");
+      expect(log.events.some((e) => e.type === "user/shell")).toBe(false);
+      app.setDraft("!!printf 'LOCAL_ONLY'");
+      expect(doc(app)).toContain("[Exclude context]");
+      term.feed("\x1b[Z");
+      expect(app.draft()).toBe("!printf 'LOCAL_ONLY'");
+      term.feed("\x1b[Z");
+      expect(app.draft()).toBe("!!printf 'LOCAL_ONLY'");
+      term.resize(36, 12);
+      await vi.waitFor(async () => {
+        const screen = (await term.screen()).join("\n");
+        expect(screen).toContain("[Exclude context]");
+        expect(screen).toContain("Enter run");
+        expect(screen).toContain("Esc chat");
+      });
+      term.resize(120, 40);
+      await app.submit(app.draft());
+      expect(sent).toHaveLength(0);
+      expect(
+        deriveMessages(log.events)
+          .map((m) => m.content)
+          .join("\n"),
+      ).not.toContain("LOCAL_ONLY");
+      app.setDraft("");
+      term.feed("\x1b[200~！！printf 'WIDE_LOCAL'\x1b[201~");
+      expect(doc(app)).toContain("[Exclude context]");
+      term.feed("\r");
+      await vi.waitFor(() => {
+        const result = [...log.events].reverse().find((e) => e.type === "user/shell");
+        expect(result).toMatchObject({ excludeFromContext: true });
+        expect(result?.content).toContain("WIDE_LOCAL");
+      });
+      expect(deriveMessages(log.events).some((m) => m.content.includes("WIDE_LOCAL"))).toBe(false);
+      await app.command("/shell");
+      expect(app.draft()).toBe("!");
+      expect(doc(app)).toContain("[Include context]");
+      app.setDraft("/shell printf 'SLASH_ENTRY'");
+      term.feed("\r");
+      await vi.waitFor(() => expect(app.draft()).toBe("!printf 'SLASH_ENTRY'"));
+      expect(log.events.filter((e) => e.type === "user/shell")).toHaveLength(2);
+      term.feed("\r");
+      await vi.waitFor(() =>
+        expect(log.events.filter((e) => e.type === "user/shell")).toHaveLength(3),
+      );
+      expect(deriveMessages(log.events).at(-1)?.content).toContain("SLASH_ENTRY");
+      expect(sent).toHaveLength(0);
+      await app.submit(`!!cd '${tmp.replace(/\\/g, "/")}' && pwd`);
+      await app.submit("!!pwd -W 2>/dev/null || pwd");
+      const directory = [...log.events].reverse().find((e) => e.type === "user/shell");
+      expect(directory?.content).toContain(process.cwd().replace(/\\/g, "/"));
+      // 控制协议进入原始结果,仅显示处理;@引用不能被附件展开。
+      await app.submit(
+        "!printf '\\033[32mINCLUDED @missing\\033[0m\\n'; printf 'ERROR' >&2; exit 3",
+      );
+      const shell = [...log.events].reverse().find((e) => e.type === "user/shell");
+      expect(shell).toMatchObject({
+        isError: true,
+        status: "Exit code: 3",
+        excludeFromContext: false,
+      });
+      expect(shell?.content).toContain("\x1b[32mINCLUDED @missing\x1b[0m");
+      expect(doc(app)).toContain("Shell failed");
+      expect(sent).toHaveLength(0);
+      const target = log.events.length - 1;
+      app.inspector.openComposition();
+      expect(app.inspector.lines(100).map(stripAnsi).join("\n")).toContain("INCLUDED @missing");
+      app.inspector.close();
+      await app.command(`/edit ${target} EDITED_SHELL_CONTEXT`);
+      expect(deriveMessages(log.events).at(-1)?.content).toBe("EDITED_SHELL_CONTEXT");
+      await app.command(`/edit restore ${target}`);
+      const projected = deriveMessages(log.events).at(-1)?.content;
+      expect(projected).toContain("The user ran a shell command");
+      expect(projected).toContain("\x1b[32mINCLUDED @missing\x1b[0m");
+      const running = app.submit("continue");
+      await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+      app.setDraft("!printf 'MUST_NOT_RUN'");
+      await app.submit(app.draft());
+      expect(app.draft()).toContain("MUST_NOT_RUN");
+      expect(doc(app)).toContain("not queued");
+      release?.();
+      await running;
+      const input = JSON.parse(sent[0] ?? "{}").messages;
+      expect(input.some((m: { content: string }) => m.content === projected)).toBe(true);
+      expect(sent[0]).not.toContain("LOCAL_ONLY");
+      expect(sent[0]).not.toContain("MUST_NOT_RUN");
+      // 显式返回聊天后,保留前缀文字;编辑器提交时清空草稿不能让它再次变成命令。
+      app.setDraft("!!这是普通文字");
+      term.feed("\x1b");
+      expect(app.draft()).toBe("!!这是普通文字");
+      expect(doc(app)).toContain("Chat text");
+      const commands = log.events.filter((e) => e.type === "user/shell").length;
+      term.feed("\r");
+      await vi.waitFor(() => expect(sent).toHaveLength(2));
+      await app.agent.waitForIdle();
+      expect(log.events.filter((e) => e.type === "user/shell")).toHaveLength(commands);
+      expect(JSON.parse(sent[1] ?? "{}").messages.at(-1)?.content).toBe("!!这是普通文字");
+      app.setDraft("!printf 'STREAM_READY'; sleep 2; printf 'LATE_SHELL_OUTPUT'");
+      const command = app.submit(app.draft());
+      await vi.waitFor(() =>
+        expect(
+          doc(app)
+            .split("\n")
+            .some((line) => line.trim() === "STREAM_READY"),
+        ).toBe(true),
+      );
+      expect(app.agent.localRunning).toBe(true);
+      app.setDraft("keep this draft");
+      await app.submit(app.draft());
+      expect(app.draft()).toBe("keep this draft");
+      await expect(app.agent.continuePending()).rejects.toThrow("User shell is running");
+      term.feed("\x1b");
+      await command;
+      expect(app.agent.running).toBe(false);
+      expect(app.agent.localRunning).toBe(false);
+      expect(log.events.at(-1)).toMatchObject({
+        type: "user/shell",
+        status: process.platform === "win32" ? "Result unknown" : "Interrupted",
+      });
+      if (process.platform === "win32") {
+        const completed = log.events.at(-1);
+        if (completed?.type !== "user/shell") throw new Error("Shell result missing");
+        expect(completed.content).toContain("descendant termination not verified");
+        const completedCount = log.events.length;
+        const outputStart = [...log.events]
+          .reverse()
+          .find((e) => e.type === "ext/event" && e.source === "shell");
+        if (outputStart?.type !== "ext/event") throw new Error("Shell recording missing");
+        const ref = outputStart.payload.output as { file: string; label: string };
+        const received = log.recording?.read(ref);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        expect(log.events).toHaveLength(completedCount);
+        expect(log.recording?.read(ref)).toBe(received);
+        expect(received).not.toContain("LATE_SHELL_OUTPUT");
+      }
+      expect(sent).toHaveLength(2);
+      term.feed("\x1bv");
+      await vi.waitFor(() => expect(doc(app)).toContain("1 image(s) attached"));
+      app.setDraft("!!printf 'WITH_IMAGE'");
+      expect(doc(app)).toContain("not sent to shell");
+      await app.submit(app.draft());
+      expect(app.draft()).toBe("");
+      expect(doc(app)).toContain("1 image(s) attached");
+      expect(sent).toHaveLength(2);
+      await app.command(`/edit drop ${target}`);
+      expect(deriveMessages(log.events).some((m) => m.content.includes("INCLUDED @missing"))).toBe(
+        false,
+      );
+      const fork = forkSession(log.events, log.events.length, tmp, log.recording);
+      const source = new Recording(file);
+      const copied = new Recording(fork.file);
+      for (const event of log.events) {
+        if (event.type === "ext/event" && event.source === "shell" && event.payload.output) {
+          const ref = event.payload.output as { file: string; label: string };
+          expect(copied.read(ref)).toBe(source.read(ref));
+        }
+      }
+      const restored = EventLog.load(file);
+      expect(deriveMessages(restored.events)).toEqual(deriveMessages(log.events));
+      const replay = bootB(provider, {}, restored);
+      expect(doc(replay.app)).toContain("Excluded from model context");
+      expect(doc(replay.app)).toContain("Included in next context");
+      expect(doc(replay.app)).toContain(
+        process.platform === "win32" ? "result unknown" : "Interrupted",
+      );
+      replay.app.stop();
+    } finally {
+      release?.();
+      app.agent.interrupt();
+      await app.agent.waitForIdle();
+      app.stop();
+      log.recording?.dispose();
+      fetch.mockRestore();
+    }
+  });
+
   it("/compact 在运行状态显示进度,Esc 通过普通任务入口取消", async () => {
     const instructions = "Keep this structure:\n  first  item\n\n\tsecond item";
     let received = "";
@@ -674,20 +883,38 @@ describe("提交", () => {
       restored.app.stop();
     }
   });
-  it("@路径附件:存在的附上并报字节数,不存在的说明跳过", async () => {
+  it("@路径附件:完整附入带空格路径;二进制与非法 UTF-8 提示跳过", async () => {
     tmp = mkdtempSync(join(tmpdir(), "clari-tui-"));
     writeFileSync(join(tmp, "a.txt"), "hello");
     writeFileSync(join(tmp, "a.bin"), Buffer.from([0, 1, 2, 3]));
+    const content = "\uFEFF中文 🙂\r\n  保留缩进\n";
+    writeFileSync(join(tmp, "report notes.txt"), content, "utf8");
+    writeFileSync(join(tmp, "invalid.txt"), Buffer.from([0xc3, 0x28]));
     const cwd = process.cwd();
     process.chdir(tmp);
     try {
-      const { app, log } = bootB(scriptedB([]));
-      await app.submit("look at @a.txt and @a.bin");
-      const d = doc(app);
-      expect(d).toContain("attached @a.txt (5 bytes)");
-      expect(d).toContain("@a.bin: binary file, not attached");
-      const user = log.events.find((e) => e.type === "user/message");
-      expect(user && "text" in user ? user.text : "").toContain("hello");
+      let sent: Message[] | undefined;
+      const { app, log } = bootB({
+        ...scriptedB([]),
+        async complete(messages) {
+          sent = messages;
+          return { text: "ok", toolCalls: [], stopReason: "end" };
+        },
+      });
+      try {
+        await app.submit('look at @a.txt and @a.bin @"report notes.txt" @invalid.txt');
+        const d = doc(app);
+        expect(d).toContain("attached @a.txt (5 bytes)");
+        expect(d).toContain("@a.bin: binary file, not attached");
+        expect(d).toContain("attached @report notes.txt");
+        expect(d).toContain("@invalid.txt: not valid UTF-8 text, not attached");
+        const user = log.events.find((e) => e.type === "user/message");
+        if (user?.type !== "user/message") throw new Error("Missing user message");
+        expect(user.text).toContain(`<file name="report notes.txt">\n${content}\n</file>`);
+        expect(sent?.find((message) => message.role === "user")?.content).toBe(user.text);
+      } finally {
+        app.stop();
+      }
     } finally {
       process.chdir(cwd);
     }

@@ -26,7 +26,7 @@ let args: ReturnType<typeof parseCommonArgs>;
 try {
   args = parseCommonArgs(process.argv.slice(2));
 } catch (err) {
-  console.error((err as Error).message);
+  console.error(errorMessage(err));
   process.exit(2);
 }
 if (args.help) {
@@ -43,14 +43,14 @@ const boot = bootstrap();
 try {
   args = boot.resolve(args);
 } catch (err) {
-  console.error((err as Error).message);
+  console.error(errorMessage(err));
   process.exit(2);
 }
 let choice: ReturnType<typeof boot.choose>;
 try {
   choice = boot.choose(args.model);
 } catch (err) {
-  console.error((err as Error).message);
+  console.error(errorMessage(err));
   process.exit(1);
 }
 
@@ -101,7 +101,7 @@ try {
   });
   runtime.activate();
 } catch (error) {
-  console.error((error as Error).message);
+  console.error(errorMessage(error));
   await log.checkpoint();
   if (log.recording?.error) console.error(`Saving failed: ${log.recording.error}`);
   log.recording?.dispose();

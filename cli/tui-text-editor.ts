@@ -8,6 +8,7 @@ import {
   truncateToWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
+import { errorMessage } from "../src/providers/errors.js";
 import { readClipboardInput } from "./clipboard-input.js";
 import { c, editorTheme, G, selectedText } from "./theme.js";
 import type { TuiContext } from "./tui-context.js";
@@ -138,7 +139,7 @@ export class TextEditor implements Component {
           : "No text on the clipboard.";
     } catch (error) {
       if (this.ctx.dialog.component === this)
-        this.error = `Paste failed: ${(error as Error).message}. Text unchanged.`;
+        this.error = `Paste failed: ${errorMessage(error)}. Text unchanged.`;
     } finally {
       this.reading = false;
       if (this.ctx.dialog.component === this) this.ctx.tui.requestRender();
@@ -177,7 +178,7 @@ export class TextEditor implements Component {
         this.ctx.dialog.close();
         if (result) this.ctx.note(result);
       } catch (error) {
-        this.error = (error as Error).message;
+        this.error = errorMessage(error);
       }
     }
     this.editor.focused = this.hasFocus && this.action === 0;

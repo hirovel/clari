@@ -8,6 +8,13 @@ export type ExtLine = { tone: "jin" | "zhu" | "faint"; text: string };
 type Renderer = (e: Extract<AgentEvent, { type: "ext/event" }>) => ExtLine | undefined;
 
 const renderers: Record<string, Renderer> = {
+  shell: (event) =>
+    event.kind === "start"
+      ? {
+          tone: "faint",
+          text: `User shell · ${event.payload.excludeFromContext ? "Local only" : "Included in next context"}: ${String(event.payload.command)}`,
+        }
+      : undefined,
   recording: (event) =>
     event.kind === "buffer/full"
       ? {

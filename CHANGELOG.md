@@ -5,6 +5,13 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ## [Unreleased]
 
+### Added
+
+- Expand `edit` replacement previews and `write` submitted content in the received inspector. Keep complete arguments and tool results adjacent, label success, error, unknown and missing results, and preserve recorded content and model input.
+- Search all saved sessions in `/session resume` by the latest user message, model or path. Show task text first, keep full metadata in the selected detail view, and preserve the existing setup selection and draft on cancellation.
+- Show Shell mode with include/exclude context choices in the input footer. `!command` and `!!command` execute on Enter, including pasted and fullwidth prefixes. `/shell` prepares input; Shift+Tab switches scope and idle Esc keeps the text for chat. Keep complete key/action pairs together when narrow windows wrap hints.
+- Run user commands from chat: `!command` adds the result to the next context; `!!command` saves and displays it locally. Show the scope before execution. Reuse Bash capture and the existing running lifecycle; keep busy commands as drafts without calling the API or queueing them. Restore unfinished commands as unknown without rerunning them. Windows cancellation reports unverified descendant termination.
+
 ### Changed
 
 - Show one compact identity per tool call in the received inspector. Label arguments, original output and model results by role; keep the selected call visible while paging. Preview argument fields when folded and preserve the complete JSON when expanded.
@@ -26,6 +33,17 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ### Fixed
 
+- Attach quoted file paths containing spaces. Preserve valid UTF-8, BOM and line endings; skip invalid UTF-8 with a visible reason instead of silently replacing bytes. Keep path deduplication, complete recorded input and the existing 50 KiB limit.
+- Keep rate-limit and server-error hints factual when retries are disabled. Retry history remains available in the request records.
+- Keep errors from a new operation visible after an earlier request failed. A previous request error no longer suppresses a later manual compaction failure.
+- Preserve failure text across custom subagent runners, extension initialization, settings saves, session switches and text editing. String and null rejections no longer hide the cause or replace it with a secondary error; failed work keeps its existing recovery and cleanup behavior.
+- Convert non-Error tool failures to text before recording and returning them to the model. A custom tool rejecting with a string or null no longer breaks the next request.
+- Finalize received text and thinking when a streamed request fails. Keep the incomplete response visible and separate from later replies without adding it to model context. Ignore late display callbacks after the interface stops while preserving received records.
+- Batch thinking display updates with reply updates using the existing frame timer. Keep the first fragment immediate and the final message complete; release pending display work on completion and UI shutdown.
+- Resolve Windows `taskkill.exe` from the system directory so cancellation does not depend on PATH. Keep failures visible and descendant termination unverified.
+- End local Bash waiting after `taskkill` returns on Windows, including cancellation and timeout. Keep captured output, detach inherited pipes and report an unknown outcome without claiming descendants have stopped. Preserve the original cancellation timing test.
+- Remove terminal control sequences from displayed tool output, command and file previews, model text, retry notices and extension errors, including subagent views. Preserve original events and model inputs, application colors, file links and explicit copy actions.
+- Keep carriage-return progress fragments on separate display lines. Show control characters explicitly in original-message, tool-definition, HTTP JSON and event JSON inspectors without changing the recorded or transmitted content.
 - Keep missing tool-result notices visible before long call IDs in narrow received views. Do not infer that a missing result is still running.
 - Show every tool result in the received inspector, including denied calls, unknown tools and invalid arguments without captured output. Keep original output separate and match it by call ID.
 - Cancel pending tool approvals when the turn is interrupted. Close the prompt, stop waiting and mark unexecuted calls as interrupted, including inherited subagent approvals; preserve drafts and queued input during shutdown.

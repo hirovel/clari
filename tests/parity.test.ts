@@ -326,6 +326,21 @@ describe("@文件引用", () => {
       ["bin", "binary file, not attached"],
       ["big.txt", expect.stringContaining("exceeds")],
     ]);
+    const content = "\uFEFF第一行 🙂\r\n  第二行\n";
+    writeFileSync(join(dir, "report & notes.txt"), content, "utf8");
+    writeFileSync(join(dir, "invalid.txt"), Buffer.from([0xc3, 0x28]));
+    const quoted = expandFileRefs(
+      `查看 @"report & notes.txt" @'./report & notes.txt' @invalid.txt`,
+      dir,
+    );
+    expect(quoted.text).toBe(
+      `查看 @"report & notes.txt" @'./report & notes.txt' @invalid.txt\n\n<file name="report &amp; notes.txt">\n${content}\n</file>`,
+    );
+    expect(quoted.attachments.map((a) => [a.ref, a.skipped ?? "ok"])).toEqual([
+      ["report & notes.txt", "ok"],
+      ["invalid.txt", "not valid UTF-8 text, not attached"],
+    ]);
+    expect(expandFileRefs('输入未完成 @"report & notes.txt', dir).attachments).toEqual([]);
     const unreadable = join(dir, "unreadable.txt");
     writeFileSync(unreadable, "Do not attach this content.");
     const vanished = join(dir, "vanished.txt");
@@ -454,6 +469,19 @@ describe("分叉与扩展模块", () => {
     log.append({ type: "user/message", at: "", text: "after failed initialization" });
     expect((globalThis as { __seen?: number }).__seen).toBe(1);
     expect((globalThis as { __released?: number }).__released).toBe(2);
+    const failing = join(dir, "failing.mjs");
+    const brokenCleanup = join(dir, "broken-cleanup.mjs");
+    writeFileSync(failing, 'export default () => { throw "initialization rejected"; };');
+    writeFileSync(
+      brokenCleanup,
+      'export default () => ({ dispose() { throw "release rejected"; } });',
+    );
+    await expect(
+      loadExtensions([file, brokenCleanup, failing], { cwd: "/w", log }),
+    ).rejects.toThrow("initialization rejected");
+    log.append({ type: "user/message", at: "", text: "after failed cleanup" });
+    expect((globalThis as { __seen?: number }).__seen).toBe(1);
+    expect((globalThis as { __released?: number }).__released).toBe(3);
   });
 });
 

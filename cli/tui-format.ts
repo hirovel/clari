@@ -19,9 +19,22 @@ export function cleanPasteText(text: string): string {
   );
 }
 
+/** 外部文本只作正文显示;终端协议不执行,原文仍由事件与实录保存。 */
+export function plainDisplayText(text: string): string {
+  // CRLF 是换行,单独 CR 的进度片段分行保留,不模拟覆盖或把两段正文粘在一起。
+  return cleanPasteText(text).replace(/\r\n?/g, "\n");
+}
+
+/** 原文阅读保留控制字符的可见表示;LF/Tab 留给排版,精确核对仍用 JSON 或原文复制。 */
+export function visibleSourceText(text: string): string {
+  return text.replace(/\p{Cc}/gu, (char) =>
+    "\n\t".includes(char) ? char : `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`,
+  );
+}
+
 /** 任务简报的一句话形态,给会话选择器与标题用。 */
 export function brief(task: string): string {
-  const first = task.split("\n")[0]?.trim() ?? "";
+  const first = plainDisplayText(task).split("\n")[0]?.trim() ?? "";
   return first.length > 24 ? `${first.slice(0, 24)}…` : first;
 }
 
@@ -35,7 +48,8 @@ export function formatArgs(args: unknown): string {
       typeof a.offset === "number" || typeof a.limit === "number"
         ? `  from line ${a.offset ?? 1}${typeof a.limit === "number" ? `, ${a.limit} lines` : ""}`
         : "";
-    const shown = a.path.length > 120 ? `${a.path.slice(0, 120)}…` : a.path;
+    const path = plainDisplayText(a.path);
+    const shown = path.length > 120 ? `${path.slice(0, 120)}…` : path;
     return `${osc8(shown, fileUrl(a.path))}${range}`;
   } else if (typeof a.task === "string") {
     s = `${a.scope ? `scope=${a.scope}  ` : ""}${brief(a.task)}`;
@@ -44,6 +58,7 @@ export function formatArgs(args: unknown): string {
     const done = items.filter((i) => i.status === "done").length;
     s = `${items.length} step${items.length === 1 ? "" : "s"} · ${done} done`;
   } else s = JSON.stringify(args) ?? "";
+  s = plainDisplayText(s);
   return s.length > 160 ? `${s.slice(0, 160)}…` : s;
 }
 
@@ -63,20 +78,21 @@ export function toolCallDetail(
   let lines: string[] = [];
   if (name === "edit" && typeof a.oldText === "string" && typeof a.newText === "string") {
     lines = hunks(diffLines(a.oldText, a.newText)).map((l) => {
+      const text = plainDisplayText(l.text);
       switch (l.kind) {
         case "-":
-          return DEL(`- ${l.text}`);
+          return DEL(`- ${text}`);
         case "+":
-          return ADD(`+ ${l.text}`);
+          return ADD(`+ ${text}`);
         case "…":
-          return c.faint(`  ${l.text}`);
+          return c.faint(`  ${text}`);
         default:
-          return c.faint(`  ${l.text}`);
+          return c.faint(`  ${text}`);
       }
     });
   } else if (name === "write" && typeof a.content === "string") {
     const all = a.content.split("\n");
-    lines = (view === "full" ? all : all.slice(0, 12)).map((l) => ADD(`+ ${l}`));
+    lines = (view === "full" ? all : all.slice(0, 12)).map((l) => ADD(`+ ${plainDisplayText(l)}`));
     if (view === "preview" && all.length > 12) lines.push(c.faint(`… ${all.length} lines total`));
   } else if (name === "plan" && Array.isArray(a.items)) {
     // 计划整张可见:进行中的是墨色,其余淡色。
@@ -87,7 +103,7 @@ export function toolCallDetail(
       cancelled: "[-]",
     };
     lines = (a.items as { text?: string; status?: string }[]).map((it, i) => {
-      const line = `${MARK[it.status ?? "pending"] ?? "[ ]"} ${i + 1}. ${it.text ?? ""}`;
+      const line = `${MARK[it.status ?? "pending"] ?? "[ ]"} ${i + 1}. ${plainDisplayText(it.text ?? "")}`;
       return it.status === "in_progress" ? c.ink(line) : c.faint(line);
     });
   }

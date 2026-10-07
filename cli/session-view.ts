@@ -8,7 +8,8 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import { unresolvedCalls } from "../src/recovery.js";
+import { errorMessage } from "../src/providers/errors.js";
+import { pendingUserShells, unresolvedCalls } from "../src/recovery.js";
 import {
   formatSetting,
   getSetting,
@@ -49,6 +50,7 @@ export function exitReview(ctx: TuiContext, state: ExitState): Component {
       const calls = unresolvedCalls(ctx.log.events).filter(
         (item) => !item.recovery && !item.result,
       );
+      const shells = [...pendingUserShells(ctx.log.events).values()];
       const body = [
         ...(state.failure
           ? [
@@ -72,10 +74,14 @@ export function exitReview(ctx: TuiContext, state: ExitState): Component {
           ? "Waiting for extensions and connections to release resources."
           : "Cancellation requested. Waiting for the current turn to finish.",
         "",
-        ...(calls.length
+        ...(calls.length || shells.length
           ? [
               "Calls without results",
               ...calls.map(({ call }) => `${call.name} · ${call.id}\n${JSON.stringify(call.args)}`),
+              ...shells.map(
+                (event) =>
+                  `User shell · ${event.payload.excludeFromContext ? "Local only" : "Included in next context"}\n${String(event.payload.command)}`,
+              ),
             ]
           : [
               state.phase === "stopping"
@@ -303,7 +309,7 @@ export class PendingInputsView implements Component {
         }
       }
     } catch (error) {
-      this.message = (error as Error).message;
+      this.message = errorMessage(error);
     }
     this.ctx.tui.requestRender();
   }
@@ -415,7 +421,7 @@ export class SessionSetupReview implements Component {
           this.error = "";
           this.edited.add(field.key);
         } catch (error) {
-          this.error = (error as Error).message;
+          this.error = errorMessage(error);
         }
       } else if (matchesKey(data, Key.ctrl("u"))) this.editing = "";
       else if (matchesKey(data, Key.backspace))
