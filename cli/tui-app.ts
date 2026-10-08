@@ -196,7 +196,7 @@ export type TuiApp = {
   command(text: string): Promise<void>;
   /** 当前文档的渲染行(带 ANSI),用于离线验证与预览。 */
   lines(width?: number): string[];
-  /** 请求检视器(Ctrl+R)。lines() 在打开时返回检视器的渲染行,便于离线验证。 */
+  /** 请求检视器(Ctrl+R)。检视器预览使用 inspector.lines();app.lines() 始终返回主屏文档。 */
   inspector: {
     open(): void;
     openEvents(): void;
