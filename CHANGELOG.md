@@ -5,6 +5,8 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-10-08
+
 ### Added
 
 - Expand `edit` replacement previews and `write` submitted content in the received inspector. Keep complete arguments and tool results adjacent, label success, error, unknown and missing results, and preserve recorded content and model input.
@@ -15,7 +17,6 @@ Design decisions behind each entry are recorded, with reasons and alternatives, 
 ### Changed
 
 - Show one compact identity per tool call in the received inspector. Label arguments, original output and model results by role; keep the selected call visible while paging. Preview argument fields when folded and preserve the complete JSON when expanded.
-
 
 - Group each received tool call with its arguments, original output and model result. Use thin dividers and explicit result states; preserve selection while evidence arrives and keep unmatched records visible.
 - Clarify that the session log keeps messages, tool results and context changes; not every interface action is saved. Keep approval reasons in the existing tool results without adding a separate approval history.
